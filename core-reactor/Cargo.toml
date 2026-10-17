@@ -25,6 +25,9 @@ fastcdc = "5"
 redb = "4"
 futures-util = "0.3"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+aes-gcm-siv = "0.12"
+hkdf = "0.13"
+zeroize = "1"
 
 [profile.release]
 opt-level = 3
@@ -46,6 +49,10 @@ path = "src/bin/bench.rs"
 [[bin]]
 name = "store-bench"
 path = "src/bin/store_bench.rs"
+
+[[bin]]
+name = "reactor-admin"
+path = "src/bin/reactor_admin.rs"
 
 [[bin]]
 name = "compress-bench"

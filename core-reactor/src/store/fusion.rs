@@ -323,14 +323,14 @@ impl Store {
         }
         let class = class_name(current[0].1.class);
         let enc = self.encoder(class);
-        let blob = self.encode_verified(&enc, &plain)?;
+        let super_id = sha256(&plain);
+        let blob = self.encode_sealed(&enc, &super_id, &plain)?;
         let fused = blob.len() as u64;
         let structural_ok = (fused as f64) <= current_sum as f64 * (1.0 - self.cfg.fuse_min_gain);
         let access_ok = c.access_linked && fused <= current_sum;
         if !(structural_ok || access_ok) {
             return Ok(FuseResult::Rejected { current: current_sum, fused });
         }
-        let super_id = sha256(&plain);
         res.add(super_id);
         res.created(super_id);
         let existing = self.object_rec(&super_id)?;
@@ -356,7 +356,7 @@ impl Store {
                         refcount: 0,
                         created_ms: ts,
                         class: class_code(class),
-                        flags: 0,
+                        flags: self.new_object_flags(),
                         members: ids.clone(),
                         lens: current.iter().map(|(l, _)| l.len).collect(),
                         pack: loc,
@@ -450,7 +450,7 @@ impl Store {
             if self.object_rec(m)?.is_some_and(|o| !o.quarantined() && o.plain_len == l.len as u64) {
                 continue; // an object with exactly this plaintext exists (e.g. awaiting GC)
             }
-            let blob = self.encode_verified(&enc, &plain[s..e])?;
+            let blob = self.encode_sealed(&enc, m, &plain[s..e])?;
             res.created(*m);
             let (loc, pin) = self.place_blob(m, &blob)?;
             pins.absorb(pin);
@@ -476,7 +476,7 @@ impl Store {
                             refcount: 0,
                             created_ms: ts,
                             class,
-                            flags: 0,
+                            flags: self.new_object_flags(),
                             members: vec![*m],
                             lens: vec![*plain_len as u32],
                             pack: *loc,

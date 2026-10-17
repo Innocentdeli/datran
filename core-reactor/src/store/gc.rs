@@ -287,6 +287,7 @@ impl Store {
                 }
                 t.meta_add(meta::PHYSICAL, -(rec.stored_len as i64))?;
                 t.meta_add(meta::OBJECTS, -1)?;
+                t.meta_add(&meta::enc_objects(rec.key_slot()), -1)?;
                 if rec.is_super() {
                     t.meta_add(meta::SUPER, -1)?;
                 }

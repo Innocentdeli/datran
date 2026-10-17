@@ -36,6 +36,7 @@ fn store_error(e: StoreError) -> Response {
         )
             .into_response(),
         StoreError::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
+        StoreError::KeyUnavailable(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
         StoreError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof || e.kind() == std::io::ErrorKind::ConnectionAborted => {
             error(StatusCode::BAD_REQUEST, format!("upload aborted: {}", e))
         }
@@ -49,6 +50,7 @@ pub fn routes() -> Router<AppState> {
         .route("/store/files", put(put_file).layer(DefaultBodyLimit::disable()))
         .route("/store/files/:file_id", get(get_file).head(get_file).delete(delete_file))
         .route("/store/stats", get(stats))
+        .route("/store/rekey", axum::routing::post(rekey))
 }
 
 fn disabled() -> Response {
@@ -244,6 +246,24 @@ async fn stats(State(st): State<AppState>) -> Response {
             }
             Json(v).into_response()
         }
+        Ok(Err(e)) => store_error(e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `POST /store/rekey`: online re-encryption (plaintext → active key, old key ids → active key).
+/// Runs to completion; one run at a time (409 while another is running).
+async fn rekey(State(st): State<AppState>) -> Response {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(store) = st.store.clone() else { return disabled() };
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return error(StatusCode::CONFLICT, "a rekey is already running");
+    }
+    let grace = store.cfg.gc_grace.as_millis() as u64;
+    let r = tokio::task::spawn_blocking(move || store.rekey(grace, &mut |_| {})).await;
+    RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    match r {
+        Ok(Ok(rep)) => Json(rep).into_response(),
         Ok(Err(e)) => store_error(e),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }

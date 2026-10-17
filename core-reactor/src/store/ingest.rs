@@ -77,6 +77,8 @@ pub(crate) struct PendingObject {
     pub in_pack: bool,
     /// Pack location once appended (early flush or by the group-commit leader).
     pub pack: Option<PackLoc>,
+    /// Index flags of the new row (key slot of the active key the object was sealed under).
+    pub flags: u8,
 }
 
 struct Unsynced {
@@ -201,7 +203,7 @@ impl<'a> Staging<'a> {
                 Ok(())
             }
             Begin::New => {
-                let blob = self.store.encode_verified(enc, data)?;
+                let blob = self.store.encode_sealed(enc, &id, data)?;
                 self.finish_chunk(id, len, class_code(enc.class), blob)
             }
         }
@@ -241,7 +243,8 @@ impl<'a> Staging<'a> {
         self.new_bytes += plain_len;
         if self.store.pack_eligible(blob.len()) {
             let n = blob.len() as u64;
-            self.pending_objects.insert(id, PendingObject { stored_len: n, plain_len, class, members, in_pack: true, pack: None });
+            let flags = self.store.new_object_flags();
+            self.pending_objects.insert(id, PendingObject { stored_len: n, plain_len, class, members, in_pack: true, pack: None, flags });
             self.packed.push((id, blob));
             self.packed_bytes += n;
             self.stored_bytes += n;
@@ -265,7 +268,8 @@ impl<'a> Staging<'a> {
         }
         self.unsynced_bytes += blob.len() as u64;
         self.stored_bytes += blob.len() as u64;
-        self.pending_objects.insert(id, PendingObject { stored_len: blob.len() as u64, plain_len, class, members, in_pack: false, pack: None });
+        let flags = self.store.new_object_flags();
+        self.pending_objects.insert(id, PendingObject { stored_len: blob.len() as u64, plain_len, class, members, in_pack: false, pack: None, flags });
         if self.unsynced.len() >= SYNC_BATCH_OBJECTS || self.unsynced_bytes >= SYNC_BATCH_BYTES {
             self.flush()?;
         }
@@ -364,10 +368,10 @@ impl<'a> Staging<'a> {
         if cache.as_ref().map(|c| c.0) != Some(obj) {
             // staged objects are not indexed yet: held in memory, or early-flushed into a pack
             let plain = if let Some((_, blob)) = self.packed.iter().find(|(i, _)| *i == obj) {
-                self.store.decode_blob(blob)?
+                self.store.decode_blob(&self.store.open_stored(&obj, blob)?)?
             } else if let Some((loc, len)) = self.pending_objects.get(&obj).and_then(|p| p.pack.map(|l| (l, p.stored_len))) {
                 let raw = self.store.read_packed(&obj, loc, len).map_err(StoreError::Corrupt)?;
-                self.store.decode_blob(&raw)?
+                self.store.decode_blob(&self.store.open_stored(&obj, &raw)?)?
             } else {
                 self.store.read_object_plain(&obj)?
             };
@@ -484,7 +488,7 @@ pub(crate) fn apply_commit(t: &mut super::index::Tables<'_>, job: &super::group:
                         refcount: 0,
                         created_ms: ts,
                         class: p.class,
-                        flags: 0,
+                        flags: p.flags,
                         members: p.members.iter().map(|m| m.0).collect(),
                         lens: p.members.iter().map(|m| m.1).collect(),
                         pack: p.pack,
@@ -608,7 +612,7 @@ impl Store {
         let path = self.object_path(id);
         let _g = super::lock(&self.place_locks[id[0] as usize % self.place_locks.len()]);
         if let Ok(existing) = std::fs::read(&path) {
-            if self.decode_object(id, &existing).is_ok() {
+            if self.decode_stored(id, &existing).is_ok() {
                 let _ = std::fs::remove_file(tmp);
                 return Ok(existing.len() as u64);
             }
@@ -735,7 +739,10 @@ impl Store {
                         let class = class_code(enc.class);
                         let (engine, enc) = (self.engine.clone(), enc.clone());
                         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
-                            let r = std::panic::catch_unwind(AssertUnwindSafe(|| super::encode_verified_with(&engine, &enc, &data)))
+                            // compress, verify and seal on the pool (encryption scales with it)
+                            let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                super::encode_verified_with(&engine, &enc, &data).map(|b| engine.cfg.keys.seal(crate::crypto::Kind::Object, &id, b))
+                            }))
                                 .unwrap_or_else(|_| Err(StoreError::Corrupt("compression worker panicked".into())));
                             let _ = rtx.send(r);
                         });
@@ -813,9 +820,9 @@ impl Import<'_> {
         self.missing.is_empty()
     }
 
-    /// Adds a raw stored object fetched from a peer (`GET /cluster/objects/:id`). It is verified
-    /// (decode, plaintext SHA-256 = `object_id`, every member's SHA-256 at its offset) and stored
-    /// as-is. `members` are the object's chunks in plaintext order. Returns how many missing
+    /// Adds an object fetched from a peer (`GET /cluster/objects/:id`, transport form = blob v2).
+    /// It is verified (decode, plaintext SHA-256 = `object_id`, every member's SHA-256 at its
+    /// offset) and stored as-is, sealed under this node's active key. `members` are the object's chunks in plaintext order. Returns how many missing
     /// chunks it satisfied (an object that satisfies none is not stored).
     pub fn add_object(&mut self, object_id: &Id, raw: &[u8], members: &[ChunkEntry]) -> Result<usize> {
         if raw.len() > OBJECT_MAX_PLAIN + 1024 {
@@ -847,10 +854,11 @@ impl Import<'_> {
         match existing {
             Some(o) if !o.quarantined() => {}
             _ => {
-                self.st.admit(raw.len() as u64)?;
+                let stored = store.seal_object(object_id, raw.to_vec());
+                self.st.admit(stored.len() as u64)?;
                 let class = class_code(classify::classify(&plain[..plain.len().min(64 * 1024)], None));
                 let ids = members.iter().map(|m| (m.id, m.len)).collect();
-                self.st.stage_blob(*object_id, raw.to_vec(), plain.len() as u64, class, ids)?;
+                self.st.stage_blob(*object_id, stored, plain.len() as u64, class, ids)?;
                 self.st.new_chunks += useful.len() as u64;
             }
         }

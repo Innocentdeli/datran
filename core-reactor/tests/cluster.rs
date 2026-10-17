@@ -37,6 +37,10 @@ struct Opts {
     tls_ca: Option<std::path::PathBuf>,
     token: Option<String>,
     min_replicas: Option<usize>,
+    /// Encryption at rest: `(key id, master key)`.
+    key: Option<(&'static str, [u8; 32])>,
+    /// `REACTOR_PACK_THRESHOLD` override (0 = every object is its own file).
+    pack_threshold: Option<usize>,
 }
 
 struct Pending {
@@ -55,9 +59,15 @@ async fn start(p: Pending, peers: Vec<String>, o: Opts) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let mut ec = test_config(&dir.path().join("evo"), 1);
     ec.persist = false;
+    if let Some((id, k)) = o.key {
+        ec.keys = Arc::new(core_reactor::crypto::KeyRing::single(id, k));
+    }
     let engine = Arc::new(Engine::new(ec));
     let mut sc = StoreConfig::new(dir.path().join("store"));
     sc.max_bytes = o.max_bytes;
+    if let Some(t) = o.pack_threshold {
+        sc.pack_threshold = t;
+    }
     let store = Arc::new(Store::open(sc, engine.clone()).unwrap());
     let mut cc = ClusterConfig::new(dir.path()).unwrap();
     cc.peers = peers;
@@ -362,6 +372,57 @@ async fn corrupt_object_is_quarantined_and_repaired_from_peer() {
     wait_for("quarantine repair", || metric(b, "quarantine_repairs") == 1).await;
     assert!(b.store.quarantined().unwrap().is_empty());
     assert!(!b.store.object_meta(&oid).unwrap().unwrap().quarantined);
+    assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    assert!(b.store.verify_index(true).unwrap().ok());
+}
+
+/// Encryption at rest across nodes with DIFFERENT master keys: objects travel in transport form
+/// (blob v2, decrypted but compressed) and are re-sealed under the receiver's key; a tampered
+/// encrypted object fails its AEAD tag in scrub, is quarantined and repaired from the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encrypted_nodes_with_different_keys_replicate_and_repair() {
+    let ka = Opts { key: Some(("node-a-key", [0xa1; 32])), pack_threshold: Some(0), ..Default::default() };
+    let kb = Opts { key: Some(("node-b-key", [0xb2; 32])), pack_threshold: Some(0), ..Default::default() };
+    let nodes = cluster_of(2, &[ka, kb]).await;
+    let (a, b) = (&nodes[0], &nodes[1]);
+    let data = text(700_000, 21);
+    let fid = put_ok(a, &data).await;
+
+    // remote read on B (objects fetched from A, verified, served)
+    let (st, body, h) = get(b, &fid, Some("bytes=1000-200999")).await;
+    assert_eq!((st, h["x-reactor-remote"].to_str().unwrap()), (206, "1"));
+    assert_eq!(body, &data[1000..201000]);
+
+    // the wire form is a plain blob v2, never A's envelope
+    let oid = a.store.chunk_refs(&fid).unwrap().unwrap().1[0].object_id;
+    let wire = a.store.get_object_raw(&oid).unwrap().unwrap();
+    assert_eq!(wire[0], 0x10, "transport form is blob v2");
+    let on_disk = std::fs::read(a.store.object_storage(&oid).unwrap().unwrap().path).unwrap();
+    assert_eq!(core_reactor::crypto::sealed_key_id(&on_disk), Some("node-a-key"));
+
+    // replica pull: B stores everything under ITS key
+    assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap());
+    assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    let enc = &b.store.stats().unwrap()["encryption"];
+    let n_objects = b.store.stats().unwrap()["objects"].as_u64().unwrap();
+    assert_eq!(enc["objects_by_key"]["node-b-key"].as_u64(), Some(n_objects), "{}", enc);
+    assert_eq!(enc["plaintext_objects"], 0);
+    let bpath = b.store.object_storage(&oid).unwrap().unwrap().path;
+    assert_eq!(core_reactor::crypto::sealed_key_id(&std::fs::read(&bpath).unwrap()), Some("node-b-key"));
+    assert!(b.store.verify_index(true).unwrap().ok());
+    gossip_all(&[a, b]).await;
+
+    // tamper with B's encrypted object (file objects have no CRC: the AEAD tag catches it)
+    let mut raw = std::fs::read(&bpath).unwrap();
+    let mid = raw.len() / 2;
+    raw[mid] ^= 0x01;
+    std::fs::write(&bpath, &raw).unwrap();
+    let s = b.store.clone();
+    let rep = tokio::task::spawn_blocking(move || s.scrub_step(u64::MAX)).await.unwrap().unwrap();
+    assert_eq!(rep.corrupt, vec![id_hex(&oid)], "AEAD failure quarantines");
+    wait_for("quarantine repair from A", || metric(b, "quarantine_repairs") == 1).await;
+    assert!(b.store.quarantined().unwrap().is_empty());
+    assert_eq!(core_reactor::crypto::sealed_key_id(&std::fs::read(&bpath).unwrap()), Some("node-b-key"), "repaired copy is re-sealed under B's key");
     assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
     assert!(b.store.verify_index(true).unwrap().ok());
 }

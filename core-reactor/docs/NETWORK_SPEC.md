@@ -2,7 +2,7 @@
 
 Extends [EVOLUTION_SPEC.md](EVOLUTION_SPEC.md). That spec covers recipes, blob format v2 and gossip of recipes;
 this one covers the procedural codec, the chunked object store, chunk fusion, data gravity (demand-driven
-replication), access prediction and client SDKs.
+replication), access prediction, client SDKs and encryption at rest (§7).
 
 Principles: lossless always (every write verified by reading back), content-addressed integrity (SHA-256 everywhere),
 crash safety (write new → fsync → atomic index commit → GC old), bounded memory and disk, authenticated cluster
@@ -109,7 +109,8 @@ Larger objects keep the per-file layout. The stored bytes are the same blob-v2 o
 ```
 pack header (16 B):  magic "DTRPACK1" (8) | pack_id u64 LE
 record:              magic u32 LE = "REC1" | object_id [32] | len u32 LE | crc32 u32 LE | payload[len]
-                     crc32 = CRC-32/IEEE over object_id ‖ len (LE) ‖ payload; payload = blob-v2 object
+                     crc32 = CRC-32/IEEE over object_id ‖ len (LE) ‖ payload; payload = blob-v2 object,
+                     or its encryption envelope when a master key is configured (§7)
 ```
 
 Packs are append-only and self-describing (a pack can be scanned record by record without the index).
@@ -151,7 +152,8 @@ Packs are append-only and self-describing (a pack can be scanned record by recor
 | GET | `/store/files/:file_id` | full file or `Range: bytes=…` (single range, suffix ranges, 416 when unsatisfiable); streams the response |
 | HEAD | `/store/files/:file_id` | size, `Accept-Ranges` |
 | DELETE | `/store/files/:file_id` | unpin |
-| GET | `/store/stats` | logical/physical bytes, dedup ratio, objects, super-chunks, fusion gains, GC queue, scrub status, packs |
+| GET | `/store/stats` | logical/physical bytes, dedup ratio, objects, super-chunks, fusion gains, GC queue, scrub status, packs, encryption (§7) |
+| POST | `/store/rekey` | re-encrypt under the active key (§7); returns a rekey report |
 
 ---
 
@@ -230,6 +232,10 @@ Implementation notes (reactor `src/cluster/`, refinements of the above):
 - Caps: inventory/manifest 64 MiB, object 16 MiB + 64 KiB, chunk 16 MiB; client timeout 30 s (connect 5 s), no
   redirects. `REACTOR_TLS_CA` replaces the built-in roots for peer connections.
 - Extra env: `REACTOR_GRAVITY_DROP_BELOW`, `REACTOR_REMOTE_CACHE_BYTES` (default 256 MiB, decoded objects, LRU).
+- Encryption at rest (§7): `GET /cluster/objects/:id` returns the object's *transport form* — its blob v2,
+  decrypted and verified (AEAD + decode + SHA-256) but still compressed — never the local envelope. Receivers
+  verify it as before and re-seal it under their own active key (replica import, peer repair), so nodes may
+  use different master keys. Protect cluster traffic with `REACTOR_TLS_*` when it crosses untrusted networks.
 
 ---
 
@@ -262,3 +268,78 @@ Real version of "temporal precognition": predict downloads and have them ready b
   HTTP/1.1 over sockets for Windows and POSIX), **TypeScript** (`clients/typescript`, fetch-based).
 - Each client ships tests that run against a live reactor (start the release binary on an ephemeral port) covering
   compress/decompress, store put/get/range/delete and status, plus a README with examples.
+
+---
+
+## 7. Encryption at rest (reactor)
+
+Everything the reactor persists that contains user bytes is sealed with an AEAD: store objects (file layout and
+pack records) and zstd dictionaries (`dicts/`, trained on uploads). Not encrypted, and verified to hold no user
+content: `index.redb` (ids = SHA-256 hashes, lengths, counters, pack locations; file names are never sent to the
+reactor), `state.json` (recipes, scores, dictionary ids; samples are never persisted), `node_id`,
+`cluster-leases.json`. `quarantine/` keeps the stored (sealed) bytes of corrupt objects.
+
+**Keys** (environment, read at startup):
+| Variable | Meaning |
+| :--- | :--- |
+| `REACTOR_MASTER_KEY` | one 32-byte master key: 64 hex digits or base64 (standard / URL-safe, padding optional); key id = `REACTOR_ACTIVE_KEY_ID` or `default` |
+| `REACTOR_MASTER_KEY_FILE` | file holding such a key, or `id:key` entries (comma / newline separated) |
+| `REACTOR_MASTER_KEYS` | `id1:key1,id2:key2` for rotation; ids are 1–32 chars of `[A-Za-z0-9._-]` |
+| `REACTOR_ACTIVE_KEY_ID` | key id for new writes (required when several keys are configured) |
+| `REACTOR_REQUIRE_ENCRYPTION` | `true` → refuse to start without a key |
+
+No key configured → the reactor runs unencrypted (development) and logs a prominent warning. A malformed key,
+duplicate id, unknown active id or ambiguous key set refuses to start (exit 2). Reads work with any configured
+key; a sealed item whose key id is not configured is an error (`503` on HTTP, `KeyUnavailable` in the library,
+counted as `unverifiable` by scrub, listed in `encryption.missing_key_ids`) — never treated as plaintext and
+never quarantined. Legacy plaintext items (written before a key was configured) stay readable.
+
+**Algorithm**: AES-256-GCM-SIV (RFC 8452, nonce-misuse resistant; RustCrypto, pure Rust with AES-NI / CLMUL
+autodetection). Per-item key = `HKDF-SHA256(ikm = master key, salt = item id, info = "datran-obj-v1")`
+(`"datran-dict-v1"` for dictionaries, salt = dictionary id); random 96-bit nonce per seal.
+
+```
+envelope: magic "DTE1" (4) | kind u8 (1 object, 2 dictionary) | key_id_len u8 | key_id | nonce [12] | ciphertext | tag [16]
+AAD     = magic ‖ kind ‖ key_id_len ‖ key_id ‖ item id [32]
+plaintext of an object envelope = the blob-v2 object (compressed); of a dictionary envelope = the dictionary
+```
+
+The AAD binds format version, kind, key id and item id: an envelope copied to another object id, relabelled with
+another key id or tampered with fails its tag. Blob v2 starts with `0x10`, never `D`, so plaintext and sealed items
+are told apart without a flag. Envelope overhead: 34 bytes + key id length per object.
+
+**Integrity is unchanged**: ids are SHA-256 of the plaintext; every read decrypts (tag check), decodes (CRC) and
+verifies chunk / object hashes as before; pack records keep their CRC over the sealed payload. Scrub verifies the
+AEAD tag and the plaintext hash; a tag failure quarantines the object and data gravity repairs it from a peer.
+A file object's length may differ from its index row after a crash between "rename rewritten file" and "index
+commit": scrub accepts it if the content verifies and startup adopts the file's length and key.
+
+**Index bookkeeping**: `objects.flags` bits 2–7 hold the *key slot* the stored bytes are sealed under (0 =
+plaintext, which every pre-encryption row decodes as); `meta` maps `key_slot:<key id> → slot` (1–63, allocated
+when a key id is first used as active) and keeps transactional counters `enc_objects:<slot>` (initialised by one
+index scan on the first open after upgrade, maintained by insert / GC / rewrite, checked by `verify_index`).
+`/store/stats` → `encryption: {enabled, algorithm, active_key_id, configured_key_ids, objects_by_key,
+plaintext_objects, missing_key_ids, dictionaries: {by_key, plaintext}}`.
+
+**Writes**: chunks are compressed, verified and sealed on the compression pool (encryption scales with
+`REACTOR_COMPRESS_THREADS`); fusion, unfusion, repair and replica import seal under the active key.
+
+**Cluster** (§4): objects travel in transport form (blob v2, decrypted but compressed) and are re-sealed by the
+receiver, so every node can have its own master key and key rotation is per node. Use TLS between nodes.
+
+**Migration and key rotation**: `reactor-admin rekey` (offline; the reactor must be stopped because the index is
+opened exclusively) or `POST /store/rekey` (online). Both walk the index (key slot ≠ active slot → candidate),
+read + open + verify each object, seal it under the active key and install the new copy (new pack record or
+atomically replaced file, then one index transaction that repoints the row only if the object did not change
+meanwhile). Crash-safe at every step and resumable — rerun to continue; already-converted objects cost one index
+row read. Afterwards the active pack is sealed and every pack with dead records (the superseded plaintext /
+old-key copies) is compacted, and dictionary files are rewrapped. Progress is printed (`reactor-admin`) and the
+report lists `encrypted`, `rewrapped`, `skipped`, `failed`, `remaining`. Rotation: add the new key to
+`REACTOR_MASTER_KEYS`, make it active, restart, rekey, then remove the old key once `remaining` is 0
+(`reactor-admin status` prints the encryption stats, `reactor-admin verify` runs a deep fsck).
+
+**Measured overhead** (store-bench, 1 GiB generated mixed data as one upload, 14 threads, 3 runs each, Windows):
+ingest plain 139 / 254 / 162 MiB/s vs encrypted 142 / 193 / 211 MiB/s; verified read-back plain 293 / 300 / 387
+MiB/s vs encrypted 373 / 337 / 303 MiB/s — run-to-run noise exceeds the difference. Stored bytes +0.11 %
+(455.83 → 456.32 MiB for 13 154 objects). Single-core AEAD incl. key derivation and copies (64 KiB objects):
+seal ≈ 530 MiB/s, open ≈ 1.5 GiB/s.

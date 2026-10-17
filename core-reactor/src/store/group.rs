@@ -89,6 +89,7 @@ fn dup_err(e: &StoreError) -> StoreError {
         StoreError::Io(e) => StoreError::Io(std::io::Error::new(e.kind(), e.to_string())),
         StoreError::Db(m) => StoreError::Db(m.clone()),
         StoreError::Injected(p) => StoreError::Injected(p),
+        StoreError::KeyUnavailable(m) => StoreError::KeyUnavailable(m.clone()),
     }
 }
 

@@ -59,7 +59,17 @@ async fn main() {
         println!("[reactor] REACTOR_PEERS set but REACTOR_CLUSTER_TOKEN missing: gossip disabled");
     }
 
-    let evo_cfg = EvoConfig::from_env();
+    // Encryption at rest (NETWORK_SPEC §7): bad key configuration or REACTOR_REQUIRE_ENCRYPTION
+    // without a key refuses to start; no key at all runs unencrypted with a loud warning.
+    let keys = match core_reactor::crypto::keyring_for_startup() {
+        Ok(k) => Arc::new(k),
+        Err(e) => {
+            eprintln!("[reactor] {}", e);
+            std::process::exit(2);
+        }
+    };
+    let mut evo_cfg = EvoConfig::from_env();
+    evo_cfg.keys = keys.clone();
     let engine = Arc::new(tokio::task::spawn_blocking(move || Engine::new(evo_cfg)).await.expect("engine init"));
     let gossip = Arc::new(Gossip::new(gossip_cfg));
     let store_enabled = std::env::var("REACTOR_STORE")
@@ -117,9 +127,13 @@ async fn main() {
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind TCP listener");
     println!(
-        "[reactor] Datran core reactor listening on {}://{} (evolution {}, state dir {}, gossip {}, peers {}, store {}, gravity {})",
+        "[reactor] Datran core reactor listening on {}://{} (encryption {}, evolution {}, state dir {}, gossip {}, peers {}, store {}, gravity {})",
         if tls.is_some() { "https" } else { "http" },
         addr,
+        match keys.active_id() {
+            Some(id) => format!("on, active key {}", id),
+            None => "OFF".into(),
+        },
         if engine.cfg.enabled { "on" } else { "frozen" },
         engine.cfg.state_dir.display(),
         if gossip.enabled() { "on" } else { "off" },

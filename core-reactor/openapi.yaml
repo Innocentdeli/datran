@@ -351,6 +351,26 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/StoreDisabled" }
 
+  /store/rekey:
+    post:
+      tags: [store]
+      operationId: storeRekey
+      summary: Re-encrypt the store under the active key (online)
+      description: |
+        Seals plaintext objects and rewraps objects under older key ids with the active key, compacts
+        packs holding the superseded copies and rewraps dictionaries (NETWORK_SPEC §7). Crash-safe and
+        idempotent; runs to completion before responding. Offline equivalent: `reactor-admin rekey`.
+      responses:
+        "200":
+          description: Report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreRekeyReport" }
+        "400": { description: No active master key configured. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: A rekey is already running. }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+
   /cluster/status:
     get:
       tags: [cluster]
@@ -891,6 +911,7 @@ components:
         last_step_ms: { type: integer, format: int64 }
         last_pass_ms: { type: integer, format: int64 }
         quarantined: { type: integer, format: int64 }
+        unverifiable: { type: integer, format: int64, description: "Objects scrub could not check (encryption key or dictionary not configured here); never quarantined." }
     StoreStats:
       type: object
       description: Store metrics (NETWORK_SPEC §2–§3). Clients should tolerate fields added later.
@@ -931,6 +952,45 @@ components:
           type: object
           additionalProperties: true
           description: Pack-file stats (in development; shape not final - clients should treat it as opaque).
+        encryption: { $ref: "#/components/schemas/StoreEncryptionStats" }
+    StoreEncryptionStats:
+      type: object
+      description: |
+        Encryption at rest (NETWORK_SPEC §7). Object counts come from transactional per-key counters in
+        the index (no disk reads). Objects not under `active_key_id` (plaintext or an older key) are
+        rewritten by `POST /store/rekey` or `reactor-admin rekey`.
+      required: [enabled, active_key_id, objects_by_key, plaintext_objects]
+      properties:
+        enabled: { type: boolean, description: A master key is configured; new objects and dictionaries are sealed. }
+        algorithm: { type: [string, "null"], description: "AEAD and key derivation in use (null when disabled)." }
+        active_key_id: { type: [string, "null"], description: "Key id used for new writes (`REACTOR_ACTIVE_KEY_ID`)." }
+        configured_key_ids: { type: array, items: { type: string }, description: Key ids this node can decrypt. }
+        objects_by_key:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+          description: Indexed objects per key id they are sealed under.
+        plaintext_objects: { type: integer, format: int64, description: Objects stored unencrypted (legacy / dev). }
+        missing_key_ids:
+          type: array
+          items: { type: string }
+          description: Key ids that still seal objects but are not configured (those objects are unreadable here).
+        dictionaries:
+          type: object
+          properties:
+            by_key: { type: object, additionalProperties: { type: integer, format: int64 } }
+            plaintext: { type: integer, format: int64 }
+    StoreRekeyReport:
+      type: object
+      required: [candidates, encrypted, rewrapped, skipped, failed, remaining, dicts_rewrapped, packs_compacted]
+      properties:
+        candidates: { type: integer, format: int64, description: Objects that needed work. }
+        encrypted: { type: integer, format: int64, description: Plaintext objects now sealed under the active key. }
+        rewrapped: { type: integer, format: int64, description: Objects moved from an older key id to the active one. }
+        skipped: { type: integer, format: int64, description: Objects that changed meanwhile (retried by the next run). }
+        failed: { type: array, items: { type: string }, description: "`object_id: reason` (missing key, corruption)." }
+        remaining: { type: integer, format: int64, description: Objects still not under the active key. }
+        dicts_rewrapped: { type: integer, format: int64 }
+        packs_compacted: { type: integer, format: int64, description: Packs rewritten to drop superseded copies. }
     StoreGroupCommitStats:
       type: object
       description: Group commit of concurrent uploads (one index transaction per batch).

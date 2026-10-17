@@ -23,6 +23,7 @@ pub(crate) struct ScrubState {
     last_step_ms: u64,
     last_pass_ms: u64,
     pass_progress: u64,
+    unverifiable: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -31,6 +32,8 @@ pub struct ScrubReport {
     pub bytes: u64,
     pub corrupt: Vec<String>,
     pub wrapped: bool,
+    /// Objects that could not be checked (encryption key or dictionary not configured here).
+    pub unverifiable: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -43,6 +46,7 @@ pub struct ScrubStatus {
     pub last_step_ms: u64,
     pub last_pass_ms: u64,
     pub quarantined: u64,
+    pub unverifiable: u64,
 }
 
 impl Store {
@@ -124,6 +128,7 @@ impl Store {
             last_step_ms: s.last_step_ms,
             last_pass_ms: s.last_pass_ms,
             quarantined,
+            unverifiable: s.unverifiable,
         }
     }
 
@@ -167,9 +172,17 @@ impl Store {
             }
             report.checked += 1;
             report.bytes += cur.stored_len;
-            if let Err(reason) = self.verify_object_data(id, &cur) {
-                self.quarantine(id, &reason);
-                report.corrupt.push(id_hex(id));
+            match self.verify_object_data(id, &cur) {
+                Ok(()) => {}
+                Err(super::VerifyFail::Corrupt(reason)) => {
+                    self.quarantine(id, &reason);
+                    report.corrupt.push(id_hex(id));
+                }
+                Err(super::VerifyFail::Unavailable(reason)) => {
+                    report.unverifiable += 1;
+                    super::lock(&self.scrub).unverifiable += 1;
+                    eprintln!("[store] scrub cannot verify object {}: {}", id_hex(id), reason);
+                }
             }
         }
         let mut s = super::lock(&self.scrub);
@@ -199,32 +212,61 @@ impl Store {
             return Err(StoreError::Invalid("repair plaintext length mismatch".into()));
         }
         let enc = self.encoder(super::class_name(rec.class));
-        let blob = self.encode_verified(&enc, plain)?;
-        self.install_repair(object_id, &blob)
+        let stored = self.encode_sealed(&enc, object_id, plain)?;
+        self.install_repair(object_id, &stored)
     }
 
-    /// Replaces an object with raw stored bytes from a peer (`GET /cluster/objects/:id`),
-    /// verified by decoding and hashing.
+    /// Replaces an object with the transport form (blob v2) from a peer
+    /// (`GET /cluster/objects/:id`), verified by decoding and hashing, then sealed under this
+    /// node's active key.
     pub fn repair_object_raw(&self, object_id: &Id, raw: &[u8]) -> Result<()> {
         let plain = self.decode_object(object_id, raw)?;
         let rec = self.object_rec(object_id)?.ok_or(StoreError::NotFound)?;
         if rec.plain_len != plain.len() as u64 {
             return Err(StoreError::Invalid("repair object length mismatch".into()));
         }
-        self.install_repair(object_id, raw)
+        let stored = self.seal_object(object_id, raw.to_vec());
+        self.install_repair(object_id, &stored)
     }
 
     /// Writes a fresh copy (a new pack record when small, else the object file), then one index
     /// transaction points the object at it and clears the quarantine flag. A previous pack record
     /// becomes dead bytes; a previous object file is deleted once the object lives in a pack.
-    fn install_repair(&self, id: &Id, blob: &[u8]) -> Result<()> {
+    fn install_repair(&self, id: &Id, stored: &[u8]) -> Result<()> {
+        self.install_stored(id, stored, None).map(|_| ())
+    }
+
+    /// Installs new stored bytes for an existing object (repair, rekey). With `expect =
+    /// Some((pack, stored_len))` the index row is only repointed if the object is still exactly
+    /// there and not quarantined (returns false otherwise; the new copy is then garbage).
+    pub(crate) fn install_stored(&self, id: &Id, stored: &[u8], expect: Option<(Option<index::PackLoc>, u64)>) -> Result<bool> {
         let mut res = Reservation::new(self);
         res.add(*id);
-        let (loc, _pin) = self.place_blob(id, blob)?;
-        let new_len = blob.len() as u64;
-        let (was_quarantined, drop_file) = with_write(self, |t| {
+        let file_in_place = !self.pack_eligible(stored.len());
+        let _place = file_in_place.then(|| super::lock(&self.place_locks[id[0] as usize % self.place_locks.len()]));
+        if let Some((pack, len)) = expect {
+            match self.object_rec(id)? {
+                Some(r) if r.pack == pack && r.stored_len == len && !r.quarantined() => {}
+                _ => return Ok(false),
+            }
+        }
+        let (loc, _pin) = self.place_blob(id, stored)?;
+        self.fail("install.after_place")?;
+        let new_len = stored.len() as u64;
+        let outcome = with_write(self, |t| {
             let mut rec = t.get_obj(id)?.ok_or(StoreError::NotFound)?;
+            if let Some((pack, len)) = expect {
+                if rec.pack != pack || rec.stored_len != len || rec.quarantined() {
+                    return Ok(None);
+                }
+            }
             let old = rec.stored_len;
+            let slot = self.slot_of(stored);
+            if slot != rec.key_slot() {
+                t.meta_add(&meta::enc_objects(rec.key_slot()), -1)?;
+                t.meta_add(&meta::enc_objects(slot), 1)?;
+                rec.set_key_slot(slot);
+            }
             let q = rec.quarantined();
             if let Some(l) = rec.pack {
                 t.pack_unlink(l, old)?;
@@ -245,8 +287,9 @@ impl Store {
                 t.quarantine.remove(id)?;
                 t.meta_add(meta::QUARANTINED, -1)?;
             }
-            Ok((q, drop_file))
+            Ok(Some((q, drop_file)))
         })?;
+        let Some((was_quarantined, drop_file)) = outcome else { return Ok(false) };
         if drop_file {
             let _ = std::fs::remove_file(self.object_path(id));
         }
@@ -254,6 +297,6 @@ impl Store {
             let _ = std::fs::remove_file(self.quarantine_path(id));
             eprintln!("[store] repaired object {}", id_hex(id));
         }
-        Ok(())
+        Ok(true)
     }
 }

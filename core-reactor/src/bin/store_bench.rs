@@ -10,7 +10,9 @@
 //! Single-large-upload mode (multi-core compression, `REACTOR_COMPRESS_THREADS`):
 //! `store-bench --gen-mib N` ingests N MiB of generated mixed text / JSON / binary / float data
 //! (generated in memory first, not timed) as ONE upload; `store-bench <folder> --concat` streams
-//! the whole folder as one upload. Both print ingest MiB/s and skip the read / fusion phases.
+//! the whole folder as one upload. Both print ingest MiB/s and verified read-back MiB/s and skip
+//! the fusion phase. `--encrypt` enables encryption at rest with a random key (or set
+//! `REACTOR_MASTER_KEY`) to measure its overhead.
 
 use core_reactor::evolution::{Engine, EvoConfig};
 use core_reactor::store::{PutOptions, Store, StoreConfig};
@@ -154,12 +156,24 @@ fn single_upload(store: &Store, reader: impl Read, label: &str) {
         mib(st["ingest"]["inflight_peak_bytes"].as_f64().unwrap_or(0.0))
     );
     println!("file_id {}", hex::encode(o.file_id));
+    let t = Instant::now();
+    let mut h = Sha256::new();
+    store
+        .read_range(&o.file_id, 0, o.size, &mut |b| {
+            h.update(b);
+            true
+        })
+        .expect("read");
+    let got: [u8; 32] = h.finalize().into();
+    assert_eq!(got, o.file_id, "read-back mismatch");
+    let s = t.elapsed().as_secs_f64();
+    println!("read back (verified): {:.3} s = {:.2} MiB/s", s, mib(o.size as f64) / s.max(1e-9));
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (mut folder, mut copies, mut keep, mut concurrency) = (None, 1usize, None, 1usize);
-    let (mut gen_mib, mut concat) = (None::<usize>, false);
+    let (mut gen_mib, mut concat, mut encrypt) = (None::<usize>, false, false);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -168,6 +182,7 @@ fn main() {
                 i += 1;
             }
             "--concat" => concat = true,
+            "--encrypt" => encrypt = true,
             "--concurrency" | "-j" => {
                 concurrency = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 256);
                 i += 1;
@@ -188,6 +203,15 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     let mut ec = EvoConfig::new(root.join("evo"));
     ec.persist = false;
+    // encryption at rest: REACTOR_MASTER_KEY* from the environment, or `--encrypt` (random key)
+    let mut keys = core_reactor::crypto::KeyRing::from_env().expect("key configuration");
+    if encrypt && !keys.enabled() {
+        let mut k = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut k);
+        keys = core_reactor::crypto::KeyRing::single("bench", k);
+    }
+    println!("encryption at rest: {}", keys.active_id().map(|k| format!("on (key {:?}, {})", k, core_reactor::crypto::ALGORITHM)).unwrap_or_else(|| "off".into()));
+    ec.keys = Arc::new(keys);
     let engine = Arc::new(Engine::new(ec));
     let mut cfg = StoreConfig::from_env(&root);
     cfg.coaccess_min = 3.0;

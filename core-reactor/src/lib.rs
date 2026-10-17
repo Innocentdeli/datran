@@ -5,6 +5,7 @@
 pub mod classify;
 pub mod cluster;
 pub mod codec;
+pub mod crypto;
 pub mod dicts;
 pub mod evolution;
 pub mod gossip;

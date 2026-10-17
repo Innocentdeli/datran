@@ -37,10 +37,13 @@ pub mod index;
 pub mod ingest;
 pub mod pack;
 pub mod read;
+pub mod rekey;
 pub mod scrub;
 
 use crate::classify;
 use crate::codec::{self, Codec, DecodeError, DictId, HEADER_LEN};
+use crate::crypto::{CryptoError, KeyRing, Kind};
+use std::borrow::Cow;
 use crate::evolution::Engine;
 use crate::recipe::Recipe;
 use crate::state::now_ms;
@@ -58,6 +61,7 @@ pub use fusion::FusionReport;
 pub use gc::{DeleteOutcome, EvictionPolicy, GcReport, PinnedOriginPolicy};
 pub use ingest::{Import, PutOptions, PutOutcome};
 pub use pack::{CompactReport, ObjectStorage};
+pub use rekey::{RekeyProgress, RekeyReport};
 pub use scrub::{ScrubReport, ScrubStatus};
 
 /// SHA-256 id (file, chunk or object).
@@ -117,6 +121,9 @@ pub enum StoreError {
     Db(String),
     /// Test-only simulated crash at a named fail point.
     Injected(&'static str),
+    /// A stored item is encrypted under a key id this node is not configured with (a
+    /// configuration error: never quarantined, never read as plaintext).
+    KeyUnavailable(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -132,6 +139,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Io(e) => write!(f, "I/O error: {}", e),
             StoreError::Db(m) => write!(f, "index error: {}", m),
             StoreError::Injected(p) => write!(f, "injected failure at {}", p),
+            StoreError::KeyUnavailable(m) => write!(f, "{}", m),
         }
     }
 }
@@ -162,7 +170,48 @@ impl From<DecodeError> for StoreError {
     }
 }
 
+impl From<CryptoError> for StoreError {
+    fn from(e: CryptoError) -> Self {
+        match e {
+            CryptoError::MissingKey(_) => StoreError::KeyUnavailable(e.to_string()),
+            _ => StoreError::Corrupt(e.to_string()),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Why an object failed verification.
+#[derive(Debug)]
+pub(crate) enum VerifyFail {
+    /// Bad data: quarantine it.
+    Corrupt(String),
+    /// Cannot be checked here (key not configured, dictionary missing): leave it alone.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for VerifyFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerifyFail::Corrupt(m) | VerifyFail::Unavailable(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<String> for VerifyFail {
+    fn from(m: String) -> Self {
+        VerifyFail::Corrupt(m)
+    }
+}
+
+impl From<StoreError> for VerifyFail {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::KeyUnavailable(_) | StoreError::UnknownDict(_) => VerifyFail::Unavailable(e.to_string()),
+            e => VerifyFail::Corrupt(e.to_string()),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Config
@@ -454,6 +503,10 @@ pub struct Store {
     packs: pack::Packs,
     read_hook: RwLock<Option<ReadHook>>,
     stats: RuntimeStats,
+    /// Key id → index key slot (persisted in `meta` as `key_slot:<id>`).
+    key_slots: HashMap<String, u8>,
+    /// Slot of the active key (0 = encryption disabled, new objects are plaintext).
+    active_slot: u8,
 }
 
 impl Store {
@@ -472,7 +525,10 @@ impl Store {
             index::init(&tx)?;
             tx.commit()?;
         }
+        let (key_slots, active_slot) = init_key_slots(&db, engine.cfg.keys.active_id())?;
         let store = Store {
+            key_slots,
+            active_slot,
             access: fusion::AccessTracker::default(),
             cfg,
             engine,
@@ -512,6 +568,7 @@ impl Store {
         let tx = self.db.begin_read()?;
         let objects = tx.open_table(index::OBJECTS)?;
         let (mut orphans, mut temps) = (0u64, 0u64);
+        let mut mismatched: Vec<Id> = Vec::new();
         for shard in std::fs::read_dir(&self.objects_dir)? {
             let shard = shard?.path();
             if !shard.is_dir() {
@@ -529,18 +586,60 @@ impl Store {
                 let Some(id) = name.strip_suffix(".obj").and_then(parse_id) else { continue };
                 let stale = match objects.get(&id)? {
                     None => true,
-                    Some(g) => ObjectRec::decode(g.value())?.pack.is_some(),
+                    Some(g) => {
+                        let rec = ObjectRec::decode(g.value())?;
+                        if rec.pack.is_none() && !rec.quarantined() && std::fs::metadata(&p).map(|m| m.len()).ok() != Some(rec.stored_len) {
+                            mismatched.push(id);
+                        }
+                        rec.pack.is_some()
+                    }
                 };
                 if stale && std::fs::remove_file(&p).is_ok() {
                     orphans += 1;
                 }
             }
         }
+        drop(objects);
+        drop(tx);
+        for id in mismatched {
+            self.reconcile_file_object(&id)?;
+        }
         self.stats.startup_orphans.store(orphans, Ordering::Relaxed);
         self.stats.startup_temps.store(temps, Ordering::Relaxed);
         if orphans + temps > 0 {
             eprintln!("[store] startup sweep removed {} orphan objects and {} temp files", orphans, temps);
         }
+        Ok(())
+    }
+
+    /// A file object whose file length differs from its index row: a rewrite (rekey / repair)
+    /// renamed the new file into place but crashed before its index commit. If the file verifies
+    /// (AEAD + decode + hash) the row adopts its length and key slot; otherwise scrub quarantines it.
+    fn reconcile_file_object(&self, id: &Id) -> Result<()> {
+        let Ok(bytes) = std::fs::read(self.object_path(id)) else { return Ok(()) };
+        if self.decode_stored(id, &bytes).is_err() {
+            return Ok(());
+        }
+        let (len, slot) = (bytes.len() as u64, self.slot_of(&bytes));
+        with_write(self, |t| {
+            let Some(mut rec) = t.get_obj(id)? else { return Ok(()) };
+            if rec.pack.is_some() || rec.stored_len == len {
+                return Ok(());
+            }
+            let delta = len as i64 - rec.stored_len as i64;
+            t.meta_add(meta::PHYSICAL, delta)?;
+            if rec.refcount > 0 {
+                t.meta_add(meta::LIVE, delta)?;
+            }
+            if slot != rec.key_slot() {
+                t.meta_add(&meta::enc_objects(rec.key_slot()), -1)?;
+                t.meta_add(&meta::enc_objects(slot), 1)?;
+                rec.set_key_slot(slot);
+            }
+            rec.stored_len = len;
+            t.put_obj(id, &rec)
+        })?;
+        eprintln!("[store] startup: object {} adopted its rewritten file ({} bytes)", id_hex(id), len);
         Ok(())
     }
 
@@ -674,7 +773,48 @@ impl Store {
         decode_blob_with(&self.engine, blob)
     }
 
-    /// Decodes a raw stored object (e.g. fetched from a peer) and checks that its plaintext hashes
+    /// Master keys (shared with the engine's dictionary store).
+    pub fn keys(&self) -> &Arc<KeyRing> {
+        &self.engine.cfg.keys
+    }
+
+    /// Stored form of a blob-v2 object: an encryption envelope bound to `id` when a master key
+    /// is configured, else the blob itself.
+    pub(crate) fn seal_object(&self, id: &Id, blob: Vec<u8>) -> Vec<u8> {
+        self.keys().seal(Kind::Object, id, blob)
+    }
+
+    /// Index flags for a new object row (key slot of the active key).
+    pub(crate) fn new_object_flags(&self) -> u8 {
+        self.active_slot << index::KEY_SLOT_SHIFT
+    }
+
+    /// Key slot that stored bytes are sealed under (0 = plaintext).
+    pub(crate) fn slot_of(&self, stored: &[u8]) -> u8 {
+        match crate::crypto::sealed_key_id(stored) {
+            Some(kid) => self.key_slots.get(kid).copied().unwrap_or(self.active_slot),
+            None => 0,
+        }
+    }
+
+    /// Key id of a slot (`None` for 0 = plaintext / unknown).
+    pub(crate) fn slot_key_id(&self, slot: u8) -> Option<&str> {
+        self.key_slots.iter().find(|(_, s)| **s == slot).map(|(k, _)| k.as_str())
+    }
+
+    /// Blob-v2 (transport form) of an object's stored bytes: decrypts an envelope (AEAD tag
+    /// checked against `id` and the key id), passes a legacy plaintext blob through.
+    pub(crate) fn open_stored<'a>(&self, id: &Id, stored: &'a [u8]) -> Result<Cow<'a, [u8]>> {
+        Ok(self.keys().open(Kind::Object, id, stored)?)
+    }
+
+    /// Decrypts (if sealed), decodes and checks the plaintext hash of stored bytes.
+    pub(crate) fn decode_stored(&self, id: &Id, stored: &[u8]) -> Result<Vec<u8>> {
+        let blob = self.open_stored(id, stored)?;
+        self.decode_object(id, &blob)
+    }
+
+    /// Decodes a raw blob-v2 object (e.g. fetched from a peer) and checks that its plaintext hashes
     /// to `object_id`. Use for remote reads that are not stored locally.
     pub fn decode_object(&self, object_id: &Id, raw: &[u8]) -> Result<Vec<u8>> {
         let plain = self.decode_blob(raw)?;
@@ -718,9 +858,9 @@ impl Store {
                 return Err(StoreError::Corrupt(reason));
             }
         };
-        match self.decode_blob(&blob) {
+        match self.open_stored(id, &blob).and_then(|b| self.decode_blob(&b)) {
             Ok(p) => Ok(p),
-            Err(StoreError::UnknownDict(d)) => Err(StoreError::UnknownDict(d)),
+            Err(e @ (StoreError::UnknownDict(_) | StoreError::KeyUnavailable(_))) => Err(e),
             Err(e) => {
                 let reason = format!("object decode failed: {}", e);
                 self.quarantine(id, &reason);
@@ -746,9 +886,9 @@ impl Store {
     }
 
     /// Encodes with the encoder's recipe, verifies the round-trip; falls back to raw v2 when the
-    /// recipe fails, does not verify, or is not smaller.
-    fn encode_verified(&self, enc: &ObjEncoder, data: &[u8]) -> Result<Vec<u8>> {
-        encode_verified_with(&self.engine, enc, data)
+    /// recipe fails, does not verify, or is not smaller. Returns the blob sealed for object `id`.
+    fn encode_sealed(&self, enc: &ObjEncoder, id: &Id, data: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.seal_object(id, encode_verified_with(&self.engine, enc, data)?))
     }
 
     // ---- simple lookups ----------------------------------------------------------------------
@@ -895,8 +1035,10 @@ impl Store {
         Ok(tx.open_table(index::OBJECTS)?.get(object_id)?.is_some())
     }
 
-    /// The raw stored object bytes (blob v2), verified (decode + plaintext hash) before they are
-    /// returned so corruption never propagates to peers. Corrupt objects are quarantined.
+    /// The object in transport form: its blob v2 (decrypted when stored encrypted, still
+    /// compressed), verified (AEAD tag, decode + plaintext hash) before it is returned so
+    /// corruption never propagates to peers. Corrupt objects are quarantined. Peers re-encrypt
+    /// under their own key on import, so nodes may use different master keys.
     pub fn get_object_raw(&self, object_id: &Id) -> Result<Option<Vec<u8>>> {
         let mut res = Reservation::new(self);
         res.add(*object_id);
@@ -911,9 +1053,10 @@ impl Store {
                 return Err(StoreError::Corrupt(reason));
             }
         };
-        match self.decode_object(object_id, &raw) {
-            Ok(_) => Ok(Some(raw)),
-            Err(StoreError::UnknownDict(d)) => Err(StoreError::UnknownDict(d)),
+        let opened = self.open_stored(object_id, &raw).map(|b| b.into_owned());
+        match opened.and_then(|blob| self.decode_object(object_id, &blob).map(|_| blob)) {
+            Ok(blob) => Ok(Some(blob)),
+            Err(e @ (StoreError::UnknownDict(_) | StoreError::KeyUnavailable(_))) => Err(e),
             Err(e) => {
                 self.quarantine(object_id, &e.to_string());
                 Err(e)
@@ -1063,7 +1206,48 @@ impl Store {
             },
             "scrub": self.scrub_status(quarantined),
             "packs": self.packs_stats(&m)?,
+            "encryption": self.encryption_stats(&m),
         }))
+    }
+
+    /// `encryption` sub-object of `/store/stats`: object counts per key id come from the
+    /// transactional per-slot counters (no disk reads); dictionaries are few and read directly.
+    pub fn encryption_stats(&self, m: &HashMap<String, u64>) -> serde_json::Value {
+        let keys = self.keys();
+        let mut by_key = serde_json::Map::new();
+        let mut missing: Vec<String> = Vec::new();
+        for (k, n) in m {
+            let Some(slot) = k.strip_prefix(meta::ENC_OBJECTS_PREFIX).and_then(|s| s.parse::<u8>().ok()) else { continue };
+            if slot == 0 || *n == 0 {
+                continue;
+            }
+            let name = self.slot_key_id(slot).map(|s| s.to_string()).unwrap_or_else(|| format!("slot-{}", slot));
+            if !keys.has_key(&name) {
+                missing.push(name.clone());
+            }
+            by_key.insert(name, serde_json::json!(n));
+        }
+        missing.sort();
+        let (mut dict_plain, mut dict_by_key) = (0u64, serde_json::Map::new());
+        for d in self.engine.dicts.list_ids() {
+            match self.engine.dicts.file_key_id(&d) {
+                Some(k) => {
+                    let e = dict_by_key.entry(k).or_insert(serde_json::json!(0));
+                    *e = serde_json::json!(e.as_u64().unwrap_or(0) + 1);
+                }
+                None => dict_plain += 1,
+            }
+        }
+        serde_json::json!({
+            "enabled": keys.enabled(),
+            "algorithm": if keys.enabled() { Some(crate::crypto::ALGORITHM) } else { None },
+            "active_key_id": keys.active_id(),
+            "configured_key_ids": keys.key_ids(),
+            "objects_by_key": by_key,
+            "plaintext_objects": m.get(&meta::enc_objects(0)).copied().unwrap_or(0),
+            "missing_key_ids": missing,
+            "dictionaries": { "by_key": dict_by_key, "plaintext": dict_plain },
+        })
     }
 
     // ---- background --------------------------------------------------------------------------
@@ -1210,12 +1394,14 @@ impl Store {
         }
         let pack_rows: HashMap<u64, index::PackRec> = self.pack_rows()?.into_iter().collect();
         let mut pack_live: HashMap<u64, (u64, u64)> = HashMap::new();
+        let mut slot_counts: HashMap<u8, u64> = HashMap::new();
         let (mut objs, mut supers, mut physical, mut live, mut unique) = (0u64, 0u64, 0u64, 0u64, 0u64);
         for r in objects.range::<&[u8; 32]>(..)? {
             let (k, v) = r?;
             let oid = *k.value();
             let o = ObjectRec::decode(v.value())?;
             objs += 1;
+            *slot_counts.entry(o.key_slot()).or_insert(0) += 1;
             physical += o.stored_len;
             if o.is_super() {
                 supers += 1;
@@ -1285,6 +1471,13 @@ impl Store {
                 p(format!("counter {} = {}, recomputed {}", k, have, want));
             }
         }
+        for slot in 0..=index::MAX_KEY_SLOT {
+            let (k, want) = (meta::enc_objects(slot), slot_counts.get(&slot).copied().unwrap_or(0));
+            let have = mg(&k)?;
+            if have != want {
+                p(format!("counter {} = {}, recomputed {}", k, have, want));
+            }
+        }
         // orphan files
         for shard in std::fs::read_dir(&self.objects_dir)? {
             let shard = shard?.path();
@@ -1313,9 +1506,10 @@ impl Store {
 
     /// Verifies an object's stored bytes against `rec`; when that fails but the object was moved
     /// meanwhile (compaction / repair), verifies the current location instead.
-    fn verify_object_data(&self, id: &Id, rec: &ObjectRec) -> std::result::Result<(), String> {
+    fn verify_object_data(&self, id: &Id, rec: &ObjectRec) -> std::result::Result<(), VerifyFail> {
         match self.verify_object_at(id, rec) {
             Ok(()) => Ok(()),
+            Err(e @ VerifyFail::Unavailable(_)) => Err(e),
             Err(e) => match self.object_rec(id) {
                 Ok(Some(cur)) if cur.pack != rec.pack || cur.stored_len != rec.stored_len => self.verify_object_at(id, &cur),
                 _ => Err(e),
@@ -1323,21 +1517,69 @@ impl Store {
         }
     }
 
-    /// Decodes an object, checks its plaintext hash, length and every live member chunk.
-    fn verify_object_at(&self, id: &Id, rec: &ObjectRec) -> std::result::Result<(), String> {
+    /// Decrypts (AEAD tag bound to the id) and decodes an object, checks its plaintext hash and
+    /// length. A file object whose length differs from the index but whose content verifies is
+    /// fine (a rewrite renamed the file in place and its index update is pending or was lost in a
+    /// crash; startup reconciles the length).
+    fn verify_object_at(&self, id: &Id, rec: &ObjectRec) -> std::result::Result<(), VerifyFail> {
         let raw = match rec.pack {
             Some(l) => self.read_packed(id, l, rec.stored_len)?,
             None => std::fs::read(self.object_path(id)).map_err(|e| format!("unreadable: {}", e))?,
         };
-        if raw.len() as u64 != rec.stored_len {
-            return Err(format!("stored length {} != index {}", raw.len(), rec.stored_len));
+        if rec.pack.is_some() && raw.len() as u64 != rec.stored_len {
+            return Err(VerifyFail::Corrupt(format!("stored length {} != index {}", raw.len(), rec.stored_len)));
         }
-        let plain = self.decode_object(id, &raw).map_err(|e| e.to_string())?;
+        let plain = self.decode_stored(id, &raw)?;
         if plain.len() as u64 != rec.plain_len {
-            return Err(format!("plain length {} != index {}", plain.len(), rec.plain_len));
+            return Err(VerifyFail::Corrupt(format!("plain length {} != index {}", plain.len(), rec.plain_len)));
         }
         Ok(())
     }
+}
+
+/// Loads the key-slot table, allocates a slot for the active key id if it has none, and (once,
+/// on the first open after encryption support was added) initialises the per-slot object counters
+/// from the objects table.
+fn init_key_slots(db: &Database, active: Option<&str>) -> Result<(HashMap<String, u8>, u8)> {
+    let tx = db.begin_write()?;
+    let out = {
+        let mut t = Tables::open(&tx)?;
+        let mut slots: HashMap<String, u8> = HashMap::new();
+        for r in t.meta.range::<&str>(meta::KEY_SLOT_PREFIX..)? {
+            let (k, v) = r?;
+            let Some(id) = k.value().strip_prefix(meta::KEY_SLOT_PREFIX) else { break };
+            slots.insert(id.to_string(), v.value() as u8);
+        }
+        let active_slot = match active {
+            None => 0,
+            Some(id) => match slots.get(id) {
+                Some(s) => *s,
+                None => {
+                    let s = slots.values().copied().max().unwrap_or(0) + 1;
+                    if s > index::MAX_KEY_SLOT {
+                        return Err(StoreError::Invalid(format!("more than {} distinct key ids were used with this store", index::MAX_KEY_SLOT)));
+                    }
+                    t.meta.insert(meta::key_slot(id).as_str(), s as u64)?;
+                    slots.insert(id.to_string(), s);
+                    s
+                }
+            },
+        };
+        if t.meta_get(meta::ENC_COUNTERS)? == 0 {
+            let mut counts: HashMap<u8, u64> = HashMap::new();
+            for r in t.objects.range::<&[u8; 32]>(..)? {
+                let (_, v) = r?;
+                *counts.entry(ObjectRec::decode(v.value())?.key_slot()).or_insert(0) += 1;
+            }
+            for (slot, n) in counts {
+                t.meta.insert(meta::enc_objects(slot).as_str(), n)?;
+            }
+            t.meta.insert(meta::ENC_COUNTERS, 1)?;
+        }
+        (slots, active_slot)
+    };
+    tx.commit()?;
+    Ok(out)
 }
 
 /// [`Store::decode_blob`] without the store (usable from pool workers).

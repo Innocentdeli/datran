@@ -41,6 +41,9 @@ pub struct EvoConfig {
     pub mt_threshold: usize,
     /// zstd worker threads for those bodies (`REACTOR_COMPRESS_THREADS`, default every core).
     pub mt_workers: u32,
+    /// Master keys for encryption at rest (dictionaries here, objects in the store). Disabled by
+    /// default; the binaries load it with [`crate::crypto::keyring_for_startup`].
+    pub keys: Arc<crate::crypto::KeyRing>,
 }
 
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
@@ -61,6 +64,7 @@ impl EvoConfig {
             persist: true,
             mt_threshold: 8 << 20,
             mt_workers: crate::workers::configured_threads().min(256) as u32,
+            keys: Arc::new(crate::crypto::KeyRing::disabled()),
         }
     }
 
@@ -346,7 +350,7 @@ impl Engine {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x5eed)
         });
-        let dicts = Arc::new(DictStore::new(cfg.state_dir.join("dicts")));
+        let dicts = Arc::new(DictStore::with_keys(cfg.state_dir.join("dicts"), cfg.keys.clone()));
         let engine = Engine {
             dicts,
             inner: Mutex::new(Inner { classes: BTreeMap::new(), rng: ChaCha8Rng::seed_from_u64(seed) }),

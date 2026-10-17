@@ -50,7 +50,24 @@ pub mod meta {
     pub const PACK_COMPACTIONS: &str = "pack_compactions";
     pub const PACK_MOVED_OBJECTS: &str = "pack_moved_objects";
     pub const PACK_RECLAIMED: &str = "pack_reclaimed_bytes";
+    /// 1 once the per-key-slot object counters were initialised (one-time scan on upgrade).
+    pub const ENC_COUNTERS: &str = "enc_counters_v1";
+    /// Prefix of `key_slot:<key id> → slot` (1..=63).
+    pub const KEY_SLOT_PREFIX: &str = "key_slot:";
+    /// Prefix of `enc_objects:<slot> → number of indexed objects sealed under that slot`.
+    pub const ENC_OBJECTS_PREFIX: &str = "enc_objects:";
+
+    pub fn enc_objects(slot: u8) -> String {
+        format!("{}{}", ENC_OBJECTS_PREFIX, slot)
+    }
+    pub fn key_slot(key_id: &str) -> String {
+        format!("{}{}", KEY_SLOT_PREFIX, key_id)
+    }
 }
+
+/// `ObjectRec::flags` bits 2..7 hold the key slot.
+pub const KEY_SLOT_SHIFT: u8 = 2;
+pub const MAX_KEY_SLOT: u8 = 63;
 
 pub const LOG_ADD: u8 = 1;
 pub const LOG_REMOVE: u8 = 2;
@@ -209,6 +226,14 @@ impl ObjectRec {
     }
     pub fn quarantined(&self) -> bool {
         self.flags & FLAG_QUARANTINED != 0
+    }
+    /// Slot of the master key the stored bytes are sealed under (flag bits 2..7; 0 = plaintext,
+    /// which is what every row written before encryption existed decodes as).
+    pub fn key_slot(&self) -> u8 {
+        self.flags >> KEY_SLOT_SHIFT
+    }
+    pub fn set_key_slot(&mut self, slot: u8) {
+        self.flags = (self.flags & ((1 << KEY_SLOT_SHIFT) - 1)) | (slot << KEY_SLOT_SHIFT);
     }
     pub fn is_super(&self) -> bool {
         self.members.len() > 1
@@ -425,6 +450,7 @@ impl<'t> Tables<'t> {
         self.put_obj(id, rec)?;
         self.meta_add(meta::PHYSICAL, rec.stored_len as i64)?;
         self.meta_add(meta::OBJECTS, 1)?;
+        self.meta_add(&meta::enc_objects(rec.key_slot()), 1)?;
         if rec.is_super() {
             self.meta_add(meta::SUPER, 1)?;
         }

@@ -480,13 +480,25 @@ impl Store {
         n
     }
 
+    /// Seals the active pack: the next append starts a new one (rekey uses it so that the pack
+    /// holding superseded copies becomes compactable).
+    pub fn seal_active_pack(&self) {
+        let mut w = lock(&self.packs.writer);
+        w.active = None;
+    }
+
     /// Compacts sealed packs whose live ratio fell below `pack_compact_ratio` (and drops sealed
     /// packs without live records). Retired files are deleted after `retire_grace_ms`.
     pub fn compact_packs(&self, retire_grace_ms: u64) -> Result<CompactReport> {
+        self.compact_packs_with(self.cfg.pack_compact_ratio, retire_grace_ms)
+    }
+
+    /// [`Store::compact_packs`] with an explicit live ratio; `1.0` compacts every sealed pack that
+    /// has any dead bytes.
+    pub fn compact_packs_with(&self, ratio: f64, retire_grace_ms: u64) -> Result<CompactReport> {
         let _g = lock(&self.packs.compact_lock);
         let mut report = CompactReport::default();
         let active = self.active_pack();
-        let ratio = self.cfg.pack_compact_ratio;
         let targets: Vec<u64> = {
             let inflight = lock(&self.packs.inflight);
             self.pack_rows()?
