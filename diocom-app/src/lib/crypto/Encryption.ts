@@ -36,7 +36,7 @@ export function base64UrlToBytes(base64url: string): Uint8Array {
  * Generates a random 256-bit encryption key.
  */
 export async function generateKey(): Promise<CryptoKey> {
-    return await window.crypto.subtle.generateKey(
+    return await globalThis.crypto.subtle.generateKey(
         { name: ALGORITHM, length: KEY_LENGTH },
         true, // extractable
         ['encrypt', 'decrypt']
@@ -44,21 +44,10 @@ export async function generateKey(): Promise<CryptoKey> {
 }
 
 /**
- * Hybrid Post-Quantum Key Generation (Simulated)
- * Wraps AES generation with a placeholder for CRYSTALS-Kyber encapsulation.
- * Ensures God-Tier future-proofing.
- */
-export async function generateHybridKey(): Promise<{ key: CryptoKey, pqcEncapsulation: string }> {
-    const key = await generateKey();
-    const pqcEncapsulation = 'kyber512-placeholder-' + bytesToBase64Url(window.crypto.getRandomValues(new Uint8Array(32)));
-    return { key, pqcEncapsulation };
-}
-
-/**
  * Exports a key to a base64 string for URL sharing.
  */
 export async function exportKey(key: CryptoKey): Promise<string> {
-    const exported = await window.crypto.subtle.exportKey('raw', key);
+    const exported = await globalThis.crypto.subtle.exportKey('raw', key);
     return btoa(String.fromCharCode(...new Uint8Array(exported)))
         .replace(/\+/g, '-')
         .replace(/\//g, '_')
@@ -76,7 +65,7 @@ export async function importKey(keyStr: string): Promise<CryptoKey> {
         bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    return await window.crypto.subtle.importKey(
+    return await globalThis.crypto.subtle.importKey(
         'raw',
         bytes,
         { name: ALGORITHM },
@@ -89,7 +78,7 @@ export async function importKey(keyStr: string): Promise<CryptoKey> {
  * Shamir's Secret Sharing: Splits the key into N shares, requiring K to reconstruct.
  */
 export async function splitKey(key: CryptoKey, shares: number = 3, threshold: number = 2): Promise<string[]> {
-    const exported = await window.crypto.subtle.exportKey('raw', key);
+    const exported = await globalThis.crypto.subtle.exportKey('raw', key);
     const hex = Array.from(new Uint8Array(exported))
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
@@ -104,7 +93,7 @@ export async function combineKey(shares: string[]): Promise<CryptoKey> {
     const originalHex = secrets.hex2str(combinedHex);
     const bytes = new Uint8Array(originalHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
     
-    return await window.crypto.subtle.importKey(
+    return await globalThis.crypto.subtle.importKey(
         'raw',
         bytes,
         { name: ALGORITHM },
@@ -118,13 +107,13 @@ export async function combineKey(shares: string[]): Promise<CryptoKey> {
  * Returns { encryptedData: ArrayBuffer, iv: Uint8Array }
  */
 export async function encryptFile(file: File, key: CryptoKey): Promise<{ encryptedData: ArrayBuffer, iv: Uint8Array }> {
-    const iv = window.crypto.getRandomValues(new Uint8Array(12)); // GCM standard IV size
+    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12)); // GCM standard IV size
     const fileBuffer = await file.arrayBuffer();
 
-    const encryptedData = await window.crypto.subtle.encrypt(
-        { name: ALGORITHM, iv: iv as any },
+    const encryptedData = await globalThis.crypto.subtle.encrypt(
+        { name: ALGORITHM, iv: iv as Uint8Array<ArrayBuffer> },
         key,
-        fileBuffer as any
+        fileBuffer
     );
 
     return { encryptedData: encryptedData as ArrayBuffer, iv };
@@ -134,9 +123,9 @@ export async function encryptFile(file: File, key: CryptoKey): Promise<{ encrypt
  * Decrypts an ArrayBuffer.
  */
 export async function decryptBuffer(data: ArrayBuffer, key: CryptoKey, iv: Uint8Array): Promise<ArrayBuffer> {
-    return (await window.crypto.subtle.decrypt(
-        { name: ALGORITHM, iv: iv as any },
+    return (await globalThis.crypto.subtle.decrypt(
+        { name: ALGORITHM, iv: iv as Uint8Array<ArrayBuffer> },
         key,
-        data as any
+        data
     )) as ArrayBuffer;
 }

@@ -5,7 +5,7 @@ import { SovereignCredit } from '@/lib/SovereignCredit';
 
 export async function GET() {
     const session = await getServerSession(authOptions);
-    if (!session?.user) {
+    if (!session?.user?.id) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
@@ -16,7 +16,8 @@ export async function GET() {
             balance,
             currency: '$DTN'
         });
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+    } catch (error) {
+        console.error('[v1/user/credits]', error);
+        return NextResponse.json({ error: 'Failed to load balance' }, { status: 500 });
     }
 }

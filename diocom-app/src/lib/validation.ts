@@ -77,24 +77,45 @@ export function validateFileType(
     return { valid: true };
 }
 
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+const MAX_FILENAME_LENGTH = 200;
+
+/**
+ * Produce a display-safe filename. NOTE: this is metadata only; on-disk names are
+ * derived from random share ids, never from user input.
+ */
 export function sanitizeFilename(filename: string): string {
-    // Remove path traversal attempts
-    let sanitized = filename.replace(/\.\./g, '');
+    let name = typeof filename === 'string' ? filename : '';
 
-    // Remove special characters that could cause issues (including spaces)
-    sanitized = sanitized.replace(/[<>:"|?* ]/g, '_');
+    // Basename only: drop any directory components (both separators)
+    name = name.split(/[/\\]/).pop() || '';
 
-    // Remove leading/trailing spaces and dots
-    sanitized = sanitized.trim().replace(/^\.+/, '');
+    // Strip control characters (C0, DEL, C1) and Unicode bidi overrides
+    name = name.replace(/[\u0000-\u001f\u007f-\u009f\u202A-\u202E\u2066-\u2069]/g, '');
 
-    // Limit length
-    if (sanitized.length > 255) {
-        const ext = sanitized.split('.').pop() || '';
-        const nameWithoutExt = sanitized.substring(0, sanitized.length - ext.length - 1);
-        sanitized = nameWithoutExt.substring(0, 250 - ext.length) + '.' + ext;
+    // Collapse any dot runs (removes '..')
+    name = name.replace(/\.{2,}/g, '.');
+
+    // Characters invalid on Windows / awkward in shells and URLs
+    name = name.replace(/[<>:"|?*\s]/g, '_');
+
+    // No leading dots (hidden files) and no trailing dots/underscores-from-spaces
+    name = name.replace(/^[.]+/, '').replace(/[.]+$/, '');
+
+    // Reserved Windows device names (CON, NUL, COM1, ... with or without extension)
+    const stem = name.split('.')[0];
+    if (WINDOWS_RESERVED.test(stem)) {
+        name = `_${name}`;
     }
 
-    return sanitized || 'unnamed_file';
+    // Length cap, preserving a short extension
+    if (name.length > MAX_FILENAME_LENGTH) {
+        const dot = name.lastIndexOf('.');
+        const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
+        name = name.slice(0, MAX_FILENAME_LENGTH - ext.length) + ext;
+    }
+
+    return name || 'unnamed_file';
 }
 
 export function validateMimeType(

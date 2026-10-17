@@ -68,6 +68,9 @@ export default function LobbyPage() {
 
     for (const file of files) {
       const form = new FormData();
+      // Declared before the file so the server can stream it and knows it may be sampled.
+      form.append('is_encrypted', 'false');
+      form.append('password', '');
       form.append('file', file);
       await fetch('/api/ingest', { method: 'POST', body: form });
     }

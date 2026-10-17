@@ -1,314 +1,191 @@
 'use client';
 
 /**
- * Phase 33: Ephemeral Wormholes - WebRTC P2P Service
- * Enables direct browser-to-browser file transfers without server intermediary
+ * Manual-signaling WebRTC file transfer (copy/paste offer and answer).
+ *
+ * Because there is no signaling channel, ICE is non-trickle: the offer/answer are only handed
+ * out after ICE gathering completes, so the pasted SDP contains every candidate.
+ * The data channel is reliable and ordered (file bytes must not be dropped), and sending
+ * respects bufferedAmount so large files do not overflow the SCTP send buffer.
  */
 
-export interface PeerConnection {
-    id: string;
-    connection: RTCPeerConnection;
-    dataChannel?: RTCDataChannel;
-    status: 'connecting' | 'connected' | 'disconnected';
+import { describeWebRTCTransport, getWebRTCTransportInfo } from '@/lib/network/transportInfo';
+
+export interface FileMetadata {
+    type: 'file-metadata';
+    name: string;
+    size: number;
+    mimeType: string;
 }
 
-export class WebRTCService {
-    private static peers: Map<string, PeerConnection> = new Map();
-    private static onFileReceived?: (file: Blob, metadata: any) => void;
+export type ManualPeerState = RTCPeerConnectionState | 'new';
 
-    // STUN servers for NAT traversal
-    private static iceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-    ];
+export interface ManualPeerStatus {
+    connection: ManualPeerState;
+    channel: RTCDataChannelState | 'none';
+    /** Measured once the data channel is open (selected ICE candidate pair). */
+    transport: string | null;
+}
 
-    /**
-     * Initialize a new peer connection
-     */
-    static async createPeerConnection(peerId: string): Promise<RTCPeerConnection> {
-        const pc = new RTCPeerConnection({
-            iceServers: this.iceServers
-        });
+const ICE_SERVERS: RTCIceServer[] = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+];
+const CHUNK_SIZE = 64 * 1024;
+const MAX_BUFFERED = 8 * 1024 * 1024;
+const ICE_GATHER_TIMEOUT_MS = 10_000;
 
-        // Store connection
-        this.peers.set(peerId, {
-            id: peerId,
-            connection: pc,
-            status: 'connecting'
-        });
-
-        // ICE candidate handling
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                console.log('[WebRTC] ICE Candidate:', event.candidate);
-                // In production, send this to signaling server
-            }
+function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
+    if (pc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise(resolve => {
+        const done = () => {
+            clearTimeout(timer);
+            pc.removeEventListener('icegatheringstatechange', check);
+            resolve();
         };
+        const check = () => { if (pc.iceGatheringState === 'complete') done(); };
+        // Some networks never reach 'complete' (unreachable STUN); use what we have.
+        const timer = setTimeout(done, ICE_GATHER_TIMEOUT_MS);
+        pc.addEventListener('icegatheringstatechange', check);
+    });
+}
 
+export class ManualPeer {
+    private pc: RTCPeerConnection | null = null;
+    private channel: RTCDataChannel | null = null;
+    private status: ManualPeerStatus = { connection: 'new', channel: 'none', transport: null };
+    private incoming: { meta: FileMetadata; chunks: ArrayBuffer[]; received: number } | null = null;
+
+    constructor(
+        private readonly handlers: {
+            onStatus?: (s: ManualPeerStatus) => void;
+            onFileReceived?: (file: Blob, meta: FileMetadata) => void;
+            onReceiveProgress?: (percent: number) => void;
+        } = {},
+    ) {}
+
+    /** Initiator: returns the offer SDP (with all gathered candidates) as JSON. */
+    async createOffer(): Promise<string> {
+        const pc = this.reset();
+        this.attachChannel(pc.createDataChannel('fileTransfer', { ordered: true }));
+        await pc.setLocalDescription(await pc.createOffer());
+        await waitForIceGathering(pc);
+        return JSON.stringify(pc.localDescription);
+    }
+
+    /** Receiver: applies the pasted offer and returns the answer SDP as JSON. */
+    async createAnswer(offerJson: string): Promise<string> {
+        const offer = JSON.parse(offerJson) as RTCSessionDescriptionInit;
+        if (offer?.type !== 'offer') throw new Error('Pasted text is not an offer');
+        const pc = this.reset();
+        pc.ondatachannel = e => this.attachChannel(e.channel);
+        await pc.setRemoteDescription(offer);
+        await pc.setLocalDescription(await pc.createAnswer());
+        await waitForIceGathering(pc);
+        return JSON.stringify(pc.localDescription);
+    }
+
+    /** Initiator: applies the pasted answer. Connection state is reported via onStatus. */
+    async acceptAnswer(answerJson: string): Promise<void> {
+        const answer = JSON.parse(answerJson) as RTCSessionDescriptionInit;
+        if (answer?.type !== 'answer') throw new Error('Pasted text is not an answer');
+        if (!this.pc) throw new Error('Create an offer first');
+        await this.pc.setRemoteDescription(answer);
+    }
+
+    async sendFile(file: File, onProgress?: (percent: number) => void): Promise<void> {
+        const ch = this.channel;
+        if (!ch || ch.readyState !== 'open') throw new Error('Data channel is not open');
+        const meta: FileMetadata = { type: 'file-metadata', name: file.name, size: file.size, mimeType: file.type };
+        ch.send(JSON.stringify(meta));
+        ch.bufferedAmountLowThreshold = MAX_BUFFERED / 2;
+
+        let offset = 0;
+        while (offset < file.size) {
+            if (ch.readyState !== 'open') throw new Error('Data channel closed during transfer');
+            if (ch.bufferedAmount > MAX_BUFFERED) {
+                await new Promise<void>(resolve => {
+                    ch.addEventListener('bufferedamountlow', () => resolve(), { once: true });
+                    ch.addEventListener('close', () => resolve(), { once: true });
+                });
+                continue;
+            }
+            const buf = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
+            ch.send(buf);
+            offset += buf.byteLength;
+            onProgress?.(file.size ? Math.floor((offset / file.size) * 100) : 100);
+        }
+        if (file.size === 0) onProgress?.(100);
+    }
+
+    getStatus(): ManualPeerStatus {
+        return { ...this.status };
+    }
+
+    close() {
+        this.channel?.close();
+        this.pc?.close();
+        this.channel = null;
+        this.pc = null;
+        this.incoming = null;
+    }
+
+    private reset(): RTCPeerConnection {
+        this.close();
+        const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+        this.pc = pc;
+        this.setStatus({ connection: 'new', channel: 'none', transport: null });
         pc.onconnectionstatechange = () => {
-            const peer = this.peers.get(peerId);
-            if (peer) {
-                if (pc.connectionState === 'connected') {
-                    peer.status = 'connected';
-                    console.log(`[WebRTC] Connected to peer: ${peerId}`);
-                } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                    peer.status = 'disconnected';
-                    console.log(`[WebRTC] Disconnected from peer: ${peerId}`);
-                }
-            }
+            this.setStatus({ connection: pc.connectionState, ...(pc.connectionState === 'connected' ? {} : { transport: null }) });
         };
-
         return pc;
     }
 
-    /**
-     * Create data channel for file transfer
-     */
-    static createDataChannel(peerId: string, channelName: string = 'fileTransfer'): RTCDataChannel | null {
-        const peer = this.peers.get(peerId);
-        if (!peer) return null;
-
-        const dataChannel = peer.connection.createDataChannel(channelName, {
-            ordered: true,
-            maxRetransmits: 3
-        });
-
-        peer.dataChannel = dataChannel;
-
-        dataChannel.onopen = () => {
-            console.log(`[WebRTC] Data channel opened: ${channelName}`);
+    private attachChannel(ch: RTCDataChannel) {
+        this.channel = ch;
+        ch.binaryType = 'arraybuffer';
+        this.setStatus({ channel: ch.readyState });
+        ch.onopen = async () => {
+            const info = this.pc ? await getWebRTCTransportInfo(this.pc) : null;
+            this.setStatus({ channel: ch.readyState, transport: describeWebRTCTransport(info) });
         };
-
-        dataChannel.onclose = () => {
-            console.log(`[WebRTC] Data channel closed: ${channelName}`);
-        };
-
-        dataChannel.onerror = (error) => {
-            console.error('[WebRTC] Data channel error:', error);
-        };
-
-        dataChannel.onmessage = this.handleDataChannelMessage.bind(this);
-
-        return dataChannel;
+        ch.onclose = () => this.setStatus({ channel: 'closed', transport: null });
+        ch.onerror = e => console.error('[WebRTC] data channel error:', e);
+        ch.onmessage = e => this.onMessage(e);
     }
 
-    /**
-     * Send file to peer via WebRTC
-     */
-    static async sendFile(peerId: string, file: File, onProgress?: (percent: number) => void): Promise<void> {
-        const peer = this.peers.get(peerId);
-        if (!peer || !peer.dataChannel || peer.dataChannel.readyState !== 'open') {
-            throw new Error('Data channel not ready');
-        }
-
-        const chunkSize = 16384; // 16KB chunks
-        const totalChunks = Math.ceil(file.size / chunkSize);
-
-        // Send metadata first
-        const metadata = {
-            type: 'file-metadata',
-            name: file.name,
-            size: file.size,
-            mimeType: file.type,
-            totalChunks
-        };
-
-        peer.dataChannel.send(JSON.stringify(metadata));
-        console.log('[WebRTC] Sending file metadata:', metadata);
-
-        // Send file in chunks
-        const reader = new FileReader();
-        let offset = 0;
-        let chunkIndex = 0;
-
-        const sendNextChunk = () => {
-            const slice = file.slice(offset, offset + chunkSize);
-            reader.readAsArrayBuffer(slice);
-        };
-
-        reader.onload = (e) => {
-            if (e.target?.result && peer.dataChannel) {
-                peer.dataChannel.send(e.target.result as ArrayBuffer);
-
-                chunkIndex++;
-                offset += chunkSize;
-
-                if (onProgress) {
-                    onProgress(Math.floor((chunkIndex / totalChunks) * 100));
-                }
-
-                if (offset < file.size) {
-                    sendNextChunk();
-                } else {
-                    console.log('[WebRTC] File transfer complete');
-                    if (onProgress) onProgress(100);
-
-                    // Report to server for $DTN credits
-                    fetch('/api/swarm/report', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            peerId,
-                            fileId: file.name,
-                            bytesSent: file.size,
-                            status: 'complete'
-                        })
-                    }).then(res => res.json())
-                      .then(data => console.log('[WebRTC] Swarm report successful:', data))
-                      .catch(err => console.error('[WebRTC] Swarm report failed:', err));
-                }
-            }
-        };
-
-        sendNextChunk();
-    }
-
-    /**
-     * Handle incoming data channel messages
-     */
-    private static handleDataChannelMessage(event: MessageEvent) {
-        if (typeof event.data === 'string') {
-            // Metadata message
+    private onMessage(e: MessageEvent) {
+        if (typeof e.data === 'string') {
             try {
-                const metadata = JSON.parse(event.data);
-                if (metadata.type === 'file-metadata') {
-                    console.log('[WebRTC] Receiving file:', metadata);
-                    // Initialize file reception
-                    this.initFileReception(metadata);
+                const meta = JSON.parse(e.data) as FileMetadata;
+                if (meta?.type === 'file-metadata' && typeof meta.size === 'number' && meta.size >= 0) {
+                    this.incoming = { meta, chunks: [], received: 0 };
+                    this.handlers.onReceiveProgress?.(0);
+                    if (meta.size === 0) this.finishIncoming();
                 }
-            } catch (e) {
-                console.error('[WebRTC] Failed to parse metadata:', e);
+            } catch {
+                console.warn('[WebRTC] ignored malformed control message');
             }
-        } else {
-            // Binary chunk
-            this.receiveFileChunk(event.data);
+            return;
         }
+        const cur = this.incoming;
+        if (!cur || !(e.data instanceof ArrayBuffer)) return;
+        cur.chunks.push(e.data);
+        cur.received += e.data.byteLength;
+        this.handlers.onReceiveProgress?.(Math.floor((cur.received / cur.meta.size) * 100));
+        if (cur.received >= cur.meta.size) this.finishIncoming();
     }
 
-    /**
-     * Initialize file reception
-     */
-    private static currentFileReception: {
-        metadata: any;
-        chunks: ArrayBuffer[];
-        receivedChunks: number;
-    } | null = null;
-
-    private static initFileReception(metadata: any) {
-        this.currentFileReception = {
-            metadata,
-            chunks: [],
-            receivedChunks: 0
-        };
+    private finishIncoming() {
+        const cur = this.incoming;
+        if (!cur) return;
+        this.incoming = null;
+        const blob = new Blob(cur.chunks, { type: cur.meta.mimeType || 'application/octet-stream' });
+        this.handlers.onFileReceived?.(blob, cur.meta);
     }
 
-    /**
-     * Receive file chunk
-     */
-    private static receiveFileChunk(chunk: ArrayBuffer) {
-        if (!this.currentFileReception) return;
-
-        this.currentFileReception.chunks.push(chunk);
-        this.currentFileReception.receivedChunks++;
-
-        const progress = (this.currentFileReception.receivedChunks / this.currentFileReception.metadata.totalChunks) * 100;
-        console.log(`[WebRTC] Receiving: ${Math.floor(progress)}%`);
-
-        // Check if complete
-        if (this.currentFileReception.receivedChunks === this.currentFileReception.metadata.totalChunks) {
-            this.finalizeFileReception();
-        }
-    }
-
-    /**
-     * Finalize file reception
-     */
-    private static finalizeFileReception() {
-        if (!this.currentFileReception) return;
-
-        const blob = new Blob(this.currentFileReception.chunks, {
-            type: this.currentFileReception.metadata.mimeType
-        });
-
-        console.log('[WebRTC] File received:', this.currentFileReception.metadata.name);
-
-        if (this.onFileReceived) {
-            this.onFileReceived(blob, this.currentFileReception.metadata);
-        }
-
-        // Reset
-        this.currentFileReception = null;
-    }
-
-    /**
-     * Set file received callback
-     */
-    static setOnFileReceived(callback: (file: Blob, metadata: any) => void) {
-        this.onFileReceived = callback;
-    }
-
-    /**
-     * Create offer (initiator)
-     */
-    static async createOffer(peerId: string): Promise<RTCSessionDescriptionInit> {
-        const pc = await this.createPeerConnection(peerId);
-        this.createDataChannel(peerId);
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        return offer;
-    }
-
-    /**
-     * Create answer (receiver)
-     */
-    static async createAnswer(peerId: string, offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
-        const pc = await this.createPeerConnection(peerId);
-
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        // Listen for data channel
-        pc.ondatachannel = (event) => {
-            const peer = this.peers.get(peerId);
-            if (peer) {
-                peer.dataChannel = event.channel;
-                event.channel.onmessage = this.handleDataChannelMessage.bind(this);
-            }
-        };
-
-        return answer;
-    }
-
-    /**
-     * Set remote answer
-     */
-    static async setRemoteAnswer(peerId: string, answer: RTCSessionDescriptionInit) {
-        const peer = this.peers.get(peerId);
-        if (peer) {
-            await peer.connection.setRemoteDescription(new RTCSessionDescription(answer));
-        }
-    }
-
-    /**
-     * Close peer connection
-     */
-    static closePeer(peerId: string) {
-        const peer = this.peers.get(peerId);
-        if (peer) {
-            peer.dataChannel?.close();
-            peer.connection.close();
-            this.peers.delete(peerId);
-            console.log(`[WebRTC] Closed connection to: ${peerId}`);
-        }
-    }
-
-    /**
-     * Get all active peers
-     */
-    static getActivePeers(): PeerConnection[] {
-        return Array.from(this.peers.values());
+    private setStatus(patch: Partial<ManualPeerStatus>) {
+        this.status = { ...this.status, ...patch };
+        this.handlers.onStatus?.(this.getStatus());
     }
 }

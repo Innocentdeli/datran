@@ -20,8 +20,6 @@ export default function AuthStatus() {
     }
 
     if (session) {
-        const isGuest = session.user?.email === 'guest@diocom.io';
-
         return (
             <div className="flex items-center gap-4">
                 <Link href="/" className="text-[11px] font-bold text-gray-400 hover:text-white transition uppercase tracking-widest px-2">
@@ -58,18 +56,12 @@ export default function AuthStatus() {
                                 <User className="w-4 h-4 text-white/30" />
                             </div>
                         )}
-                        {isGuest && (
-                            <div className="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full border-2 border-[#050505] shadow-[0_0_8px_rgba(0,242,255,0.5)]" />
-                        )}
                     </div>
 
                     <div className="hidden lg:flex flex-col items-start leading-none">
                         <span className="text-xs font-bold text-white mb-0.5">
                             {session.user?.name?.split(' ')[0]}
                         </span>
-                        {isGuest && (
-                            <span className="text-[8px] font-black text-primary uppercase tracking-tighter">Guest Mode</span>
-                        )}
                     </div>
                 </div>
 

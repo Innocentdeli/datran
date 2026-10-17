@@ -2,19 +2,24 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { ZoomIn, ZoomOut, AlertCircle } from 'lucide-react';
+import { ZoomIn, ZoomOut, AlertCircle, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Button from '@/components/ui/Button';
+import type { PublicFile } from '@/db/files';
+import { useE2ESource } from './useE2ESource';
 
 interface ImageViewerProps {
     fileId: string;
-    metadata?: any;
+    metadata?: PublicFile;
 }
 
-export default function ImageViewer({ fileId }: ImageViewerProps) {
+export default function ImageViewer({ fileId, metadata }: ImageViewerProps) {
     const [zoom, setZoom] = useState(100);
     const [isLoaded, setIsLoaded] = useState(false);
-    const [hasError, setHasError] = useState(false);
+    const [loadFailed, setLoadFailed] = useState(false);
+    const [retryTrigger, setRetryTrigger] = useState(0);
+    const { src: imageSrc, error: decryptError, download } = useE2ESource(fileId, metadata, retryTrigger);
+    const hasError = loadFailed || !!decryptError;
 
     const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 200));
     const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 50));
@@ -23,9 +28,9 @@ export default function ImageViewer({ fileId }: ImageViewerProps) {
         <div className="relative flex flex-col items-center justify-center py-8">
             {/* Image Container */}
             <div className="relative max-w-full overflow-auto rounded-lg min-h-[300px] w-full flex items-center justify-center bg-black/20">
-                {!hasError ? (
+                {!hasError && imageSrc ? (
                     <motion.img
-                        src={`/api/stream?file=${encodeURIComponent(fileId)}`}
+                        src={imageSrc}
                         alt={decodeURIComponent(fileId)}
                         className={cn(
                             'max-w-full h-auto transition-opacity duration-300',
@@ -39,32 +44,33 @@ export default function ImageViewer({ fileId }: ImageViewerProps) {
                             console.log('[VIEWER] Image loaded successfully');
                             setIsLoaded(true);
                         }}
-                        onError={(e) => {
+                        onError={() => {
                             console.error('[VIEWER] Image load failed');
-                            setHasError(true);
+                            setLoadFailed(true);
                             setIsLoaded(true);
                         }}
                     />
-                ) : (
+                ) : hasError ? (
                     <div className="flex flex-col items-center justify-center p-12 text-center">
                         <AlertCircle className="w-16 h-16 text-red-500/50 mb-4" />
-                        <h3 className="text-xl font-bold text-red-500 mb-2">Neural Link Interrupted</h3>
+                        <h3 className="text-xl font-bold text-red-500 mb-2">Image could not be loaded</h3>
                         <p className="text-sm text-gray-400 max-w-xs">
-                            The visual data stream could not be established. The file may be corrupt or missing from the cluster.
+                            {decryptError || 'The visual data stream could not be established. Ensure your URL includes the #key=... fragment for Zero-Knowledge decryption.'}
                         </p>
                         <Button
                             variant="primary"
                             size="md"
                             className="mt-8"
                             onClick={() => {
-                                setHasError(false);
+                                setLoadFailed(false);
                                 setIsLoaded(false);
+                                setRetryTrigger((prev) => prev + 1);
                             }}
                         >
                             Retry Handshake
                         </Button>
                     </div>
-                )}
+                ) : null}
 
                 {!isLoaded && !hasError && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
@@ -75,7 +81,7 @@ export default function ImageViewer({ fileId }: ImageViewerProps) {
             </div>
 
             {/* Controls */}
-            {isLoaded && !hasError && (
+            {isLoaded && !hasError && imageSrc && (
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -99,6 +105,17 @@ export default function ImageViewer({ fileId }: ImageViewerProps) {
                         className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         <ZoomIn className="w-5 h-5" />
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={() => {
+                            download().catch((err: unknown) => alert(err instanceof Error ? err.message : String(err)));
+                        }}
+                        className="w-10 h-10 bg-primary/20 text-primary rounded-lg flex items-center justify-center hover:bg-primary/30 transition-colors"
+                        title="Download Decrypted Image"
+                    >
+                        <Download className="w-5 h-5" />
                     </button>
                 </motion.div>
             )}

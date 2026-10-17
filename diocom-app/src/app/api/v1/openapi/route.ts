@@ -11,11 +11,22 @@ import { AuditLogger } from '@/lib/AuditLogger';
  * Requires Bearer Token or Session Auth.
  */
 
+function safeTags(raw: unknown): unknown[] {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw !== 'string' || !raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch {
+        return [];
+    }
+}
+
 export async function GET(request: Request) {
     const session = await getServerSession(authOptions);
 
     // Security Check: Restricted to authenticated developers/users
-    if (!session) {
+    if (!session?.user?.id) {
         return NextResponse.json({ error: 'Unauthorized. Valid session or API key required.' }, { status: 401 });
     }
 
@@ -32,37 +43,38 @@ export async function GET(request: Request) {
 
     switch (action) {
         case 'status':
+            // Only report what this process actually knows; no synthetic service health
             return NextResponse.json({
-                status: 'operational',
-                version: '1.4.0-godtier',
+                status: 'ok',
+                version: process.env.npm_package_version || 'unknown',
                 uptime: process.uptime(),
-                services: {
-                    reactor: 'active',
-                    swarm: 'active',
-                    cognitive: 'active'
-                }
             });
 
         case 'files':
-        default:
-            // Return files owned by the user
-            const files = await FileRepository.findByUserId(session.user.id);
-            return NextResponse.json({
-                success: true,
-                count: files.length,
-                data: files.map(f => ({
-                    id: f.share_id,
-                    name: f.original_name,
-                    size: f.file_size,
-                    created: f.created_at,
-                    encrypted: f.is_encrypted === 1,
-                    tags: JSON.parse(f.tags || '[]')
-                }))
-            });
+        default: {
+            try {
+                // Return files owned by the user
+                const files = await FileRepository.findByUserId(session.user.id);
+                return NextResponse.json({
+                    success: true,
+                    count: files.length,
+                    data: files.map(f => ({
+                        id: f.share_id,
+                        name: f.original_name,
+                        size: f.file_size,
+                        created: f.created_at,
+                        encrypted: f.is_encrypted === 1,
+                        tags: safeTags(f.tags)
+                    }))
+                });
+            } catch (e) {
+                console.error('[v1/openapi]', e);
+                return NextResponse.json({ error: 'Failed to list files' }, { status: 500 });
+            }
+        }
     }
 }
 
-export async function POST(request: Request) {
-    // Simulated Webhook Registration or Remote Ingestion
-    return NextResponse.json({ message: 'Headless ingestion via API is a Premium/Enterprise feature.' }, { status: 501 });
+export async function POST() {
+    return NextResponse.json({ message: 'Headless ingestion via API is not implemented.' }, { status: 501 });
 }

@@ -9,34 +9,36 @@ import AudioPlayer from '@/components/viewers/AudioPlayer';
 import ImageViewer from '@/components/viewers/ImageViewer';
 import PDFViewer from '@/components/viewers/PDFViewer';
 import DownloadViewer from '@/components/viewers/DownloadViewer';
+import type { PublicFile } from '@/db/files';
 
 interface OmniPlayerProps {
   fileId: string;
-  metadata?: any;
+  metadata?: PublicFile;
 }
 
 export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
   const [fileType, setFileType] = useState<FileType | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(true);
+  const originalName = metadata?.original_name;
 
   useEffect(() => {
-    // Detect file type from ID
-    const cleanId = decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
-    const detectedType = detectFileType(cleanId);
+    // Share ids are random, so detect the type from the original filename (legacy ids embed it).
+    const name = originalName || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
+    const detectedType = detectFileType(name);
 
     // Quick analysis (configurable delay for smooth transition)
     setTimeout(() => {
       setFileType(detectedType);
       setIsAnalyzing(false);
     }, config.ui.analysisDelay);
-  }, [fileId]);
+  }, [fileId, originalName]);
 
   if (isAnalyzing || !fileType) {
     return (
       <div className="relative aspect-video bg-gradient-to-br from-gray-900 to-black flex flex-col items-center justify-center rounded-[28px] sm:rounded-[36px]">
         <Loader2 className="w-12 h-12 text-primary animate-spin mb-4" />
         <p className="text-[10px] font-mono text-primary animate-pulse tracking-[0.2em] uppercase">
-          Protecting Transfer Link... Analyzing File
+          Loading file...
         </p>
       </div>
     );
@@ -77,7 +79,7 @@ export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
     default:
       return (
         <div className="bg-gradient-to-br from-gray-900 to-black rounded-[28px] sm:rounded-[36px]">
-          <DownloadViewer fileId={fileId} fileType="unknown" />
+          <DownloadViewer fileId={fileId} fileType="unknown" metadata={metadata} />
         </div>
       );
   }

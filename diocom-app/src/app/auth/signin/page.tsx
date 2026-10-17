@@ -6,7 +6,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import Button from '@/components/ui/Button';
-import { Facebook, Mail, Lock, Loader2, ArrowRight, Fingerprint } from 'lucide-react';
+import { Facebook, Mail, Lock, Loader2, Fingerprint } from 'lucide-react';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 
 export default function SignInPage() {
@@ -31,7 +31,7 @@ export default function SignInPage() {
             if (isSignUp) {
                 // Register Passkey
                 const res = await fetch('/api/auth/webauthn/register');
-                if (!res.ok) throw new Error('Could not start passkey registration. Are you logged in? (Passkeys require an existing session or account creation first in this demo)');
+                if (!res.ok) throw new Error('Could not start passkey registration. Please sign in first, then add a passkey to your account.');
                 const options = await res.json();
                 const attResp = await startRegistration(options);
                 const verificationResp = await fetch('/api/auth/webauthn/register', {
@@ -62,11 +62,10 @@ export default function SignInPage() {
                 });
                 
                 const verificationJSON = await verificationResp.json();
-                if (verificationJSON.verified) {
-                    // Success! Now sign in to NextAuth bypassing password
+                if (verificationJSON.verified && verificationJSON.loginToken) {
+                    // Exchange the server-issued, single-use passkey token for a session
                     const signInRes = await signIn('credentials', {
-                        email,
-                        passkeyVerified: 'true',
+                        passkeyToken: verificationJSON.loginToken,
                         redirect: false,
                         callbackUrl
                     });
@@ -78,9 +77,9 @@ export default function SignInPage() {
                     throw new Error('Passkey authentication failed.');
                 }
             }
-        } catch (err: any) {
+        } catch (err) {
             console.error(err);
-            setError(err.message || 'Passkey operation failed.');
+            setError((err as Error)?.message || 'Passkey operation failed.');
         } finally {
             setLoading(false);
         }
@@ -106,8 +105,8 @@ export default function SignInPage() {
                 router.push(callbackUrl);
                 router.refresh();
             }
-        } catch (err: any) {
-            setError(err.message || 'An unexpected error occurred');
+        } catch (err) {
+            setError((err as Error)?.message || 'An unexpected error occurred');
         } finally {
             setLoading(false);
         }
@@ -238,16 +237,6 @@ export default function SignInPage() {
                         </Button>
                     </div>
 
-                    <button
-                        onClick={() => signIn('credentials', {
-                            email: "guest@diocom.io",
-                            password: "demo",
-                            callbackUrl
-                        })}
-                        className="text-[10px] text-gray-600 hover:text-gray-400 uppercase tracking-widest transition-colors"
-                    >
-                        Developer Guest Access
-                    </button>
                 </div>
             </main>
 

@@ -4,26 +4,25 @@ import { useEffect, useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Play, Pause, Volume2, VolumeX, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { PublicFile } from '@/db/files';
+import { useE2ESource } from './useE2ESource';
+
+// Decorative waveform bar heights (fixed so renders stay pure).
+const BAR_HEIGHTS = Array.from({ length: 60 }, (_, i) => 20 + ((i * 47 + 13) % 80));
 
 interface AudioPlayerProps {
     fileId: string;
-    metadata?: any;
+    metadata?: PublicFile;
 }
 
 export default function AudioPlayer({ fileId, metadata }: AudioPlayerProps) {
-    const title = metadata?.original_name || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
-    const [isReady, setIsReady] = useState(false);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
-    const [progress, setProgress] = useState(0);
+    const { src: audioSrc, error: decryptError } = useE2ESource(fileId, metadata);
+    const isReady = !!audioSrc;
     const audioRef = useRef<HTMLAudioElement>(null);
-
-    useEffect(() => {
-        // Ready immediately
-        setIsReady(true);
-    }, []);
 
     useEffect(() => {
         const audio = audioRef.current;
@@ -42,7 +41,7 @@ export default function AudioPlayer({ fileId, metadata }: AudioPlayerProps) {
             audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
             audio.removeEventListener('ended', handleEnded);
         };
-    }, []);
+    }, [isReady, audioSrc]);
 
     const handlePlayPause = () => {
         if (!audioRef.current) return;
@@ -62,7 +61,15 @@ export default function AudioPlayer({ fileId, metadata }: AudioPlayerProps) {
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
 
-    if (!isReady) {
+    if (decryptError) {
+        return (
+            <div className="flex flex-col items-center justify-center py-20 px-8">
+                <p className="text-sm text-red-400 text-center max-w-md" role="alert">{decryptError}</p>
+            </div>
+        );
+    }
+
+    if (!audioSrc) {
         return (
             <div className="flex flex-col items-center justify-center py-20">
                 <Loader2 className="w-12 h-12 text-primary animate-spin mb-4" />
@@ -75,7 +82,8 @@ export default function AudioPlayer({ fileId, metadata }: AudioPlayerProps) {
         <div className="flex flex-col items-center justify-center py-12 px-8">
             <audio
                 ref={audioRef}
-                src={`/api/stream?file=${encodeURIComponent(fileId)}`}
+                src={audioSrc}
+                preload="metadata"
                 className="hidden"
             />
 
@@ -90,7 +98,7 @@ export default function AudioPlayer({ fileId, metadata }: AudioPlayerProps) {
                                 i < (progressPercent / 100) * 60 ? 'bg-primary' : 'bg-white/20'
                             )}
                             style={{
-                                height: `${Math.random() * 80 + 20}%`,
+                                height: `${BAR_HEIGHTS[i]}%`,
                             }}
                             animate={
                                 isPlaying

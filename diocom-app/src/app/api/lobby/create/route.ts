@@ -2,25 +2,50 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import db from '@/db';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
+import { enforceRateLimit } from '@/lib/rateLimit';
+import { setLobbyRoleCookie } from '../_shared';
+
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 6;
 
 function generateCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  let out = '';
+  for (let i = 0; i < CODE_LENGTH; i++) out += CODE_CHARS[randomInt(CODE_CHARS.length)];
+  return out;
 }
 
 // POST /api/lobby/create — create a lobby
-export async function POST() {
-  const session = await getServerSession(authOptions);
-  const id = randomUUID();
-  const code = generateCode();
-  const now = Date.now();
-  const expires = now + 15 * 60 * 1000; // 15 min
+export async function POST(request: Request) {
+  const limited = enforceRateLimit(request, 'lobby-create', { maxRequests: 10, windowMs: 60_000 });
+  if (limited) return limited;
 
-  await db.query(`
-    INSERT INTO lobby_sessions (id, code, creator_id, status, created_at, expires_at)
-    VALUES ($1, $2, $3, 'waiting', $4, $5)
-  `, [id, code, session?.user?.id || null, now, expires]);
+  try {
+    const session = await getServerSession(authOptions);
+    const creatorId = (session?.user as { id?: string } | undefined)?.id || null;
+    const id = randomUUID();
+    const now = Date.now();
+    const expires = now + 15 * 60 * 1000; // 15 min
 
-  return NextResponse.json({ success: true, code, lobbyId: id, expiresAt: expires });
+    let code = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = generateCode();
+      const existing = await db.query('SELECT * FROM lobby_sessions WHERE code = $1', [candidate]);
+      if (existing.rows.length === 0) { code = candidate; break; }
+    }
+    if (!code) return NextResponse.json({ error: 'Could not allocate lobby code' }, { status: 503 });
+
+    await db.query(`
+      INSERT INTO lobby_sessions (id, code, creator_id, status, created_at, expires_at)
+      VALUES ($1, $2, $3, 'waiting', $4, $5)
+    `, [id, code, creatorId, now, expires]);
+
+    const res = NextResponse.json({ success: true, code, expiresAt: expires });
+    // Participant secret (httpOnly cookie) — required for privileged PATCH actions
+    setLobbyRoleCookie(res, id, 'creator');
+    return res;
+  } catch (e) {
+    console.error('[lobby/create]', e);
+    return NextResponse.json({ error: 'Failed to create lobby' }, { status: 500 });
+  }
 }

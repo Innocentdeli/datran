@@ -1,5 +1,6 @@
 import db from './index';
 import { randomUUID } from 'crypto';
+import { DCE2_DB_MARKER } from '../lib/crypto/dce2';
 import { Chunk, Variant } from '../../../src/core/types';
 
 export interface FileRecord {
@@ -25,6 +26,62 @@ export interface FileRecord {
     is_encrypted: number;
     encryption_iv?: string | null;
     similarity_token?: string | null;
+    /** Rust reactor content class (e.g. text/json); null for legacy/TS-compressed uploads. */
+    reactor_class?: string | null;
+    /** Compact recipe JSON the reactor used; null for legacy/TS-compressed uploads. */
+    reactor_recipe?: string | null;
+}
+
+let reactorMetaWarned = false;
+
+/**
+ * Client-safe projection of a file record. Never exposes storage_path, thumbnail_path,
+ * password_hash, user_id, similarity_token or the internal row id.
+ * Use this for every file record that is sent to a browser (JSON responses, client component props).
+ */
+export interface PublicFile {
+    share_id: string;
+    original_name: string;
+    file_size: number;
+    mime_type: string;
+    created_at: number;
+    expires_at: number | null;
+    downloads: number;
+    compression_ratio: string | null;
+    compression_speed: string | null;
+    tags: unknown;
+    summary: string | null;
+    is_encrypted: number;
+    encryption_iv: string | null;
+    /** 'dce2' = chunked streaming format (encryption_iv holds the DCE2 marker), 'v1' = single-shot AES-GCM. */
+    encryption_format: 'dce2' | 'v1' | null;
+    has_password: boolean;
+    has_thumbnail: boolean;
+}
+
+const toNum = (v: unknown): number => (v === null || v === undefined || v === '' ? 0 : Number(v));
+const toNumOrNull = (v: unknown): number | null => (v === null || v === undefined || v === '' ? null : Number(v));
+
+export function toPublicFile(f: Partial<FileRecord> & { share_id: string }): PublicFile {
+    return {
+        share_id: f.share_id,
+        original_name: f.original_name ?? '',
+        file_size: toNum(f.file_size),
+        mime_type: f.mime_type || 'application/octet-stream',
+        created_at: toNum(f.created_at),
+        expires_at: toNumOrNull(f.expires_at),
+        downloads: toNum(f.downloads),
+        compression_ratio: f.compression_ratio ?? null,
+        compression_speed: f.compression_speed ?? null,
+        tags: f.tags ?? null,
+        summary: f.summary ?? null,
+        is_encrypted: Number(f.is_encrypted) === 1 ? 1 : 0,
+        // The AES-GCM IV is not secret; clients need it to decrypt with the key from the URL fragment.
+        encryption_iv: f.encryption_iv ?? null,
+        encryption_format: Number(f.is_encrypted) !== 1 ? null : f.encryption_iv === DCE2_DB_MARKER ? 'dce2' : f.encryption_iv ? 'v1' : null,
+        has_password: !!f.password_hash,
+        has_thumbnail: !!f.thumbnail_path,
+    };
 }
 
 export const FileRepository = {
@@ -52,6 +109,43 @@ export const FileRepository = {
         ]);
 
         return { ...file, id, created_at: now, downloads: 0, last_accessed_at: null };
+    },
+
+    /**
+     * Records the Rust reactor's content class and recipe for a file. Best effort: a database whose
+     * schema predates these columns (initializeSchema not re-run) only logs a warning.
+     */
+    setReactorMeta: async (shareId: string, reactorClass: string | null, reactorRecipe: string | null) => {
+        try {
+            await db.query(
+                'UPDATE files SET reactor_class = $1, reactor_recipe = $2 WHERE share_id = $3',
+                [reactorClass, reactorRecipe, shareId]
+            );
+        } catch (e) {
+            if (!reactorMetaWarned) {
+                reactorMetaWarned = true;
+                console.warn('[DB] Could not store reactor metadata (run the schema init to add files.reactor_class/reactor_recipe):',
+                    e instanceof Error ? e.message : e);
+            }
+        }
+    },
+
+    /** All file records, oldest first (maintenance scripts only). */
+    listAll: async (): Promise<FileRecord[]> => {
+        const res = await db.query('SELECT * FROM files ORDER BY created_at ASC');
+        return res.rows;
+    },
+
+    /**
+     * Compare-and-set relocation of a file's stored bytes (e.g. into the reactor store). Only updates when the record
+     * still points at `expectedPath`; returns true when a row was changed.
+     */
+    relocateStorage: async (shareId: string, expectedPath: string, newPath: string, compressionRatio: string | null): Promise<boolean> => {
+        const res = await db.query(
+            'UPDATE files SET storage_path = $1, compression_ratio = $2, is_external = 0 WHERE share_id = $3 AND storage_path = $4',
+            [newPath, compressionRatio, shareId, expectedPath]
+        );
+        return Number(res.rowCount) > 0;
     },
 
     findByShareId: async (shareId: string): Promise<FileRecord | undefined> => {

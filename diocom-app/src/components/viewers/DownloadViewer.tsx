@@ -4,24 +4,26 @@ import { formatFileSize } from '@/lib/utils';
 import { getFileIcon } from '@/lib/fileUtils';
 import Button from '@/components/ui/Button';
 import Badge from '@/components/ui/Badge';
-import * as Encryption from '@/lib/crypto/Encryption';
+import { downloadFile, subscribeE2EErrors } from '@/lib/crypto/e2eClient';
+import type { PublicFile } from '@/db/files';
 import { P2PHandler } from '@/lib/network/P2PHandler';
 
 interface DownloadViewerProps {
     fileId: string;
     fileType: 'archive' | 'document' | 'code' | 'unknown';
-    metadata?: any;
+    metadata?: PublicFile;
 }
 
 export default function DownloadViewer({ fileId, fileType, metadata }: DownloadViewerProps) {
     const [isDecrypting, setIsDecrypting] = useState(false);
     const [peerActive, setPeerActive] = useState(false);
+    const [downloadError, setDownloadError] = useState<string | null>(null);
     const cleanName = metadata?.original_name || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
     const icon = getFileIcon(fileType);
 
-    // Fallback stats if metadata is missing (rare)
-    const ratio = metadata?.compression_ratio || '8.26x';
-    const speed = metadata?.compression_speed || '143 MB/s';
+    // No fabricated fallback stats when metadata is missing
+    const ratio = metadata?.compression_ratio || '—';
+    const speed = metadata?.compression_speed || '—';
 
     const isEncrypted = metadata?.is_encrypted === 1;
 
@@ -32,63 +34,32 @@ export default function DownloadViewer({ fileId, fileType, metadata }: DownloadV
             body: JSON.stringify({ fileId })
         }).catch(() => { });
 
-        // Initialize Warp-Speed P2P Swarm
+        // Join the file's WebRTC swarm (signaling via /api/swarm/announce)
         const p2p = new P2PHandler(fileId);
-        p2p.initialize().then(() => setPeerActive(true));
+        let disposed = false;
+        p2p.initialize().then(() => { if (!disposed) setPeerActive(true); }).catch(() => { });
 
         return () => {
-            // Cleanup P2P if needed
+            disposed = true;
+            p2p.destroy();
         };
     }, [fileId]);
 
+    // Mid-stream failures of a Service Worker download (tampered/truncated data, missing key) are reported here.
+    useEffect(() => subscribeE2EErrors(fileId, (message) => setDownloadError(message)), [fileId]);
+
     const handleDownload = async () => {
-        if (isEncrypted) {
-            try {
-                const hash = window.location.hash;
-                const keyStr = hash.match(/key=([^&]+)/)?.[1];
-
-                if (!keyStr) {
-                    alert('This file is Zero-Knowledge encrypted and requires a key. Please ensure the full link was shared.');
-                    return;
-                }
-
-                setIsDecrypting(true);
-
-                // 1. Fetch encrypted blob
-                const res = await fetch(`/api/stream?file=${encodeURIComponent(fileId)}`);
-                if (!res.ok) throw new Error('Download failed');
-                const encryptedBuffer = await res.arrayBuffer();
-
-                // 2. Import Key
-                const key = await Encryption.importKey(keyStr);
-
-                // 3. Decrypt
-                const iv = Encryption.base64UrlToBytes(metadata.encryption_iv);
-                const decryptedBuffer = await Encryption.decryptBuffer(encryptedBuffer, key, iv);
-
-                // 4. Download
-                const blob = new Blob([decryptedBuffer]);
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = cleanName;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-            } catch (err) {
-                console.error('Decryption failed:', err);
-                alert('Secure decryption failed. The key might be invalid or the payload corrupted.');
-            } finally {
-                setIsDecrypting(false);
-            }
-        } else {
-            const link = document.createElement('a');
-            link.href = `/api/stream?file=${encodeURIComponent(fileId)}`;
-            link.download = cleanName;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+        setDownloadError(null);
+        setIsDecrypting(isEncrypted);
+        try {
+            // DCE2 streams through the decrypting Service Worker (or File System Access); legacy v1 decrypts in memory.
+            await downloadFile(fileId, metadata);
+        } catch (err) {
+            if (err instanceof DOMException && err.name === 'AbortError') return; // save dialog cancelled
+            console.error('Download failed:', err);
+            setDownloadError(err instanceof Error ? err.message : 'Secure decryption failed.');
+        } finally {
+            setIsDecrypting(false);
         }
     };
 
@@ -158,6 +129,10 @@ export default function DownloadViewer({ fileId, fileType, metadata }: DownloadV
                     </>
                 )}
             </Button>
+
+            {downloadError && (
+                <p className="mt-4 text-sm text-red-400 text-center max-w-md" role="alert">{downloadError}</p>
+            )}
 
             {/* Stats */}
             <div className="mt-12 grid grid-cols-3 gap-6 text-center">

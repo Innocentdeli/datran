@@ -1,13 +1,12 @@
 'use client';
 
-import WormholeConnect from "@/components/features/WormholeConnect";
+import ConnectionInfo from '@/components/features/ConnectionInfo';
 
+/**
+ * Kept under its old name because the share page imports it. It used to render a simulated
+ * "Wormhole" peer scanner (random peer ids, fake distances and a protocol label derived from
+ * API availability); it now shows the measured connection protocol instead.
+ */
 export default function WormholeConnectWrapper() {
-    const handleConnect = (peerId: string) => {
-        // In a real implementation via P2PHandler:
-        console.log(`[WORMHOLE] Initiating subspace transfer with ${peerId}...`);
-        alert(`Wormhole Connection Established! Secure P2P transfer initiating with OmniNode ${peerId}.`);
-    };
-
-    return <WormholeConnect onConnect={handleConnect} />;
+    return <ConnectionInfo />;
 }

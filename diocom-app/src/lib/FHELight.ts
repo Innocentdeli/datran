@@ -1,75 +1,52 @@
 import * as crypto from 'crypto';
 
 /**
- * FHELight
- * 
- * Simulates Fully Homomorphic Encryption (FHE) for Phase 2: The Sovereign Protocol.
- * Allows the server to perform mathematical operations on encrypted data payloads.
+ * FHELight (name kept for existing callers)
+ *
+ * HONEST DESCRIPTION: this is NOT homomorphic encryption and provides no confidentiality.
+ * - encryptNumeric() returns `HMAC-SHA256(value):base64(value)` — the value is merely
+ *   base64-encoded alongside an HMAC tag, so anyone can read it.
+ * - homomorphicAdd() decodes both plaintexts, adds them and re-tags the sum.
+ * - generateSimilarityToken() is a deterministic HMAC tag over the sorted tag list,
+ *   which only supports exact-match comparison.
  */
 export class FHELight {
-    private static PQC_KEY = 'datran_sovereign_fhe_prime_2026';
+    // Static HMAC key. Tags are deterministic and only used for exact-match comparisons.
+    private static HMAC_KEY = 'datran_sovereign_fhe_prime_2026';
 
-    /**
-     * Encrypts a numeric value such that it can be "added" to other encrypted values.
-     * (Simulated Paillier cryptosystem principle)
-     */
+    /** Returns `hmacTag:base64(value)`. The value is NOT hidden. */
     public static encryptNumeric(value: number): string {
-        // In a real FHE system, this would be a large polynomial cipher
-        // Here we use a structured HMAC to simulate an 'addable' cipher block
-        const cipher = crypto.createHmac('sha256', this.PQC_KEY)
+        const tag = crypto.createHmac('sha256', this.HMAC_KEY)
             .update(value.toString())
             .digest('hex');
-        
-        // We pack the value with its cipher for 'homomorphic' validation
-        return `${cipher}:${Buffer.from(value.toString()).toString('base64')}`;
+        return `${tag}:${Buffer.from(value.toString()).toString('base64')}`;
     }
 
-    /**
-     * Performs a 'Homomorphic Addition' on two encrypted numeric values.
-     * The server DOES NOT know the underlying numbers, but can produce a 
-     * valid encrypted sum.
-     */
+    /** Decodes both values, adds them in plaintext, and returns a newly tagged sum. */
     public static homomorphicAdd(cipherA: string, cipherB: string): string {
-        const [, valA] = cipherA.split(':');
-        const [, valB] = cipherB.split(':');
-        
-        const numA = parseInt(Buffer.from(valA, 'base64').toString());
-        const numB = parseInt(Buffer.from(valB, 'base64').toString());
-        
-        const sum = numA + numB;
-        
-        // Simulate 'operating on ciphers' by returning a new encrypted sum
-        // In real FHE, this would be a multiplication of the ciphertexts
-        return this.encryptNumeric(sum);
+        const numA = this.decryptNumeric(cipherA);
+        const numB = this.decryptNumeric(cipherB);
+        return this.encryptNumeric(numA + numB);
     }
 
-    /**
-     * Decrypts an encrypted numeric value.
-     */
+    /** Decodes the base64 value (no secret is required). */
     public static decryptNumeric(cipher: string): number {
         const [, val] = cipher.split(':');
-        return parseInt(Buffer.from(val, 'base64').toString());
+        return parseInt(Buffer.from(val ?? '', 'base64').toString(), 10);
     }
 
-    /**
-     * Generates a "Homomorphic Fingerprint" for similarity detection.
-     * Allows comparing two encrypted files for 'near-duplicate' status 
-     * without seeing the content.
-     */
+    /** Deterministic HMAC-SHA256 tag over the sorted tag list (exact-match only). */
     public static generateSimilarityToken(tags: string[]): string {
-        // Sort and hash tags in a deterministic way
-        const normalized = tags.sort().join('|');
-        return crypto.createHmac('sha256', this.PQC_KEY)
+        const normalized = [...tags].sort().join('|');
+        return crypto.createHmac('sha256', this.HMAC_KEY)
             .update(normalized)
             .digest('hex');
     }
 
-    /**
-     * Compares two similarity tokens.
-     */
+    /** Exact-match comparison of two HMAC tags (constant-time). */
     public static isSimilar(tokenA: string, tokenB: string): boolean {
-        // In FHE-Light, we use deterministic similarity tokens
-        // Real FHE would allow calculating 'Hamming distance' between ciphers
-        return tokenA === tokenB;
+        const a = Buffer.from(String(tokenA));
+        const b = Buffer.from(String(tokenB));
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
     }
 }

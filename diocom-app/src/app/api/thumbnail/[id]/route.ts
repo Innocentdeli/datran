@@ -1,49 +1,60 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
-import path from 'path';
 import { FileRepository } from '@/db/files';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
+import { resolveStoredPath } from '@/lib/storage';
+
+const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024;
 
 export async function GET(
-    request: Request,
+    _request: Request,
     context: { params: Promise<{ id: string }> }
 ) {
     const { id } = await context.params;
     const session = await getServerSession(authOptions);
-    if (!session?.user) {
+    if (!session?.user?.id) {
         return new NextResponse('Unauthorized', { status: 401 });
     }
 
-    // 1. Get file record
-    // We assume the ID passed is the share_id or DB ID
-    // Let's support share_id for now as it's public-facing ID usually
-    let fileRecord = await FileRepository.findByShareId(id);
+    const fileRecord = await FileRepository.findByShareId(id);
 
-    // If not found by share_id, try by DB ID
-    if (!fileRecord) {
-        // Need to add findById to repo if not exists, or just direct query
-        // But for now let's rely on share_id which is unique
-        return new NextResponse('File not found', { status: 404 });
+    // Owner-only. Same response for "missing" and "not yours" to avoid enumeration.
+    if (!fileRecord || fileRecord.user_id !== session.user.id) {
+        return new NextResponse('Not found', { status: 404 });
     }
 
-    // 2. Check ownership (optional? Or strict?)
-    // Strict: Only owner can see thumbnail
-    if (fileRecord.user_id !== session.user.id) {
-        return new NextResponse('Forbidden', { status: 403 });
-    }
-
-    if (!fileRecord.thumbnail_path || !fs.existsSync(fileRecord.thumbnail_path)) {
+    if (!fileRecord.thumbnail_path) {
         return new NextResponse('Thumbnail not found', { status: 404 });
     }
 
-    // 3. Serve file
-    const fileBuffer = fs.readFileSync(fileRecord.thumbnail_path);
+    // S3/CDN mode: thumbnails live in the bucket.
+    if (/^https?:\/\//i.test(fileRecord.thumbnail_path)) {
+        return NextResponse.redirect(fileRecord.thumbnail_path);
+    }
 
-    return new NextResponse(fileBuffer, {
+    const thumbPath = resolveStoredPath(fileRecord.thumbnail_path);
+    if (!thumbPath) {
+        return new NextResponse('Thumbnail not found', { status: 404 });
+    }
+
+    let fileBuffer: Buffer;
+    try {
+        const stat = await fs.promises.stat(thumbPath);
+        if (!stat.isFile() || stat.size > MAX_THUMBNAIL_BYTES) {
+            return new NextResponse('Thumbnail not found', { status: 404 });
+        }
+        fileBuffer = await fs.promises.readFile(thumbPath);
+    } catch {
+        return new NextResponse('Thumbnail not found', { status: 404 });
+    }
+
+    return new NextResponse(new Uint8Array(fileBuffer.buffer as ArrayBuffer, fileBuffer.byteOffset, fileBuffer.byteLength), {
         headers: {
             'Content-Type': 'image/jpeg',
-            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Content-Length': fileBuffer.length.toString(),
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, max-age=86400',
         },
     });
 }

@@ -186,10 +186,22 @@ export async function initializeSchema(db: Pool) {
         expires_at BIGINT NOT NULL
       );
 
+      -- Access prediction events (NETWORK_SPEC §5). actor = 'u:<user id>' or 'a:<HMAC(ip+ua)>'; never raw IPs.
+      CREATE TABLE IF NOT EXISTS access_events (
+        id BIGSERIAL PRIMARY KEY,
+        file_id TEXT NOT NULL,
+        ts BIGINT NOT NULL,
+        actor TEXT NOT NULL
+      );
+
+      -- Rust reactor metadata (evolutionary compression); idempotent for existing databases.
+      ALTER TABLE files ADD COLUMN IF NOT EXISTS reactor_class TEXT, ADD COLUMN IF NOT EXISTS reactor_recipe TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_files_share_id ON files(share_id);
       CREATE INDEX IF NOT EXISTS idx_files_expires_at ON files(expires_at);
       CREATE INDEX IF NOT EXISTS idx_inboxes_recipient ON inboxes(recipient_id);
       CREATE INDEX IF NOT EXISTS idx_lobby_code ON lobby_sessions(code);
+      CREATE INDEX IF NOT EXISTS idx_access_events_ts ON access_events(ts);
     `);
 
     await client.query('COMMIT');

@@ -7,9 +7,12 @@ import { cn, formatDuration } from '@/lib/utils';
 import Button from '@/components/ui/Button';
 import Badge from '@/components/ui/Badge';
 
+import type { PublicFile } from '@/db/files';
+import { useE2ESource } from '@/components/viewers/useE2ESource';
+
 interface VideoPlayerProps {
     fileId: string;
-    metadata?: any;
+    metadata?: PublicFile;
 }
 
 export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
@@ -21,6 +24,7 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
     const [showControls, setShowControls] = useState(true);
+    const { src: videoSrc, error: decryptError, download } = useE2ESource(fileId, metadata);
     const videoRef = useRef<HTMLVideoElement>(null);
     const controlsTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
@@ -43,7 +47,9 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
             });
         }, 80);
 
-        return () => clearInterval(interval);
+        return () => {
+            clearInterval(interval);
+        };
     }, [fileId]);
 
     useEffect(() => {
@@ -71,7 +77,7 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
             video.removeEventListener('loadedmetadata', handleLoadedMetadata);
             video.removeEventListener('ended', handleEnded);
         };
-    }, []);
+    }, [isReady, videoSrc]);
 
     const handlePlayPause = () => {
         if (!videoRef.current) return;
@@ -125,8 +131,14 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
             onMouseLeave={() => isPlaying && setShowControls(false)}
         >
             <div className="absolute inset-0 bg-gradient-to-br from-gray-900 to-black">
+                {decryptError && (
+                    <div className="absolute inset-0 flex items-center justify-center z-20 p-8 bg-black/80">
+                        <p className="text-sm text-red-400 text-center max-w-md" role="alert">{decryptError}</p>
+                    </div>
+                )}
+
                 {/* Loading State */}
-                {!isReady && (
+                {(!isReady || !videoSrc) && !decryptError && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 z-10 p-12">
                         <div className="relative">
                            <Loader2 className="w-16 h-16 text-primary animate-spin opacity-20" />
@@ -168,7 +180,7 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
                 )}
 
                 {/* Ready State - Play Button */}
-                {isReady && !isPlaying && (
+                {isReady && videoSrc && !isPlaying && (
                     <motion.div
                         initial={{ opacity: 0, scale: 0.9 }}
                         animate={{ opacity: 1, scale: 1 }}
@@ -186,10 +198,11 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
                 )}
 
                 {/* Video Element */}
-                {isReady && (
+                {isReady && videoSrc && (
                     <video
                         ref={videoRef}
-                        src={`/api/stream?file=${encodeURIComponent(fileId)}`}
+                        src={videoSrc}
+                        preload="metadata"
                         className="w-full h-full object-contain"
                         onClick={handlePlayPause}
                     />
@@ -198,7 +211,7 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
 
             {/* Video Controls Overlay */}
             <AnimatePresence>
-                {isReady && showControls && (
+                {isReady && videoSrc && showControls && (
                     <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
@@ -268,12 +281,7 @@ export default function VideoPlayer({ fileId, metadata }: VideoPlayerProps) {
                                 <div className="flex items-center gap-2">
                                     {/* Download Button */}
                                     <Button variant="secondary" size="sm" className="hidden sm:flex" onClick={() => {
-                                        const link = document.createElement('a');
-                                        link.href = `/api/stream?file=${encodeURIComponent(fileId)}`;
-                                        link.download = title;
-                                        document.body.appendChild(link);
-                                        link.click();
-                                        document.body.removeChild(link);
+                                        download().catch((err: unknown) => alert(err instanceof Error ? err.message : String(err)));
                                     }}>
                                         <Download className="w-4 h-4" />
                                         Download Locally

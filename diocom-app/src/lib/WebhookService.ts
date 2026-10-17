@@ -1,50 +1,77 @@
-import db from '@/db';
-import * as crypto from 'crypto';
+import { createHmac } from 'crypto';
 
 /**
  * WebhookService
- * 
- * Manages event-driven notifications for external integrations.
+ *
+ * Event-driven notifications for external integrations. A single endpoint can be
+ * configured via env:
+ *   WEBHOOK_URL     - https endpoint to POST events to (unset = webhooks disabled)
+ *   WEBHOOK_SECRET  - shared secret used to sign payloads (required if WEBHOOK_URL is set)
+ * Signature header: X-Datran-Signature: sha256=<hex HMAC of "<timestamp>.<body>">
  */
+
+interface WebhookEndpoint {
+    url: string;
+    secret: string;
+}
+
+function getEndpoints(): WebhookEndpoint[] {
+    const url = process.env.WEBHOOK_URL;
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!url) return [];
+    if (!secret) {
+        console.warn('[WEBHOOK] WEBHOOK_URL is set but WEBHOOK_SECRET is missing; webhooks disabled.');
+        return [];
+    }
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
+            console.warn('[WEBHOOK] WEBHOOK_URL must use https in production; webhooks disabled.');
+            return [];
+        }
+    } catch {
+        console.warn('[WEBHOOK] WEBHOOK_URL is invalid; webhooks disabled.');
+        return [];
+    }
+    return [{ url, secret }];
+}
+
 export class WebhookService {
     /**
-     * Dispatches an event to all registered endpoints.
+     * Dispatches an event to all configured endpoints.
      */
-    public static async dispatch(event: string, payload: any) {
-        console.log(`[WEBHOOK] Dispatching event: ${event}`);
-        
-        // In a real implementation, we'd fetch subscriptions from a DB table:
-        // const subscriptions = db.prepare('SELECT url, secret FROM webhooks WHERE event = ?').all(event);
-        
-        // For Datran God-Tier simulation, we simulate a configured endpoint
-        const mockEndpoints = [
-            { url: 'https://api.enterprise-partner.com/webhooks/datran', secret: 'dk_live_987654321' }
-        ];
+    public static async dispatch(event: string, payload: unknown) {
+        const endpoints = getEndpoints();
+        if (endpoints.length === 0) return;
 
-        for (const sub of mockEndpoints) {
+        const timestamp = Date.now();
+        const body = JSON.stringify({ event, payload, timestamp });
+
+        for (const sub of endpoints) {
             try {
-                // Simulate outbound request
-                console.log(`[WEBHOOK] Forwarding payload to ${sub.url}...`);
-                
-                // We'd sign the payload with the secret here (e.g., HMAC-SHA256)
-                
-                // await fetch(sub.url, {
-                //     method: 'POST',
-                //     headers: { 'Content-Type': 'application/json', 'X-Datran-Signature': '...' },
-                //     body: JSON.stringify({ event, payload, timestamp: Date.now() })
-                // });
+                const signature = createHmac('sha256', sub.secret).update(`${timestamp}.${body}`).digest('hex');
+                const res = await fetch(sub.url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Datran-Event': event,
+                        'X-Datran-Timestamp': String(timestamp),
+                        'X-Datran-Signature': `sha256=${signature}`,
+                    },
+                    body,
+                    signal: AbortSignal.timeout(5000),
+                });
+                if (!res.ok) console.error(`[WEBHOOK] Delivery for ${event} returned HTTP ${res.status}`);
             } catch (err) {
-                console.error(`[WEBHOOK] Delivery failed for ${sub.url}`, err);
+                console.error(`[WEBHOOK] Delivery failed for ${event}:`, (err as Error).message);
             }
         }
     }
 
     /**
-     * Registers a new webhook subscription.
+     * Registration of additional endpoints is not implemented (no persistence layer yet).
      */
-    public static async register(url: string, event: string, secret: string) {
-        // Persist to DB logic here
-        // await db.query('INSERT INTO webhooks (id, url, event, secret) VALUES ($1, $2, $3, $4)', [crypto.randomUUID(), url, event, secret]);
-        console.log(`[WEBHOOK] Registered endpoint ${url} for event ${event}`);
+    public static async register(): Promise<never> {
+        throw new Error('Webhook registration is not implemented; configure WEBHOOK_URL / WEBHOOK_SECRET instead.');
     }
 }

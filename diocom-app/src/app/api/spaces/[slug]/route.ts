@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import db from '@/db';
+import { toPublicFile } from '@/db/files';
 
 // GET /api/spaces/[slug] — get space details + members + files
 export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -40,7 +41,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
     ORDER BY sf.uploaded_at DESC
   `, [space.id]);
 
-  return NextResponse.json({ success: true, space, members: membersRes.rows, files: filesRes.rows });
+  const files = filesRes.rows.map(f => ({
+    ...toPublicFile(f),
+    uploaded_at: f.uploaded_at,
+    uploaded_by: f.uploaded_by,
+    uploader_name: f.uploader_name,
+  }));
+
+  return NextResponse.json({ success: true, space, members: membersRes.rows, files });
 }
 
 // DELETE /api/spaces/[slug] — delete space (owner only)

@@ -10,7 +10,7 @@ export const config = {
 
     // File Storage Configuration
     storage: {
-        basePath: process.env.DIOCOM_STORAGE_PATH || 'C:/diocom',
+        basePath: process.env.DIOCOM_STORAGE_PATH || './.storage',
         maxFileSize: parseInt(process.env.MAX_FILE_SIZE || '1073741824'), // 1GB default
         allowedExtensions: process.env.ALLOWED_EXTENSIONS?.split(',') || ['*'], // All files by default
     },
@@ -32,16 +32,7 @@ export const config = {
 
     // Compression Configuration
     compression: {
-        weissmanScore: parseFloat(process.env.WEISSMAN_SCORE || '59.04'),
-        defaultRatio: parseFloat(process.env.DEFAULT_COMPRESSION_RATIO || '8.26'),
-        defaultSpeed: process.env.DEFAULT_COMPRESSION_SPEED || '143.19 MB/s',
         largeFileThreshold: parseInt(process.env.LARGE_FILE_THRESHOLD_MB || '10'), // MB
-    },
-
-    // Network Configuration
-    network: {
-        meshNodes: parseInt(process.env.MESH_NODES || '411'),
-        activeAtoms: process.env.ACTIVE_ATOMS === 'true' || true,
     },
 
     // UI Configuration
@@ -54,13 +45,13 @@ export const config = {
     // Debug Configuration
     debug: {
         enableDebugLogs: process.env.ENABLE_DEBUG_LOGS === 'true',
-        debugLogPath: process.env.DEBUG_LOG_PATH || 'C:/diocom/STREAM_DEBUG.log',
+        debugLogPath: process.env.DEBUG_LOG_PATH || './.storage/STREAM_DEBUG.log',
     },
 } as const;
 
 // Helper to get base URL for share links
-export function getShareLinkUrl(shareId: string): string {
-    return `${config.server.url}/v1/${shareId}`;
+export function getShareLinkUrl(shareId: string, baseUrl?: string): string {
+    return `${baseUrl || config.server.url}/v1/${shareId}`;
 }
 
 // Helper to get storage path

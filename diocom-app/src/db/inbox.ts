@@ -73,7 +73,7 @@ export const InboxRepository = {
       SELECT id, name, username, image FROM users 
       WHERE username ILIKE $1 AND username IS NOT NULL
       LIMIT 10
-    `, [`%${query}%`]);
+    `, [`%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`]);
     return res.rows;
   }
 };

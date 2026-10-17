@@ -72,6 +72,9 @@ export function getMimeType(filename: string): string {
         mp4: 'video/mp4',
         webm: 'video/webm',
         ogg: 'video/ogg',
+        mov: 'video/quicktime',
+        m4v: 'video/mp4',
+        mkv: 'video/x-matroska',
 
         // Image
         jpg: 'image/jpeg',
@@ -80,11 +83,17 @@ export function getMimeType(filename: string): string {
         gif: 'image/gif',
         webp: 'image/webp',
         svg: 'image/svg+xml',
+        bmp: 'image/bmp',
+        ico: 'image/x-icon',
+        avif: 'image/avif',
 
         // Audio
         mp3: 'audio/mpeg',
         wav: 'audio/wav',
         flac: 'audio/flac',
+        m4a: 'audio/mp4',
+        aac: 'audio/aac',
+        opus: 'audio/ogg',
 
         // Document
         pdf: 'application/pdf',

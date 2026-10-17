@@ -1,24 +1,36 @@
-import { ShieldCheck, Database, Activity, ChevronLeft } from 'lucide-react';
 import Link from 'next/link';
 import OmniPlayer from './OmniPlayer';
-import StatCard from '@/components/ui/StatCard';
-import { FileRepository } from '@/db/files';
+import { FileRepository, toPublicFile } from '@/db/files';
 import PasswordGate from '@/components/features/PasswordGate';
 import { cookies, headers } from 'next/headers';
 import { AnalyticsService } from '@/lib/analytics';
 import WormholeConnectWrapper from '@/components/features/WormholeConnectWrapper';
 import { AuditLogger } from '@/lib/AuditLogger';
+import { hasFileAccess } from '@/lib/crypto/AccessToken';
+
+function isExpiredRecord(expiresAt: number | string | null | undefined): boolean {
+  return !!expiresAt && Date.now() > Number(expiresAt);
+}
 
 export default async function OmniViewer({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const fileRecord = await FileRepository.findByShareId(id);
+  const isExpired = isExpiredRecord(fileRecord?.expires_at);
+  const isLocked = !!fileRecord && !hasFileAccess(await cookies(), fileRecord);
+  // Only a whitelisted, client-safe projection ever reaches client components.
+  const publicFile = fileRecord && !isExpired && !isLocked ? toPublicFile(fileRecord) : undefined;
+  const isClientEncrypted = publicFile?.is_encrypted === 1;
+  const isCompressed = !!publicFile?.compression_ratio && !publicFile.compression_ratio.startsWith('1.0x');
 
-  if (fileRecord) {
+  if (fileRecord && !isExpired && !isLocked) {
     // Record View
     // Note: In Next.js Server Components, getting IP is tricky without layout middleware, 
     // but we can try headers or just omit it for now/use placeholder.
     const headersList = await headers();
-    const ip = headersList.get('x-forwarded-for') || 'unknown';
+    // Proxy headers are only trusted when TRUST_PROXY=true (same policy as lib/security getClientIp).
+    const ip = (process.env.TRUST_PROXY === 'true'
+      ? headersList.get('x-forwarded-for')?.split(',')[0]?.trim()
+      : undefined) || 'unknown';
     const ua = headersList.get('user-agent');
 
     await AnalyticsService.record({
@@ -32,7 +44,7 @@ export default async function OmniViewer({ params }: { params: Promise<{ id: str
     await AuditLogger.record({
       action: 'FILE_VIEW',
       resource: id,
-      details: `Viewed file: ${fileRecord.original_name}`,
+      details: 'Viewed shared file',
       ipAddress: ip
     });
   }
@@ -63,7 +75,15 @@ export default async function OmniViewer({ params }: { params: Promise<{ id: str
           <div className="absolute -inset-1 bg-gradient-to-r from-primary/10 to-secondary/10 rounded-[40px] blur-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-1000 pointer-events-none" />
           
           <div className="glass p-2 rounded-[40px] shadow-2xl transition-all duration-700 bg-black/40 border-white/5 relative overflow-hidden z-10">
-            <OmniPlayer fileId={id} metadata={fileRecord || undefined} />
+            {!fileRecord ? (
+              <div className="min-h-[300px] flex items-center justify-center text-gray-400 text-sm">File not found.</div>
+            ) : isExpired ? (
+              <div className="min-h-[300px] flex items-center justify-center text-gray-400 text-sm">This link has expired.</div>
+            ) : isLocked ? (
+              <PasswordGate shareId={fileRecord.share_id} />
+            ) : (
+              <OmniPlayer fileId={id} metadata={publicFile} />
+            )}
           </div>
 
           <div className="w-full max-w-sm mx-auto z-10">
@@ -75,15 +95,19 @@ export default async function OmniViewer({ params }: { params: Promise<{ id: str
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
             <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Security</span>
-            <span className="text-sm font-semibold text-white">End-to-End Encrypted</span>
+            <span className="text-sm font-semibold text-white">
+              {isClientEncrypted ? 'End-to-End Encrypted (AES-GCM, key in link)' : 'Encrypted in transit (HTTPS)'}
+            </span>
           </div>
           <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
             <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Speed</span>
             <span className="text-sm font-semibold text-primary">Optimized for Stream</span>
           </div>
           <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Integrity</span>
-            <span className="text-sm font-semibold text-success">Verified Bit-Perfect</span>
+            <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Storage</span>
+            <span className="text-sm font-semibold text-white">
+              {isCompressed ? `Lossless · ${publicFile?.compression_ratio}` : 'Stored as uploaded'}
+            </span>
           </div>
         </div>
 

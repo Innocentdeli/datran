@@ -3,63 +3,73 @@ import { generateRegistrationOptions, verifyRegistrationResponse } from '@simple
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../[...nextauth]/route';
 import db from '@/db';
+import { enforceRateLimit } from '@/lib/rateLimit';
+import { getWebAuthnConfig, encodeChallenge, decodeChallenge } from '../_shared';
 
-const rpName = 'Datran Secure Transfer';
-const rpID = 'localhost'; // Should match domain in prod
-const origin = `http://${rpID}:3000`; // Should match origin in prod
+const LIMIT = { maxRequests: 10, windowMs: 60_000 };
+
+// Registration requires an authenticated session: passkeys can only be attached
+// to the account of the currently signed-in user.
+async function getSessionUser() {
+    const session = await getServerSession(authOptions);
+    const sessionUser = session?.user as { id?: string; email?: string | null } | undefined;
+    if (!sessionUser?.id) return null;
+    const userRes = await db.query('SELECT * FROM users WHERE id = $1', [sessionUser.id]);
+    return userRes.rows[0] || null;
+}
 
 export async function GET(request: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    try {
+        const user = await getSessionUser();
+        if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const userRes = await db.query('SELECT * FROM users WHERE email = $1', [session.user.email]);
-    const user = userRes.rows[0];
-    if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
+        const limited = enforceRateLimit(request, 'webauthn-reg-options', LIMIT, user.id);
+        if (limited) return limited;
 
-    // Ensure user.id exists for webauthn (might need generating if legacy)
-    const userId = user.id; 
+        const { rpID, rpName } = getWebAuthnConfig();
+        const credsRes = await db.query('SELECT id FROM webauthn_credentials WHERE user_id = $1', [user.id]);
 
-    // Get existing credentials to prevent re-registering
-    const userCredentialsRes = await db.query('SELECT id FROM webauthn_credentials WHERE user_id = $1', [userId]);
-    const userCredentials = userCredentialsRes.rows;
+        const options = await generateRegistrationOptions({
+            rpName,
+            rpID,
+            userID: new Uint8Array(Buffer.from(String(user.id))),
+            userName: user.email,
+            timeout: 60000,
+            attestationType: 'none',
+            excludeCredentials: credsRes.rows.map((cred: { id: string }) => ({ id: cred.id, transports: [] })),
+            authenticatorSelection: {
+                residentKey: 'required',
+                userVerification: 'preferred',
+            },
+        });
 
-    const options = await generateRegistrationOptions({
-        rpName,
-        rpID,
-        userID: new Uint8Array(Buffer.from(userId)),
-        userName: user.email,
-        timeout: 60000,
-        attestationType: 'none',
-        excludeCredentials: userCredentials.map(cred => ({
-            id: cred.id, // v10 uses base64url strings directly usually, or Uint8Array
-            transports: [],
-        })),
-        authenticatorSelection: {
-            residentKey: 'required',
-            userVerification: 'preferred',
-        },
-    });
-
-    // Save challenge
-    await db.query('UPDATE users SET current_challenge = $1 WHERE id = $2', [options.challenge, userId]);
-
-    return NextResponse.json(options);
+        await db.query('UPDATE users SET current_challenge = $1 WHERE id = $2', [encodeChallenge(options.challenge), user.id]);
+        return NextResponse.json(options);
+    } catch (e) {
+        console.error('[webauthn/register GET]', e);
+        return NextResponse.json({ error: 'Could not start passkey registration' }, { status: 500 });
+    }
 }
 
 export async function POST(request: Request) {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const body = await request.json();
-    const userRes = await db.query('SELECT * FROM users WHERE email = $1', [session.user.email]);
-    const user = userRes.rows[0];
-    
-    if (!user || !user.current_challenge) return NextResponse.json({ error: 'Challenge expired' }, { status: 400 });
-
     try {
+        const user = await getSessionUser();
+        if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+        const limited = enforceRateLimit(request, 'webauthn-reg-verify', LIMIT, user.id);
+        if (limited) return limited;
+
+        const body = await request.json();
+        const expectedChallenge = decodeChallenge(user.current_challenge);
+        if (!expectedChallenge) return NextResponse.json({ error: 'Challenge expired' }, { status: 400 });
+
+        // Single-use challenge
+        await db.query('UPDATE users SET current_challenge = NULL WHERE id = $1', [user.id]);
+
+        const { rpID, origin } = getWebAuthnConfig();
         const verification = await verifyRegistrationResponse({
             response: body,
-            expectedChallenge: user.current_challenge,
+            expectedChallenge,
             expectedOrigin: origin,
             expectedRPID: rpID,
         });
@@ -67,30 +77,28 @@ export async function POST(request: Request) {
         if (verification.verified && verification.registrationInfo) {
             const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
             const { id: credentialID, publicKey: credentialPublicKey, counter } = credential;
-            
-            // Convert buffers for sqlite BLOB (now bytea)
-            const credentialIDBase64url = Buffer.from(credentialID).toString('base64url');
+
+            // In @simplewebauthn/server v13, credential.id is already a base64url string
+            const transports = Array.isArray(body?.response?.transports) ? body.response.transports : [];
 
             await db.query(`
                 INSERT INTO webauthn_credentials (id, user_id, public_key, counter, device_type, backed_up, transports)
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
             `, [
-                credentialIDBase64url,
+                credentialID,
                 user.id,
                 Buffer.from(credentialPublicKey),
                 counter,
                 credentialDeviceType,
-                credentialBackedUp, // Postgres boolean handles this
-                JSON.stringify(body.response.transports || [])
+                credentialBackedUp,
+                JSON.stringify(transports),
             ]);
-
-            // Clear challenge
-            await db.query('UPDATE users SET current_challenge = NULL WHERE id = ?', [user.id]);
 
             return NextResponse.json({ verified: true });
         }
         return NextResponse.json({ verified: false }, { status: 400 });
-    } catch (e: any) {
-        return NextResponse.json({ error: e.message }, { status: 400 });
+    } catch (e) {
+        console.error('[webauthn/register POST]', e);
+        return NextResponse.json({ error: 'Passkey registration failed' }, { status: 400 });
     }
 }

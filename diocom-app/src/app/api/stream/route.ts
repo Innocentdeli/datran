@@ -1,125 +1,284 @@
-
 import { NextResponse } from 'next/server';
 import fs from 'fs';
-import { config } from '@/config';
-import { FileRepository } from '@/db/files';
 import { cookies } from 'next/headers';
+import { FileRepository } from '@/db/files';
+import { hasFileAccess } from '@/lib/crypto/AccessToken';
+import { resolveStoredPath } from '@/lib/storage';
+import { DictionaryUnavailableError } from '@/lib/reactorWorker';
+import { getStreamCache, decodeStoredFile, cacheDecoded, isCompressedRecord, DEMAND_TTL_MS, StoredContentMissingError } from '@/lib/streamCache';
+import { recordStreamAccess } from '@/lib/prefetcher';
+import { getStoreFile, ReactorStoreUnavailableError } from '@/lib/storage/reactorStore';
+import { parseReactorStoragePath, forwardableRange, mapReactorResponse, isCountedAccess } from '@/lib/storage/reactorStoreCore';
+import type { CacheOutcome } from '@/lib/predict';
 import '@/db/schema';
 
+// The decompression cache lives in src/lib/streamCache.ts (shared with the prefetcher, NETWORK_SPEC §5).
+
+// ---------------------------------------------------------------------------
+// Range parsing (single range only; multi-range is ignored -> full 200)
+// ---------------------------------------------------------------------------
+
+type RangeResult =
+    | { kind: 'none' }
+    | { kind: 'unsatisfiable' }
+    | { kind: 'range'; start: number; end: number };
+
+function parseRange(header: string | null, size: number): RangeResult {
+    if (!header) return { kind: 'none' };
+    const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+    if (!m) return { kind: 'none' }; // malformed or multi-range: ignore
+    const [, s, e] = m;
+    if (!s && !e) return { kind: 'none' };
+
+    if (!s) {
+        // suffix range: last N bytes
+        const n = parseInt(e, 10);
+        if (n === 0 || size === 0) return { kind: 'unsatisfiable' };
+        return { kind: 'range', start: Math.max(0, size - n), end: size - 1 };
+    }
+
+    const start = parseInt(s, 10);
+    let end = e ? parseInt(e, 10) : size - 1;
+    if (e && end < start) return { kind: 'none' }; // invalid -> ignore per RFC 9110
+    if (start >= size) return { kind: 'unsatisfiable' };
+    end = Math.min(end, size - 1);
+    return { kind: 'range', start, end };
+}
+
+// Content types a browser would execute in our origin; served as downloads instead.
+const ACTIVE_TYPES = /^(text\/html|application\/xhtml\+xml|image\/svg\+xml|text\/xml|application\/xml|text\/javascript|application\/javascript|application\/ecmascript|text\/ecmascript)\b/i;
+
+function baseHeaders(contentType: string, isProtected: boolean): Record<string, string> {
+    const active = ACTIVE_TYPES.test(contentType);
+    const h: Record<string, string> = {
+        'Content-Type': active ? 'application/octet-stream' : contentType,
+        'Accept-Ranges': 'bytes',
+        'X-Content-Type-Options': 'nosniff',
+    };
+    if (active) h['Content-Disposition'] = 'attachment';
+    if (isProtected) h['Cache-Control'] = 'private, no-store';
+    return h;
+}
+
+function nodeToWebStream(nodeStream: fs.ReadStream): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+        start(controller) {
+            nodeStream.on('data', (chunk) => {
+                const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+                controller.enqueue(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+                if ((controller.desiredSize ?? 1) <= 0) nodeStream.pause();
+            });
+            nodeStream.on('end', () => controller.close());
+            nodeStream.on('error', (err) => controller.error(err));
+        },
+        pull() {
+            nodeStream.resume();
+        },
+        cancel() {
+            nodeStream.destroy();
+        },
+    });
+}
+
+function unsatisfiable(size: number, headers: Record<string, string>) {
+    return new NextResponse(null, {
+        status: 416,
+        headers: { ...headers, 'Content-Range': `bytes */${size}`, 'Content-Length': '0' },
+    });
+}
+
 export async function GET(request: Request) {
+    const t0 = performance.now();
     const { searchParams } = new URL(request.url);
     const fileId = searchParams.get('file');
 
-    if (!fileId) {
-        return new NextResponse("File not specified", { status: 400 });
+    if (!fileId || fileId.length > 512) {
+        return new NextResponse('File not specified', { status: 400, headers: { 'Accept-Ranges': 'bytes' } });
     }
 
-    console.log(`[STREAM] Request for: ${fileId}`);
-
-    // 1. Database Lookup
-    // We assume fileId is the share_id (e.g., 'filename.omni.acs')
+    // Works for both new random ids and legacy '<name>.omni.acs' ids (plain DB lookup).
     const fileRecord = await FileRepository.findByShareId(fileId);
-
     if (!fileRecord) {
-        console.error(`[STREAM] File not found in registry: ${fileId}`);
-        return new NextResponse("File not found in registry", { status: 404 });
+        return new NextResponse('File not found', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
     }
 
-    console.log(`[STREAM] Found record. Path: ${fileRecord.storage_path}`);
-
-    // 2. Expiration Check
-    if (fileRecord.expires_at && Date.now() > fileRecord.expires_at) {
-        return new NextResponse("File has expired", { status: 410 });
+    if (fileRecord.expires_at && Date.now() > Number(fileRecord.expires_at)) {
+        return new NextResponse('File has expired', { status: 410, headers: { 'Accept-Ranges': 'bytes' } });
     }
 
-    // 3. Password Protection Check
-    if (fileRecord.password_hash) {
-        const cookieStore = await cookies();
-        const hasAccess = cookieStore.get(`diocom_access_${fileRecord.share_id}`);
-        if (!hasAccess) {
-            return new NextResponse("Access Denied: Password Required", { status: 403 });
-        }
+    const isProtected = !!fileRecord.password_hash;
+    if (isProtected && !hasFileAccess(await cookies(), fileRecord)) {
+        return new NextResponse('Access denied', { status: 403, headers: { 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store' } });
     }
 
-    // 4. Update Analytics (Last Accessed)
-    await FileRepository.incrementDownloads(fileRecord.share_id);
-
-    // 5. CDN Redirect
-    if (fileRecord.is_external === 1) {
-        return NextResponse.redirect(fileRecord.storage_path);
-    }
-
-    const filePath = fileRecord.storage_path;
-    const exists = fs.existsSync(filePath);
-
-    if (!exists) {
-        return new NextResponse("File content missing from disk", { status: 404 });
-    }
-
-    const fileSize = fileRecord.file_size; // Use DB size
-    const range = request.headers.get('range');
+    const rangeHeader = request.headers.get('range');
     const contentType = fileRecord.mime_type || 'application/octet-stream';
+    const headers = baseHeaders(contentType, isProtected);
 
-    if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    // Count a download (and a prediction access event) only for full requests or ranges starting at byte 0,
+    // so range continuations (video seeking, resumed downloads) are not double counted.
+    const isAccess = (r: RangeResult) => r.kind === 'none' || (r.kind === 'range' && r.start === 0);
+    const countDownload = async (r: RangeResult) => {
+        if (isAccess(r)) {
+            await FileRepository.incrementDownloads(fileRecord.share_id);
+        }
+    };
+    // Called right before a successful response is returned: server-side time to first byte of that response.
+    const noteAccess = (r: RangeResult, outcome: CacheOutcome | null) => {
+        if (!isAccess(r)) return;
+        recordStreamAccess({ request, fileId: fileRecord.share_id, ts: Date.now(), outcome, ttfbMs: performance.now() - t0 });
+    };
 
-        // Safety check for range
-        if (start >= fileSize) {
-            return new NextResponse("Requested range not satisfiable", { status: 416 });
+    // Serves fully decoded bytes from memory (decode cache or a fresh decode), honouring the client's Range.
+    const serveDecoded = async (data: Buffer, engine: string, outcome: CacheOutcome) => {
+        const size = data.length;
+        const r = parseRange(rangeHeader, size);
+        headers['X-Datran-Engine'] = engine;
+
+        if (r.kind === 'unsatisfiable') return unsatisfiable(size, headers);
+        await countDownload(r);
+        noteAccess(r, outcome);
+
+        if (r.kind === 'range') {
+            const chunk = data.subarray(r.start, r.end + 1);
+            return new NextResponse(new Uint8Array(chunk), {
+                status: 206,
+                headers: {
+                    ...headers,
+                    'Content-Range': `bytes ${r.start}-${r.end}/${size}`,
+                    'Content-Length': chunk.length.toString(),
+                },
+            });
+        }
+        return new NextResponse(new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength), {
+            status: 200,
+            headers: { ...headers, 'Content-Length': size.toString() },
+        });
+    };
+
+    // Reactor chunked object store (NETWORK_SPEC §2): proxy the client's Range to the reactor and stream its
+    // response back. The reactor does range math, 206/416, chunk verification and decoding; the app keeps its own
+    // content-type/nosniff/disposition/cache headers and the access/counting rules. Bytes the prefetcher already
+    // cached are served from memory.
+    const storeId = parseReactorStoragePath(fileRecord.storage_path);
+    if (storeId) {
+        const cached = getStreamCache().get(fileRecord.share_id, Date.now());
+        if (cached) return serveDecoded(cached.value, `${cached.engine}_cached`, 'hit');
+
+        let upstream: Response;
+        try {
+            upstream = await getStoreFile(storeId, { range: forwardableRange(rangeHeader), signal: request.signal });
+        } catch (err) {
+            if (!(err instanceof ReactorStoreUnavailableError)) throw err;
+            console.error(`[STREAM] ${fileRecord.share_id}: ${err.message}`);
+            return new NextResponse('Storage temporarily unavailable', {
+                status: 503,
+                headers: { 'Accept-Ranges': 'bytes', 'Retry-After': '30', 'Cache-Control': 'no-store' },
+            });
+        }
+        const mapped = mapReactorResponse(upstream.status, upstream.headers, { ...headers, 'X-Datran-Engine': 'reactor_store' });
+        if (mapped.kind !== 'pass' || mapped.status === 416) {
+            await upstream.body?.cancel().catch(() => { });
+        }
+        if (mapped.kind === 'missing') {
+            console.error(`[STREAM] ${fileRecord.share_id}: reactor store does not hold ${storeId}`);
+            return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
+        }
+        if (mapped.kind === 'error') {
+            console.error(`[STREAM] ${fileRecord.share_id}: reactor store GET returned ${mapped.upstreamStatus}`);
+            return new NextResponse('Storage temporarily unavailable', {
+                status: mapped.upstreamStatus === 503 ? 503 : 502,
+                headers: { 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' },
+            });
+        }
+        if (mapped.status === 416) return new NextResponse(null, { status: 416, headers: mapped.headers });
+
+        if (isCountedAccess(mapped.status, upstream.headers.get('content-range'))) {
+            await FileRepository.incrementDownloads(fileRecord.share_id);
+            recordStreamAccess({ request, fileId: fileRecord.share_id, ts: Date.now(), outcome: 'miss', ttfbMs: performance.now() - t0 });
+        }
+        return new NextResponse(upstream.body, { status: mapped.status, headers: mapped.headers });
+    }
+
+    // External (S3/CDN) objects: redirect.
+    if (Number(fileRecord.is_external) === 1) {
+        const r = parseRange(rangeHeader, Number(fileRecord.file_size) || 0);
+        await countDownload(r);
+        noteAccess(r, null);
+        return NextResponse.redirect(fileRecord.storage_path, { headers: { 'Accept-Ranges': 'bytes' } });
+    }
+
+    const filePath = resolveStoredPath(fileRecord.storage_path);
+    if (!filePath) {
+        console.error(`[STREAM] Stored path for ${fileRecord.share_id} is outside the storage root`);
+        return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
+    }
+
+    let stat: fs.Stats;
+    try {
+        stat = await fs.promises.stat(filePath);
+    } catch {
+        return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
+    }
+
+    if (isCompressedRecord(fileRecord)) {
+        let decompressed: Buffer;
+        let engine: string;
+        const cached = getStreamCache().get(fileRecord.share_id, Date.now());
+        const outcome: CacheOutcome = cached ? 'hit' : 'miss';
+        if (cached) {
+            decompressed = cached.value;
+            engine = `${cached.engine}_cached`;
+        } else {
+            try {
+                const result = await decodeStoredFile(fileRecord);
+                decompressed = result.data;
+                engine = result.engine;
+                cacheDecoded(fileRecord.share_id, result, 'demand', DEMAND_TTL_MS);
+            } catch (err) {
+                if (err instanceof StoredContentMissingError) {
+                    return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
+                }
+                if (err instanceof DictionaryUnavailableError || (err instanceof Error && err.name === 'DictionaryUnavailableError')) {
+                    // Rust reactor is down (or lacks it too) and the dictionary isn't in REACTOR_STATE_DIR/dicts:
+                    // refuse rather than serve garbage. Recoverable once the reactor or the dictionary is back.
+                    console.error(`[STREAM] Cannot decode ${fileRecord.share_id}: ${err.message}. ` +
+                        'Start the Rust reactor or make its dictionary available under $REACTOR_STATE_DIR/dicts.');
+                    return new NextResponse('Decoder temporarily unavailable', {
+                        status: 503,
+                        headers: { 'Accept-Ranges': 'bytes', 'Retry-After': '30', 'Cache-Control': 'no-store' },
+                    });
+                }
+                console.error('[STREAM] Decompression failed:', err instanceof Error ? err.message : err);
+                return new NextResponse('Unable to decode file', { status: 500, headers: { 'Accept-Ranges': 'bytes' } });
+            }
         }
 
-        const chunksize = (end - start) + 1;
-        const nodeStream = fs.createReadStream(filePath, { start, end });
-        const webStream = new ReadableStream({
-            start(controller) {
-                nodeStream.on('data', (chunk) => controller.enqueue(chunk));
-                nodeStream.on('end', () => controller.close());
-                nodeStream.on('error', (err) => controller.error(err));
-            },
-            cancel() {
-                nodeStream.destroy();
-            },
-        });
-
-        const headers = {
-            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-            'Accept-Ranges': 'bytes',
-            'Content-Length': chunksize.toString(),
-            'Content-Type': contentType,
-        };
-
-        return new NextResponse(webStream, { status: 206, headers });
-    } else {
-        const headers = {
-            'Content-Length': fileSize.toString(),
-            'Content-Type': contentType,
-        };
-        const nodeStream = fs.createReadStream(filePath);
-        console.log(`[STREAM] Initiating NodeReadStream for: ${filePath}`);
-
-        const webStream = new ReadableStream({
-            start(controller) {
-                nodeStream.on('data', (chunk) => {
-                    // console.log(`[STREAM] Enqueueing chunk: ${chunk.length} bytes`);
-                    controller.enqueue(chunk);
-                });
-                nodeStream.on('end', () => {
-                    console.log(`[STREAM] NodeStream finished: ${fileId}`);
-                    controller.close();
-                });
-                nodeStream.on('error', (err) => {
-                    console.error(`[STREAM] NodeStream error: ${err.message}`);
-                    controller.error(err);
-                });
-            },
-            cancel() {
-                console.log(`[STREAM] WebStream cancelled by client`);
-                nodeStream.destroy();
-            },
-        });
-
-        return new NextResponse(webStream, { status: 200, headers });
+        return serveDecoded(decompressed, engine, outcome);
     }
+
+    // Uncompressed: stream from disk using the real on-disk size.
+    const size = stat.size;
+    const r = parseRange(rangeHeader, size);
+    if (r.kind === 'unsatisfiable') return unsatisfiable(size, headers);
+    await countDownload(r);
+    noteAccess(r, 'disk');
+
+    if (r.kind === 'range') {
+        const nodeStream = fs.createReadStream(filePath, { start: r.start, end: r.end });
+        return new NextResponse(nodeToWebStream(nodeStream), {
+            status: 206,
+            headers: {
+                ...headers,
+                'Content-Range': `bytes ${r.start}-${r.end}/${size}`,
+                'Content-Length': (r.end - r.start + 1).toString(),
+            },
+        });
+    }
+
+    const nodeStream = fs.createReadStream(filePath);
+    return new NextResponse(nodeToWebStream(nodeStream), {
+        status: 200,
+        headers: { ...headers, 'Content-Length': size.toString() },
+    });
 }

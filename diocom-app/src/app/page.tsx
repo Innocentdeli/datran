@@ -2,7 +2,6 @@
 
 import { useState, useCallback } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { config } from '@/config';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import FileUploadZone from '@/components/features/FileUploadZone';
@@ -20,9 +19,8 @@ import { NeuralService } from '@/lib/NeuralService';
 import { Cpu, Terminal, Layers, Activity, ShieldCheck, Lock as SecurityLock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import * as Encryption from '@/lib/crypto/Encryption';
+import { uploadEncryptedFile } from '@/lib/crypto/e2eClient';
 import { CognitiveLens } from '@/lib/CognitiveLens';
-import { DisasterRelay } from '@/lib/DisasterRelay';
-import { MultiRegionRouter } from '@/lib/MultiRegionRouter';
 import { useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 import { Lock, Zap, Gauge } from 'lucide-react';
@@ -39,40 +37,21 @@ export default function DiocomDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [isStandardMode, setIsStandardMode] = useState(false);
   const [compressionStats, setCompressionStats] = useState({
-    speed: config.compression.defaultSpeed,
-    ratio: `${config.compression.defaultRatio}x`,
-    fidelity: 'BIT-PERFECT',
+    speed: '—',
+    ratio: '—',
+    fidelity: '—',
   });
   const [dtnBalance, setDtnBalance] = useState<number>(0);
-  const [isDisasterMesh, setIsDisasterMesh] = useState<boolean>(false);
-  const [edgeRegion, setEdgeRegion] = useState<string>('Detecting...');
 
   useEffect(() => {
     // Fetch $DTN Balance
     fetch('/api/v1/user/credits')
       .then(res => res.json())
       .then(data => { if (data.success) setDtnBalance(data.balance); });
-
-    // Detect Global Edge
-    MultiRegionRouter.getOptimalCluster().then(setEdgeRegion);
   }, []);
 
-  const toggleDisasterMesh = () => {
-    const newState = !isDisasterMesh;
-    setIsDisasterMesh(newState);
-    if (newState) {
-      DisasterRelay.activate();
-      addLog('system', 'Disaster Mesh Activated: Local Discovery Engaged.');
-    } else {
-      DisasterRelay.deactivate();
-      addLog('system', 'Disaster Mesh Deactivated.');
-    }
-  };
-
   const [logs, setLogs] = useState<LogEntry[]>([
-    { type: 'system', message: 'Initializing 360 OmniDispatcher...', timestamp: new Date() },
-    { type: 'swarm', message: `Mesh Nodes detected: ${config.network.meshNodes}`, timestamp: new Date() },
-    { type: 'reactor', message: 'V2.1 online. Entropy map ready.', timestamp: new Date() },
+    { type: 'system', message: 'Ready. Select files to upload.', timestamp: new Date() },
   ]);
 
   const addLog = useCallback((type: LogEntry['type'], message: string) => {
@@ -115,22 +94,9 @@ export default function DiocomDashboard() {
 
       addLog('swarm', `[${i + 1}/${selectedFiles.length}] Securing ${file.name} (Zero-Knowledge)...`);
 
-      const { encryptedData, iv } = await Encryption.encryptFile(file, batchKey);
-      const encryptedBlob = new Blob([encryptedData], { type: 'application/octet-stream' });
-      const encryptedFile = new File([encryptedBlob], file.name, { type: 'application/octet-stream' });
-
       const sanitizedName = file.name.replace(/[<>:"|?*]/g, '_').trim().replace(/^\.+/, '');
-      const eventSource = new EventSource(`/api/progress?fileId=${encodeURIComponent(sanitizedName)}`);
-
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const fileProgress = data.percent;
-          const globalProgress = progressBasis + (fileProgress * (1 / selectedFiles.length));
-          setUploadProgress(Math.floor(globalProgress));
-
-          if (data.status) addLog('swarm', `[${i + 1}/${selectedFiles.length}] ${data.status}`);
-        } catch (e) { }
+      const reportProgress = (fraction: number) => {
+        setUploadProgress(Math.floor(progressBasis + (fraction * 100) / selectedFiles.length));
       };
 
       let attempts = 0;
@@ -140,45 +106,45 @@ export default function DiocomDashboard() {
       while (attempts < maxAttempts && !success) {
         attempts++;
         try {
-          const formData = new FormData();
-          formData.append('file', encryptedFile); // Send encrypted payload
-          formData.append('iv', Encryption.bytesToBase64Url(iv)); // Store IV briefly
-          if (password) {
-            formData.append('password', password);
-          }
-
-          // Pre-Encryption Semantic Extraction (Local AI/Gemini Nano simulation)
-          addLog('neural', `[${i + 1}/${selectedFiles.length}] Local AI scanning semantics before Zero-Knowledge encryption...`);
+          addLog('neural', `[${i + 1}/${selectedFiles.length}] Classifying file locally before encryption...`);
           const aiMeta = await CognitiveLens.analyze(file);
-          
-          formData.append('is_encrypted', 'true');
-          formData.append('tags', JSON.stringify([...aiMeta.tags, 'Zero-Knowledge']));
-          formData.append('summary', aiMeta.summary + (aiMeta.sensitivity === 'High' ? ' [HIGH SENSITIVITY]' : ''));
-          formData.append('category', aiMeta.category);
 
-          const res = await fetch('/api/ingest', {
-            method: 'POST',
-            body: formData,
+          // Metadata fields go first and the file last, so the server knows the upload is encrypted /
+          // password-protected before the bytes arrive and can stream it without buffering. The file is encrypted
+          // chunk by chunk (DCE2) while it is read, so memory stays bounded for multi-GB files.
+          const fields: Array<[string, string]> = [];
+          if (password) fields.push(['password', password]);
+          fields.push(['tags', JSON.stringify([...aiMeta.tags, 'Zero-Knowledge'])]);
+          fields.push(['summary', aiMeta.summary + (aiMeta.sensitivity === 'High' ? ' [HIGH SENSITIVITY]' : '')]);
+          fields.push(['category', aiMeta.category]);
+
+          const result = await uploadEncryptedFile({
+            file,
+            keyStr: batchKeyStr,
+            fields,
+            onProgress: (fraction) => reportProgress(fraction),
           });
+          const data = result.data as { success?: boolean; message?: string; link?: string; stats?: typeof compressionStats } | null;
+          if (result.status < 200 || result.status >= 300) throw new Error(data?.message || `HTTP ${result.status}`);
+          if (!data?.success || !data.link) throw new Error(data?.message || 'Engine Failed');
 
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-          if (!data.success) throw new Error(data.message || 'Engine Failed');
-
-          eventSource.close();
-          addLog('reactor', `[${i + 1}/${selectedFiles.length}] Secure Tunnel Established.`);
+          addLog('reactor', `[${i + 1}/${selectedFiles.length}] Encrypted upload stored.`);
           addLog('swarm', `[${i + 1}/${selectedFiles.length}] Link Generated: ${data.link}`);
 
           // Append Key to link via hash (Ensures key stays in browser)
+          const uploadedShareId = data.link.split('/').pop() || `${sanitizedName}.omni.acs`;
+          try {
+            localStorage.setItem(`diocom_key_${uploadedShareId}`, batchKeyStr);
+          } catch { }
           lastLink = `${data.link}#key=${batchKeyStr}`;
           if (data.stats) setCompressionStats(data.stats);
           window.dispatchEvent(new Event('diocom-history-update'));
           success = true;
-        } catch (e: any) {
+        } catch (e) {
           if (attempts === maxAttempts) {
-            eventSource.close();
-            setError(`Upload failed for ${file.name}: ${e.message}`);
-            addLog('error', `Ingestion failed for ${file.name}: ${e.message}`);
+            const message = e instanceof Error ? e.message : String(e);
+            setError(`Upload failed for ${file.name}: ${message}`);
+            addLog('error', `Ingestion failed for ${file.name}: ${message}`);
           } else {
             addLog('system', `Retrying ${file.name} (${attempts}/${maxAttempts})...`);
             await new Promise(r => setTimeout(r, 1000));

@@ -1,11 +1,11 @@
-
+/**
+ * Rule-based MIME-type classifier with a simple byte-diversity check on the first 1 KiB.
+ * No machine learning is involved; results are informational only.
+ * (Export name kept as AIService for existing callers.)
+ */
 export const AIService = {
+    /** `buffer` may be just the leading bytes of the file (only the first 1 KiB is inspected). */
     analyze: async (buffer: Buffer, mimeType: string) => {
-        // Mock AI Analysis
-        // In a real scenario, this would load TensorFlow.js or call an external API
-
-        console.log('[AI] Neural Engine Spinning Up...');
-        await new Promise(r => setTimeout(r, 50)); // Simulated tensor processing delay
 
         const result = {
             classification: 'unknown',
@@ -26,7 +26,7 @@ export const AIService = {
             result.confidence = 0.95;
             result.suggestedCompression = 'motion_estimation';
         } else if (buffer.length > 1024) {
-            // New internal entropy analysis
+            // Byte-diversity heuristic over the first 1 KiB
             const sample = buffer.subarray(0, 1024);
             const unique = new Set(sample).size;
             if (unique > 250) {
@@ -38,7 +38,7 @@ export const AIService = {
             }
         }
 
-        console.log(`[AI] Analysis Complete: ${JSON.stringify(result)}`);
+        console.log(`[CLASSIFIER] MIME-type classification: ${JSON.stringify(result)}`);
         return result;
     }
 }
