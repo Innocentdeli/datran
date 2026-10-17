@@ -16,7 +16,7 @@ async function runSimulation() {
     const data = Buffer.from(dataStr);
 
     // 2. Ingest
-    const chunkIds = node.ingestFile("test.txt", data);
+    const chunkIds = await node.ingestFile("test.txt", data);
     console.log(`[Genesis] Ingested ${chunkIds.length} chunks (RAW state).`);
 
     // 3. Sim Loop
@@ -34,8 +34,8 @@ async function runSimulation() {
 
         // Introduce mutations (Network discovering new compression strats)
         if (e > 2) {
-            node.mutate();
-            node.mutate(); // Discover a few
+            await node.mutate();
+            await node.mutate(); // Discover a few
         }
 
         for (let r = 0; r < REQUESTS_PER_EPOCH; r++) {

@@ -10,7 +10,7 @@ async function runOracleSimulation() {
 
     // 1. Create the recurring data
     const data = Buffer.from("Important Morning Data");
-    const chunkIds = node.ingestFile("report.pdf", data);
+    const chunkIds = await node.ingestFile("report.pdf", data);
     const targetId = chunkIds[0];
 
     // 2. Train the Oracle (Simulate 5 days of history)

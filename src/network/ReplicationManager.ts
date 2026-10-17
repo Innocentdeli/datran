@@ -87,13 +87,16 @@ export class ReplicationManager {
     /**
      * SELF-HEALING: RESILIENCE LOOP
      */
+    private resilienceTimer?: ReturnType<typeof setInterval>;
+
     public startResilienceLoop() {
-        setInterval(async () => {
+        if (this.resilienceTimer) return;
+        this.resilienceTimer = setInterval(async () => {
             console.log(`[Mesh] 🛡️ Resilience Check: Scanning neighbor health...`);
 
             try {
-                // In Node.js environment, we need an absolute URL
-                const baseUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL || 'http://localhost:3000';
+                const port = process.env.PORT || '3001';
+                const baseUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL || `http://localhost:${port}`;
                 const pulseUrl = baseUrl.endsWith('/') ? `${baseUrl}api/swarm/pulse` : `${baseUrl}/api/swarm/pulse`;
 
                 // 1. Get Node Pulse through the API (simulated here)
@@ -112,5 +115,16 @@ export class ReplicationManager {
                 console.error(`[Mesh] ❌ Resilience Check failed:`, error instanceof Error ? error.message : error);
             }
         }, 15000);
+        // Never keep the process alive just for health pings.
+        if (typeof this.resilienceTimer === 'object' && typeof (this.resilienceTimer as any).unref === 'function') {
+            (this.resilienceTimer as any).unref();
+        }
+    }
+
+    public stopResilienceLoop() {
+        if (this.resilienceTimer) {
+            clearInterval(this.resilienceTimer);
+            this.resilienceTimer = undefined;
+        }
     }
 }

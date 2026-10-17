@@ -35,6 +35,9 @@ export class ACSNode {
     private requestsSinceEvo = 0;
     private lastBaselineLatency?: number;
 
+    /** Simulations only: also generate lossy 'ai-upscale'/'generative' variants. Never enable for real storage. */
+    public includeSimulatedVariants = false;
+
     constructor(region: string = 'server', config?: Partial<ACSConfig>) {
         this.region = region;
         this.config = { ...DEFAULT_CONFIG, ...config };
@@ -95,7 +98,9 @@ export class ACSNode {
         if (chunks.length === 0) return;
         const chunk = chunks[Math.floor(Math.random() * chunks.length)];
         const raw = chunk.variants.find(v => v.algorithm === 'raw') || chunk.variants[0];
-        const fullVariants = GenomeGenerator.generateVariants(chunk.id, raw.data, this.config);
+        const fullVariants = GenomeGenerator.generateVariants(chunk.id, GenomeGenerator.decodeVariant(raw), this.config, {
+            includeSimulated: this.includeSimulatedVariants
+        });
         
         for (const v of fullVariants) {
             if (!chunk.variants.find(ex => ex.algorithm === v.algorithm)) {
@@ -153,11 +158,18 @@ export class ACSNode {
                     const variant = chunk.variants.find(v => v.id === chunk.bestVariantId) || chunk.variants[0];
                     
                     // 1. Pre-decode to RAM
-                    this.memoryCache.set(pred.chunkId, variant.data);
+                    let decodedData: Buffer;
+                    try {
+                        decodedData = GenomeGenerator.decodeVariant(variant);
+                    } catch (e) {
+                        console.warn(`[The Oracle] Skipping ${pred.chunkId.substring(0, 8)}: ${(e as Error).message}`);
+                        return;
+                    }
+                    this.memoryCache.set(pred.chunkId, decodedData);
                     console.log(`[The Oracle] ⚡ Pre-Decoded Chunk ${pred.chunkId.substring(0, 8)} to RAM (Confidence: ${(pred.confidence * 100).toFixed(1)}%).`);
                     
                     // 2. Proactive Edge Cache
-                    this.edgeService.cache(pred.chunkId, variant.data, pred.targetRegion as EdgeRegion);
+                    this.edgeService.cache(pred.chunkId, decodedData, pred.targetRegion as EdgeRegion);
                 }
             });
         }
@@ -197,7 +209,8 @@ export class ACSNode {
                 let variant = chunk.variants.find(v => v.id === chunk.bestVariantId) || chunk.variants[0];
                 const transferMs = variant.fitness.size / this.evolutionManager['bandwidthEstimate'];
                 timeMs = transferMs + 0.1;
-                decoded = variant.data;
+                // Variants hold encoded bytes; always return the original chunk content.
+                decoded = GenomeGenerator.decodeVariant(variant);
             }
         }
 
@@ -211,6 +224,16 @@ export class ACSNode {
         }
 
         return { data: decoded, timeMs };
+    }
+
+    /** Stop background timers so the process can exit cleanly. */
+    public stop() {
+        this.replicationManager.stopResilienceLoop();
+    }
+
+    public dispose() {
+        this.stop();
+        this.memoryCache.clear();
     }
 
     public optimize(context: ClientContext = 'server') {

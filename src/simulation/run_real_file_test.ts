@@ -30,13 +30,13 @@ async function runRealFileTest() {
     // 2. Ingest
     console.log("Ingesting...");
     const startIngest = Date.now();
-    const chunkIds = node.ingestFile(fileName, fileContent);
+    const chunkIds = await node.ingestFile(fileName, fileContent);
     console.log(`Ingested in ${Date.now() - startIngest}ms. Split into ${chunkIds.length} chunks.`);
 
     // 3. Mutate (Evolution)
     console.log("Evolving variants...");
-    node.mutate();
-    node.mutate(); // Do it twice to ensure we get some good compression variants
+    await node.mutate();
+    await node.mutate(); // Do it twice to ensure we get some good compression variants
 
     // 4. Test Contexts
     const chunkId = chunkIds[0]; // Test the first chunk

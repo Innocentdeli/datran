@@ -10,7 +10,7 @@ async function runMetaEvolution() {
 
     // 1. Ingest Data
     const data = crypto.randomBytes(1024 * 1024);
-    const chunkIds = node.ingestFile("test.dat", data);
+    const chunkIds = await node.ingestFile("test.dat", data);
 
     // 2. Run Traffic Loop
     console.log("Generating traffic...");

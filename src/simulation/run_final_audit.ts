@@ -12,6 +12,7 @@ async function runFinalAudit() {
     };
 
     const node = new ACSNode();
+    node.includeSimulatedVariants = true; // simulation-only lossy variants
     console.log('1. Subsystem: CORE (Genome)');
 
     // Test Gen 5 (Generative)
@@ -19,10 +20,10 @@ async function runFinalAudit() {
     const data = Buffer.alloc(1024 * 1024); // 1MB
     for (let i = 0; i < data.length; i += pattern.length) pattern.copy(data, i);
 
-    const chunkIds = node.ingestFile("audit_data.dat", data);
+    const chunkIds = await node.ingestFile("audit_data.dat", data);
     check("Ingestion (Chunking)", chunkIds.length > 0);
 
-    node.mutate();
+    await node.mutate();
     const chunk = node.genome.chunks.get(chunkIds[0])!;
     const genVariant = chunk.variants.find(v => v.algorithm === 'generative');
     check("Generative Variant Creation", !!genVariant);

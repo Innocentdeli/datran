@@ -12,13 +12,13 @@ async function runZipScenario() {
     // crypto.randomBytes is incompressible.
     const data = crypto.randomBytes(1024 * 1024 * 10);
 
-    const chunkIds = node.ingestFile("Business-management.zip", data);
+    const chunkIds = await node.ingestFile("Business-management.zip", data);
     const chunkId = chunkIds[0];
     const chunk = node.genome.chunks.get(chunkId)!;
 
     // 2. Evolve
     console.log("Evolving variants...");
-    node.mutate(); // Tries to generate Brotli/Generative
+    await node.mutate(); // Tries to generate Brotli/Generative
 
     // 3. Evaluate Selection
     // We expect the system to REJECT Brotli/Generative because they add CPU cost with 0 Ratio gain.

@@ -10,11 +10,11 @@ async function runQualitySimulation() {
 
     // Create 1MB of RANDOM data (High Entropy -> Low Compression)
     const data = crypto.randomBytes(1024 * 1024);
-    const chunkIds = node.ingestFile("video.mp4", data);
+    const chunkIds = await node.ingestFile("video.mp4", data);
     const chunkId = chunkIds[0];
 
-    node.mutate();
-    node.mutate();
+    await node.mutate();
+    await node.mutate();
 
     const chunk = node.genome.chunks.get(chunkId)!;
     // console.log(`Variants Generated: ${chunk.variants.map(v => v.algorithm).join(', ')}`);

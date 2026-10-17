@@ -10,7 +10,7 @@ async function runSwarmSimulation() {
 
     // 2. Ingest Data into US Node
     const data = Buffer.from("Global Data Set " + Math.random());
-    const chunkIds = usNode.ingestFile("global.dat", data);
+    const chunkIds = await usNode.ingestFile("global.dat", data);
     console.log(`[Genesis] Data born in ${usNode.region}.`);
 
     // 3. Simulate Traffic from EU

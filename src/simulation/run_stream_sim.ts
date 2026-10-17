@@ -20,11 +20,11 @@ async function runStreamSimulation() {
         // Generate Frame Data (Random noise to simulate video entropy)
         // 100KB frame
         const frameData = crypto.randomBytes(1024 * 100);
-        const chunkIds = node.ingestFile(`frame_${frame}.dat`, frameData);
+        const chunkIds = await node.ingestFile(`frame_${frame}.dat`, frameData);
         const chunkId = chunkIds[0];
 
         // Force mutation so we have options
-        node.mutate();
+        await node.mutate();
 
         // Frame 15: NETWORK CRASH (Switch to Cellular)
         if (frame === 15) {

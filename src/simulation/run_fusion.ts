@@ -12,7 +12,7 @@ async function runFusionSimulation() {
     for (let i = 0; i < 50; i++) str += "Chunk_Data_Block_" + i + " ";
     const data = Buffer.from(str);
 
-    const chunkIds = node.ingestFile("data.dat", data);
+    const chunkIds = await node.ingestFile("data.dat", data);
     console.log(`[Genesis] Created ${chunkIds.length} chunks.`);
 
     if (chunkIds.length < 2) {

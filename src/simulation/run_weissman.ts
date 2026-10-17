@@ -7,17 +7,18 @@ async function runWeissmanBenchmark() {
     console.log('--- WEISSMAN SCORE (Phase 5: Generative) ---');
 
     const node = new ACSNode();
+    node.includeSimulatedVariants = true; // simulation-only lossy variants
 
     // 1. Ingest Data (Middle-Out Pattern)
     const pattern = Buffer.from("Middle-Out Compression Algorithm");
     const data = Buffer.alloc(1024 * 1024 * 10); // 10MB
     for (let i = 0; i < data.length; i += pattern.length) pattern.copy(data, i);
 
-    const chunkIds = node.ingestFile("pied_piper.dat", data);
+    const chunkIds = await node.ingestFile("pied_piper.dat", data);
     const chunkId = chunkIds[0];
     const chunk = node.genome.chunks.get(chunkId)!;
 
-    node.mutate();
+    await node.mutate();
 
     // 2. Inspect Variants
     // We want to see the Generative Variant specifically.

@@ -28,11 +28,16 @@ export class HttpInterface {
         if (req.method === 'POST' && parsed.pathname === '/ingest') {
             let body: Buffer[] = [];
             req.on('data', (chunk) => body.push(chunk));
-            req.on('end', () => {
-                const data = Buffer.concat(body);
-                const ids = this.node.ingestFile('upload_' + Date.now(), data);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ status: 'Inducted', chunkIds: ids }));
+            req.on('end', async () => {
+                try {
+                    const data = Buffer.concat(body);
+                    const ids = await this.node.ingestFile('upload_' + Date.now(), data);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ status: 'Inducted', chunkIds: ids }));
+                } catch (e) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ status: 'Error', error: (e as Error).message }));
+                }
             });
             return;
         }

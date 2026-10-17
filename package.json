@@ -1,14 +1,16 @@
 {
     "name": "autonomous-compression-swarm",
     "version": "1.0.0",
-    "description": "A self-optimizing, evolutionary compression network.",
-    "main": "dist/index.js",
+    "description": "A self-optimizing, evolutionary compression network: reactors evolve per-content-type compression recipes on real data and share them with peers.",
     "scripts": {
+        "start:all": "node scripts/start-all.js",
+        "dev:all": "node scripts/start-all.js",
         "build": "tsc",
         "build:tools": "tsc --project tsconfig.tools.json",
         "watch:tools": "tsc --project tsconfig.tools.json --watch",
-        "start": "node dist/index.js",
-        "simulate": "ts-node src/simulation/run_evolution.ts"
+        "start": "node scripts/start-all.js",
+        "simulate": "ts-node src/simulation/run_evolution.ts",
+        "test": "node --require ts-node/register/transpile-only --test \"tests/**/*.test.ts\""
     },
     "keywords": [
         "compression",

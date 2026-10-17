@@ -18,8 +18,8 @@ async function runForkedSimulation() {
     const data = Buffer.from(dataStr);
 
     // 2. Ingest into both
-    const mobileIds = mobileNode.ingestFile("data.txt", data);
-    const desktopIds = desktopNode.ingestFile("data.txt", data);
+    const mobileIds = await mobileNode.ingestFile("data.txt", data);
+    const desktopIds = await desktopNode.ingestFile("data.txt", data);
 
     // 3. Configure Environments
     // Mobile: Low Bandwidth (50 B/ms = 50KB/s), High CPU Penalty
@@ -33,8 +33,8 @@ async function runForkedSimulation() {
     console.log(`---|---|---|---|---`);
 
     // Force discovery of variants early
-    mobileNode.mutate();
-    desktopNode.mutate();
+    await mobileNode.mutate();
+    await desktopNode.mutate();
 
     for (let e = 1; e <= EPOCHS; e++) {
 

@@ -1,5 +1,7 @@
 
-export type CompressionAlgorithm = 'raw' | 'zstd' | 'brotli' | 'lz4' | 'ai-upscale' | 'generative';
+// 'ai-upscale' and 'generative' are simulation-only and NOT reversible; they are never produced
+// unless GenomeGenerator is explicitly asked for simulated variants.
+export type CompressionAlgorithm = 'raw' | 'zstd' | 'brotli' | 'lz4' | 'reactor' | 'ai-upscale' | 'generative';
 
 export type ClientContext = 'mobile' | 'desktop' | 'server' | 'space' | 'vr' | 'cinema';
 
