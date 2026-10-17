@@ -1,0 +1,57 @@
+[package]
+name = "core-reactor"
+version = "2.0.0"
+edition = "2021"
+description = "Datran core reactor: HTTP compression service (legacy LZ4/deflate/symbit blobs, blob v2 with zstd/brotli/deflate/lz4 and delta/shuffle filters) that evolves per-content-class compression recipes on sampled uploads and exchanges them with peer reactors"
+authors = ["titan"]
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+axum = { version = "0.7", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
+lz4_flex = "0.11"
+flate2 = "1.0"
+bytes = "1.6"
+zstd = { version = "0.14.3", features = ["zstdmt"] }
+brotli = "9.0.0"
+crc32fast = "1.5.2"
+sha2 = "0.11.1"
+hex = "0.4.3"
+rand = "0.8"
+rand_chacha = "0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+fastcdc = "5"
+redb = "4"
+futures-util = "0.3"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
+[profile.release]
+opt-level = 3
+codegen-units = 16
+debug = false
+
+# Optimize dependencies (zstd/brotli/flate2) in test builds so codec-heavy tests run quickly.
+[profile.dev.package."*"]
+opt-level = 2
+
+[[bin]]
+name = "core-reactor"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "store-bench"
+path = "src/bin/store_bench.rs"
+
+[[bin]]
+name = "compress-bench"
+path = "src/bin/compress_bench.rs"
+
+[dev-dependencies]
+rcgen = "0.13"
+tempfile = "3.27.0"
+

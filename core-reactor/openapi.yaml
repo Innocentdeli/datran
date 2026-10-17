@@ -1,0 +1,1127 @@
+openapi: 3.1.0
+info:
+  title: Datran Core Reactor API
+  version: 2.0.0
+  summary: Lossless evolutionary compression service with a content-addressed chunked object store.
+  description: |
+    HTTP API of the Datran core reactor (`core-reactor`), see `docs/EVOLUTION_SPEC.md` §5 and
+    `docs/NETWORK_SPEC.md` §2–§4.
+
+    * **Data plane** (`/compress`, `/decompress`, `/entropy`) and **evolution status** require the
+      `x-reactor-token` header when the reactor was started with `REACTOR_TOKEN`. Without a token the
+      reactor only binds to loopback and these endpoints are unauthenticated.
+    * **Store** endpoints (`/store/*`) use `x-reactor-token` as well.
+    * **Cluster / gossip** endpoints (`/evolution/champions`, `/evolution/dict/{sha256}`, `/cluster/*`
+      except `/cluster/status`) use `x-cluster-token` and are internal (`x-internal: true`): they are
+      called by peer reactors, not by applications. Without `REACTOR_CLUSTER_TOKEN` they answer `404`.
+      Data gravity (NETWORK_SPEC §4) is enabled when the store is on and `REACTOR_CLUSTER_TOKEN` is set;
+      otherwise `/cluster/*` answers `503`.
+    * Errors are JSON `{"error": "<message>"}` (see `Error`). Unknown routes answer `404` with an empty body;
+      a wrong method answers `405` with an `Allow` header.
+    * Request bodies are limited to 500 MiB (`413` above); decoded output is limited by
+      `REACTOR_MAX_OUTPUT_BYTES` (reported by `/health`).
+  license:
+    name: Proprietary
+    url: https://example.invalid/datran-license
+servers:
+  - url: http://127.0.0.1:3005
+    description: Default local reactor (`REACTOR_BIND`/`REACTOR_PORT`)
+tags:
+  - name: system
+    description: Liveness.
+  - name: data
+    description: Stateless compression data plane.
+  - name: evolution
+    description: Recipe evolution status and gossip (EVOLUTION_SPEC §3–§4).
+  - name: store
+    description: Chunked, deduplicated, content-addressed object store (NETWORK_SPEC §2).
+  - name: cluster
+    description: |
+      Data gravity (NETWORK_SPEC §4): `/cluster/status` is the operator view (`x-reactor-token`); every other
+      `/cluster/*` endpoint is internal peer-to-peer (`x-cluster-token`, `x-internal: true`) and not for
+      application use.
+security:
+  - reactorToken: []
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: health
+      summary: Liveness and capabilities
+      security: []
+      responses:
+        "200":
+          description: Reactor is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /compress:
+    post:
+      tags: [data]
+      operationId: compress
+      summary: Compress a body with the champion recipe of its content class
+      description: |
+        The round-trip is verified before responding. When the v2 encode fails verification or is not
+        smaller than a legacy raw blob, a legacy raw blob is returned (`x-reactor-format: legacy-raw`).
+        High-entropy input (`media/compressed`) bypasses compression.
+      parameters:
+        - $ref: "#/components/parameters/ContentTypeHint"
+        - $ref: "#/components/parameters/NoSample"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        "200":
+          description: Compressed blob (legacy or v2 format, see EVOLUTION_SPEC §1).
+          headers:
+            x-reactor-class: { $ref: "#/components/headers/ReactorClass" }
+            x-reactor-recipe: { $ref: "#/components/headers/ReactorRecipe" }
+            x-reactor-format: { $ref: "#/components/headers/ReactorFormat" }
+            x-reactor-note: { $ref: "#/components/headers/ReactorNote" }
+            x-original-size: { $ref: "#/components/headers/OriginalSize" }
+            x-compressed-size: { $ref: "#/components/headers/CompressedSize" }
+            x-datran-algo: { $ref: "#/components/headers/DatranAlgo" }
+            x-datran-ratio: { $ref: "#/components/headers/DatranRatio" }
+            x-datran-time-us: { $ref: "#/components/headers/DatranTimeUs" }
+            x-datran-entropy: { $ref: "#/components/headers/DatranEntropy" }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /decompress:
+    post:
+      tags: [data]
+      operationId: decompress
+      summary: Decode a legacy (flags 0x00–0x03) or v2 (0x10) blob
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        "200":
+          description: Original bytes (length and CRC verified).
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "400":
+          description: Invalid/corrupt blob, output limit exceeded, or unknown dictionary.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DecodeError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /entropy:
+    post:
+      tags: [data]
+      operationId: entropy
+      summary: Shannon entropy of the body
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        "200":
+          description: Entropy report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entropy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+
+  /evolution/status:
+    get:
+      tags: [evolution]
+      operationId: evolutionStatus
+      summary: Per-class evolution state, weights and peer health
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EvolutionStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /evolution/champions:
+    get:
+      tags: [evolution, cluster]
+      operationId: evolutionChampions
+      summary: Champion recipes offered to peers (gossip)
+      x-internal: true
+      security:
+        - clusterToken: []
+      responses:
+        "200":
+          description: Champions. Recipes referencing a dictionary are omitted unless dictionary sharing is enabled.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Champion" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404": { $ref: "#/components/responses/ClusterDisabled" }
+
+  /evolution/dict/{sha256}:
+    get:
+      tags: [evolution, cluster]
+      operationId: evolutionDict
+      summary: Raw zstd dictionary bytes (only with REACTOR_SHARE_DICTIONARIES=true)
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Sha256" }
+      responses:
+        "200":
+          description: Dictionary bytes; SHA-256 equals the path id.
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404":
+          description: Gossip disabled, sharing disabled, or unknown dictionary.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /store/files:
+    put:
+      tags: [store]
+      operationId: storePut
+      summary: Store a file (streamed, chunked with FastCDC, deduplicated)
+      description: |
+        The body may be sent with `Content-Length` or `Transfer-Encoding: chunked`; it is streamed (no
+        request body size limit). Storing content that already exists increments its pin count and
+        answers `duplicate: true` (each successful PUT must be balanced by one DELETE).
+        Not idempotent: clients must not retry it automatically.
+      parameters:
+        - $ref: "#/components/parameters/ContentTypeHint"
+        - $ref: "#/components/parameters/NoSample"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, contentMediaType: application/octet-stream }
+      responses:
+        "200":
+          description: Stored (new file or one more pin on an existing file).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PutResult" }
+        "400":
+          description: Invalid upload or upload aborted by the client.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+        "507":
+          description: Store over capacity (`REACTOR_STORE_MAX_BYTES`) and nothing evictable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreFullError" }
+
+  /store/files/{file_id}:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [store]
+      operationId: storeGet
+      summary: Read a file or a single byte range (streamed)
+      description: |
+        Only a single `bytes` range is honoured. Several ranges, other units or a syntactically invalid
+        value are ignored and the whole file is returned with `200` (RFC 9110). A reversed span
+        (`bytes=5-2`) is likewise ignored.
+
+        With data gravity enabled, a file this node does not hold is served from a peer holder
+        (remote read: manifest + objects fetched over `/cluster/*`, every chunk hash verified); such
+        responses carry `x-reactor-remote: 1`.
+      parameters:
+        - name: Range
+          in: header
+          required: false
+          description: Single range `bytes=start-end`, `bytes=start-` or suffix `bytes=-n`.
+          schema: { type: string, examples: ["bytes=0-1023", "bytes=-512"] }
+      responses:
+        "200":
+          description: Whole file.
+          headers:
+            Content-Length: { $ref: "#/components/headers/ContentLength" }
+            Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+            ETag: { $ref: "#/components/headers/FileETag" }
+            x-reactor-remote: { $ref: "#/components/headers/ReactorRemote" }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "206":
+          description: Requested range.
+          headers:
+            Content-Range:
+              description: "`bytes start-end/size`"
+              schema: { type: string, examples: ["bytes 0-1023/4096"] }
+            Content-Length: { $ref: "#/components/headers/ContentLength" }
+            Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+            ETag: { $ref: "#/components/headers/FileETag" }
+            x-reactor-remote: { $ref: "#/components/headers/ReactorRemote" }
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "400": { $ref: "#/components/responses/InvalidFileId" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416":
+          description: "Range not satisfiable (empty body, `Content-Length: 0`)."
+          headers:
+            Content-Range:
+              description: "`bytes */size`"
+              schema: { type: string, examples: ["bytes */4096"] }
+            Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+            ETag: { $ref: "#/components/headers/FileETag" }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+    head:
+      tags: [store]
+      operationId: storeHead
+      summary: File size and range support
+      description: Same headers as `GET` (a `Range` header is evaluated the same way), no body.
+      responses:
+        "200":
+          description: File exists.
+          headers:
+            Content-Length: { $ref: "#/components/headers/ContentLength" }
+            Accept-Ranges: { $ref: "#/components/headers/AcceptRanges" }
+            ETag: { $ref: "#/components/headers/FileETag" }
+        "400":
+          description: Invalid file id (no body on HEAD).
+        "401":
+          description: Missing or invalid `x-reactor-token` (no body on HEAD).
+        "404":
+          description: Unknown file (no body on HEAD).
+        "503":
+          description: Object store disabled (no body on HEAD).
+    delete:
+      tags: [store]
+      operationId: storeDelete
+      summary: Unpin a file
+      description: |
+        Decrements the pin count. At zero the file is tombstoned and its manifest removed
+        (`deleted: true`); unreferenced objects are garbage-collected after `REACTOR_GC_GRACE_MS`.
+        Not idempotent (each call unpins once); `404` once the file is no longer stored.
+
+        With data gravity enabled, a DELETE for a file this node does not hold is forwarded
+        (`POST /cluster/unpin/{file_id}`) to the holder that owns origin (after an origin transfer the
+        pins live there); the response then carries `forwarded_to` (that node's id). Tombstones
+        propagate to every holder via inventory gossip.
+      responses:
+        "200":
+          description: Unpinned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteResult" }
+        "400": { $ref: "#/components/responses/InvalidFileId" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+
+  /store/stats:
+    get:
+      tags: [store]
+      operationId: storeStats
+      summary: Store, fusion, GC, scrub, group-commit and data-gravity metrics
+      responses:
+        "200":
+          description: Stats.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StoreStats" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+
+  /cluster/status:
+    get:
+      tags: [cluster]
+      operationId: clusterStatus
+      summary: Data-gravity status - node config, per-peer health, sampled holders, demand, metrics
+      description: |
+        Operator view of this node's cluster state (auth `x-reactor-token`, like the store). `503` when
+        data gravity is disabled (store off or no `REACTOR_CLUSTER_TOKEN`).
+      responses:
+        "200":
+          description: Cluster status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClusterStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/inventory:
+    get:
+      tags: [cluster]
+      operationId: clusterInventory
+      summary: File inventory (full or delta since a version) - gossip
+      description: |
+        Polled by every peer each `REACTOR_GOSSIP_INTERVAL_MS`. A delta carries the `added`/`removed`
+        events after `since` (pages of 10 000 events; `more: true` → resume from `version`) plus the
+        tombstones with `deleted_ms ≥ tsince` and those of its `removed` events. A full listing
+        (`full: true`: no/unknown/future `since`, and every 30th fetch by a peer) lists every held file in
+        `added` and carries all tombstones.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: Last seen inventory `version`; full listing when absent, unknown or in the future.
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: tsince
+          in: query
+          required: false
+          description: "Only tombstones with `deleted_ms ≥ tsince` (use the previous `now_ms`); default 0."
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        "200":
+          description: Inventory.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inventory" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404": { $ref: "#/components/responses/ClusterDisabled" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/manifests/{file_id}:
+    get:
+      tags: [cluster]
+      operationId: clusterManifest
+      summary: File manifest plus where this holder keeps each chunk (remote reads / pulls)
+      description: |
+        Validated structurally by the receiver (chunk lengths sum to `size`, every chunk is a member of
+        its object at `object_offset`); chunk hashes are verified on use. Capped at 64 MiB.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "200":
+          description: Manifest.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeerManifest" }
+        "400": { $ref: "#/components/responses/InvalidFileId" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Corrupt" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/objects/{object_id}:
+    get:
+      tags: [cluster]
+      operationId: clusterObject
+      summary: Raw stored object (blob v2) by object id
+      description: Capped at 16 MiB + 64 KiB by the receiver.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - name: object_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+      responses:
+        "200":
+          description: Stored blob bytes; the decoded plaintext hashes to `object_id`.
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Corrupt" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/chunks/{chunk_id}:
+    get:
+      tags: [cluster]
+      operationId: clusterChunk
+      summary: Verified plaintext of one chunk
+      description: |
+        Used to repair a quarantined object when no peer has the same object (the repairing node
+        rebuilds it from chunks). The plaintext hashes to `chunk_id`. Capped at 16 MiB.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - name: chunk_id
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+      responses:
+        "200":
+          description: Chunk plaintext.
+          content:
+            application/octet-stream:
+              schema: { type: string, contentMediaType: application/octet-stream }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Corrupt" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/hold/{file_id}:
+    post:
+      tags: [cluster]
+      operationId: clusterHold
+      summary: Request a hold-lease (holder promises not to drop its replica), optionally an origin transfer
+      description: |
+        Always answers `200`; `granted: false` with a `reason` when the node does not hold the file
+        (`not held`) or is dropping it (`dropping`). Leases last 10 minutes (`lease_ms`) and are persisted
+        across restarts; a node never drops or evicts a file it leased out. With `origin=1` (requested
+        only after all needed plain leases were granted) the holder also becomes origin and adds `pins`.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+        - name: node
+          in: query
+          required: false
+          description: Requesting node id (alphanumeric, ≤ 64 chars kept).
+          schema: { type: string }
+        - name: origin
+          in: query
+          required: false
+          description: "`1`/`true`: ask the holder to take over origin."
+          schema: { type: string, enum: ["1", "true"] }
+        - name: pins
+          in: query
+          required: false
+          description: Pins handed over with origin (default 0).
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        "200":
+          description: Lease decision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HoldLease" }
+        "400": { $ref: "#/components/responses/InvalidFileId" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+  /cluster/unpin/{file_id}:
+    post:
+      tags: [cluster]
+      operationId: clusterUnpin
+      summary: Apply a DELETE forwarded by a node that does not hold the file
+      description: |
+        Unpins once, only where the file is held as a pinned origin (`held && origin`); otherwise
+        nothing changes and the response reports the local state so the forwarder tries the next
+        candidate. See `DELETE /store/files/{file_id}`.
+      x-internal: true
+      security:
+        - clusterToken: []
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnpinResult" }
+        "400": { $ref: "#/components/responses/InvalidFileId" }
+        "401": { $ref: "#/components/responses/ClusterUnauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/GravityDisabled" }
+
+components:
+  securitySchemes:
+    reactorToken:
+      type: apiKey
+      in: header
+      name: x-reactor-token
+      description: Equals `REACTOR_TOKEN` (constant-time compare). Not required when the reactor runs without a token.
+    clusterToken:
+      type: apiKey
+      in: header
+      name: x-cluster-token
+      description: Equals `REACTOR_CLUSTER_TOKEN`. Peer-to-peer only.
+
+  parameters:
+    ContentTypeHint:
+      name: x-content-type
+      in: header
+      required: false
+      description: MIME hint used for content classification (first 255 chars are used).
+      schema: { type: string, examples: ["application/json"] }
+    NoSample:
+      name: x-reactor-no-sample
+      in: header
+      required: false
+      description: "`1` or `true`: never keep a sample of this upload for evolution."
+      schema: { type: string, enum: ["1", "true"] }
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      description: SHA-256 (hex, case-insensitive; responses use lowercase) of the whole plaintext file.
+      schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+
+  headers:
+    ReactorClass:
+      description: Content class used, e.g. `text/json`, `media/compressed`, `empty`.
+      schema: { type: string }
+    ReactorRecipe:
+      description: Compact JSON `Recipe` used for the v2 encode, or the literal `null` for legacy raw.
+      schema: { type: string, examples: ['{"codec":"zstd","level":3,"window_log":null,"filter":"none","stride":0,"dict":null}'] }
+    ReactorFormat:
+      description: Output blob format.
+      schema: { type: string, enum: [v2, legacy-raw] }
+    ReactorNote:
+      description: Optional printable-ASCII note (e.g. why a fallback happened). Absent when empty.
+      schema: { type: string }
+    OriginalSize:
+      description: Input length in bytes.
+      schema: { type: integer, format: int64 }
+    CompressedSize:
+      description: Output blob length in bytes.
+      schema: { type: integer, format: int64 }
+    DatranAlgo:
+      description: "`evo:<recipe label>` (e.g. `evo:zstd-9+shuffle4`), `raw` or `raw_bypass`."
+      schema: { type: string }
+    DatranRatio:
+      description: Ratio original/compressed formatted with two decimals and a trailing `x`, e.g. `3.68x`.
+      schema: { type: string, pattern: "^[0-9]+\\.[0-9]{2}x$" }
+    DatranTimeUs:
+      description: Server-side compression time in microseconds.
+      schema: { type: integer, format: int64 }
+    DatranEntropy:
+      description: Shannon entropy of the input (bits/byte, two decimals).
+      schema: { type: string }
+    ContentLength:
+      schema: { type: integer, format: int64 }
+    AcceptRanges:
+      schema: { type: string, const: bytes }
+    ReactorRemote:
+      description: "`1` when the file was served from a peer holder (data-gravity remote read)."
+      schema: { type: string, const: "1" }
+    FileETag:
+      description: Strong ETag, the quoted lowercase file id.
+      schema: { type: string, examples: ["\"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\""] }
+
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or invalid `x-reactor-token`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ClusterUnauthorized:
+      description: Missing or invalid `x-cluster-token`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ClusterDisabled:
+      description: Gossip disabled (no `REACTOR_CLUSTER_TOKEN`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    GravityDisabled:
+      description: |
+        Data gravity disabled (needs the store and `REACTOR_CLUSTER_TOKEN`);
+        `{"error":"data gravity disabled (needs the store and REACTOR_CLUSTER_TOKEN)"}`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Corrupt:
+      description: Stored data failed verification (the object is quarantined for repair).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Unknown id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InvalidFileId:
+      description: The file id is not 64 hex characters (`{"error":"invalid file id"}`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    StoreDisabled:
+      description: Object store disabled (`REACTOR_STORE=0`); `{"error":"object store disabled"}`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Body over the 500 MiB limit.
+    ServerError:
+      description: Internal error (e.g. reactor task failed).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Sha256:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    DecodeError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            unknown_dict:
+              $ref: "#/components/schemas/Sha256"
+              description: Present when the blob references a dictionary this reactor does not have.
+    Health:
+      type: object
+      required: [status, engine]
+      properties:
+        status: { type: string, const: online }
+        engine: { type: string }
+        arch: { type: string }
+        os: { type: string }
+        max_buffer_mb: { type: integer }
+        max_output_bytes: { type: integer, format: int64 }
+        evolution: { type: boolean }
+        features:
+          type: array
+          items: { type: string }
+    Entropy:
+      type: object
+      required: [size_bytes, entropy_bits, suggested_routing]
+      properties:
+        size_bytes: { type: integer, format: int64 }
+        entropy_bits: { type: number, minimum: 0, maximum: 8 }
+        suggested_routing: { type: string, enum: [raw_bypass, symbit, lz4_zlib] }
+    Recipe:
+      type: object
+      description: Compression recipe (EVOLUTION_SPEC §2). Always serialized with every field.
+      required: [codec]
+      properties:
+        codec: { type: string, enum: [raw, lz4, deflate, zstd, brotli, procedural] }
+        level:
+          type: integer
+          default: 0
+          description: deflate 0–9, zstd 1–19, brotli 0–11, procedural 1–19 (zstd level of literals).
+        window_log:
+          type: [integer, "null"]
+          minimum: 10
+          maximum: 27
+          description: zstd 10–27, brotli 10–24, otherwise null.
+        filter: { type: string, enum: [none, delta, shuffle], default: none }
+        stride: { type: integer, enum: [0, 1, 2, 4, 8], default: 0 }
+        dict:
+          description: SHA-256 of a zstd dictionary (zstd only) or null.
+          oneOf:
+            - $ref: "#/components/schemas/Sha256"
+            - type: "null"
+    Champion:
+      type: object
+      required: [class, recipe, fitness]
+      properties:
+        class: { type: string }
+        recipe: { $ref: "#/components/schemas/Recipe" }
+        fitness: { type: number }
+    ClassStats:
+      type: object
+      properties:
+        compress_count: { type: integer }
+        bytes_in: { type: integer }
+        bytes_out: { type: integer }
+        fallback_raw: { type: integer }
+        samples_seen: { type: integer }
+        immigrants_received: { type: integer }
+        immigrants_scored: { type: integer }
+        dicts_trained: { type: integer }
+    ClassChampion:
+      type: object
+      properties:
+        recipe: { $ref: "#/components/schemas/Recipe" }
+        label: { type: string, examples: ["zstd-9+shuffle4"] }
+        fitness: { type: number }
+        ratio: { type: number }
+        enc_mib_s: { type: number }
+        dec_mib_s: { type: number }
+        generation: { type: integer }
+        origin: { type: string, enum: [seed, offspring, immigrant, dict] }
+    ClassStatus:
+      type: object
+      required: [class, generation, population_size, samples]
+      properties:
+        class: { type: string }
+        evolvable: { type: boolean }
+        generation: { type: integer }
+        champion:
+          oneOf:
+            - $ref: "#/components/schemas/ClassChampion"
+            - type: "null"
+        population_size: { type: integer }
+        samples: { type: integer }
+        pending_immigrants: { type: integer }
+        dicts:
+          type: array
+          items: { $ref: "#/components/schemas/Sha256" }
+        stats: { $ref: "#/components/schemas/ClassStats" }
+    PeerStatus:
+      type: object
+      properties:
+        url: { type: string }
+        last_ok: { type: [integer, "null"], description: Unix ms of the last successful pull. }
+        last_error: { type: [string, "null"] }
+        last_error_ms: { type: [integer, "null"] }
+        immigrants_received: { type: integer }
+    EvolutionStatus:
+      type: object
+      required: [enabled, interval_ms, weights, classes]
+      properties:
+        enabled: { type: boolean }
+        interval_ms: { type: integer }
+        weights:
+          type: object
+          properties:
+            encode: { type: number }
+            decode: { type: number }
+        classes:
+          type: array
+          items: { $ref: "#/components/schemas/ClassStatus" }
+        peers:
+          type: array
+          items: { $ref: "#/components/schemas/PeerStatus" }
+        gossip_enabled: { type: boolean }
+        share_dictionaries: { type: boolean }
+    PutResult:
+      type: object
+      required: [file_id, size, stored_bytes, new_bytes, new_chunks, dedup_chunks, chunks, class, duplicate, pins]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        size: { type: integer, format: int64, description: Plaintext size. }
+        stored_bytes: { type: integer, format: int64, description: Physical bytes of objects newly written by this upload. }
+        new_bytes: { type: integer, format: int64, description: "Plaintext bytes of the chunks newly stored by this upload (0 when `duplicate`). Compression of this upload = `new_bytes / stored_bytes`." }
+        new_chunks: { type: integer, format: int64, description: "Chunks not previously stored (0 when `duplicate`)." }
+        dedup_chunks: { type: integer, format: int64, description: "Chunks already stored (all chunks when `duplicate`)." }
+        chunks: { type: integer, format: int64, description: Total chunks of the file. }
+        class: { type: string, description: "Content class, e.g. `text/json`, `media/compressed`, `empty`." }
+        duplicate: { type: boolean, description: The file was already stored; only its pin count changed. }
+        pins: { type: integer, format: int64, description: Pin count after this upload. }
+    StoreFullError:
+      type: object
+      required: [error, needed, used, max]
+      properties:
+        error: { type: string, const: store full }
+        needed: { type: integer, format: int64, description: Physical bytes the upload needed. }
+        used: { type: integer, format: int64, description: Physical bytes of live objects. }
+        max: { type: integer, format: int64, description: "`REACTOR_STORE_MAX_BYTES`." }
+    DeleteResult:
+      type: object
+      required: [file_id, pins, deleted]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        pins: { type: integer, format: int64, description: Remaining pin count (0 when deleted). }
+        deleted: { type: boolean, description: The manifest was removed and a tombstone written. }
+        forwarded_to:
+          type: string
+          description: |
+            Present when this node did not hold the file and forwarded the unpin to the origin holder:
+            that node's id (`pins`/`deleted` are its result).
+    StoreGcStats:
+      type: object
+      required: [queue_objects, queue_bytes, grace_ms, collected_objects, collected_bytes,
+                 startup_orphans_removed, startup_temp_files_removed]
+      properties:
+        queue_objects: { type: integer, format: int64, description: Objects waiting for GC. }
+        queue_bytes: { type: integer, format: int64, description: "`physical_bytes - live_physical_bytes`." }
+        grace_ms: { type: integer, format: int64 }
+        collected_objects: { type: integer, format: int64 }
+        collected_bytes: { type: integer, format: int64 }
+        startup_orphans_removed: { type: integer, format: int64 }
+        startup_temp_files_removed: { type: integer, format: int64 }
+    StoreFusionStats:
+      type: object
+      required: [enabled, fusions, unfusions, bytes_saved, reads_saved, candidates_evaluated, rejected,
+                 last_run_ms, access_rows, coaccess_min]
+      properties:
+        enabled: { type: boolean }
+        fusions: { type: integer, format: int64 }
+        unfusions: { type: integer, format: int64 }
+        bytes_saved: { type: integer, format: int64 }
+        reads_saved: { type: integer, format: int64 }
+        candidates_evaluated: { type: integer, format: int64 }
+        rejected: { type: integer, format: int64 }
+        last_run_ms: { type: integer, format: int64 }
+        access_rows: { type: integer, format: int64 }
+        coaccess_min: { type: number, description: "`REACTOR_FUSE_COACCESS_MIN` (default 8)." }
+    StoreScrubStats:
+      type: object
+      required: [objects_checked, bytes_checked, corrupt_found, passes_completed, pass_progress_objects,
+                 last_step_ms, last_pass_ms, quarantined]
+      properties:
+        objects_checked: { type: integer, format: int64 }
+        bytes_checked: { type: integer, format: int64 }
+        corrupt_found: { type: integer, format: int64 }
+        passes_completed: { type: integer, format: int64 }
+        pass_progress_objects: { type: integer, format: int64 }
+        last_step_ms: { type: integer, format: int64 }
+        last_pass_ms: { type: integer, format: int64 }
+        quarantined: { type: integer, format: int64 }
+    StoreStats:
+      type: object
+      description: Store metrics (NETWORK_SPEC §2–§3). Clients should tolerate fields added later.
+      required: [files, logical_bytes, unique_bytes, physical_bytes, live_physical_bytes, max_bytes,
+                 dedup_ratio, compression_ratio, total_ratio, objects, super_chunks, chunks, tombstones,
+                 inventory_version, inflight_bytes, puts, put_bytes, reads, read_bytes, full_rejections,
+                 evictions, gc, fusion, scrub]
+      properties:
+        files: { type: integer, format: int64 }
+        logical_bytes: { type: integer, format: int64, description: Sum of file sizes (pre-dedup). }
+        unique_bytes: { type: integer, format: int64, description: "Sum of unique chunk sizes (post-dedup, pre-compression)." }
+        physical_bytes: { type: integer, format: int64, description: Bytes of all object files (incl. GC backlog). }
+        live_physical_bytes: { type: integer, format: int64, description: Bytes of referenced objects (counted against `max_bytes`). }
+        max_bytes: { type: [integer, "null"], format: int64, description: "`REACTOR_STORE_MAX_BYTES`; null = unlimited." }
+        dedup_ratio: { type: number, description: "`logical / unique` (1.0 when empty)." }
+        compression_ratio: { type: number, description: "`unique / live_physical`." }
+        total_ratio: { type: number, description: "`logical / live_physical`." }
+        objects: { type: integer, format: int64 }
+        super_chunks: { type: integer, format: int64 }
+        chunks: { type: integer, format: int64 }
+        tombstones: { type: integer, format: int64 }
+        inventory_version: { type: integer, format: int64 }
+        inflight_bytes: { type: integer, format: int64, description: Bytes reserved by uploads in progress. }
+        puts: { type: integer, format: int64 }
+        put_bytes: { type: integer, format: int64 }
+        reads: { type: integer, format: int64 }
+        read_bytes: { type: integer, format: int64 }
+        full_rejections: { type: integer, format: int64 }
+        evictions: { type: integer, format: int64 }
+        gc: { $ref: "#/components/schemas/StoreGcStats" }
+        fusion: { $ref: "#/components/schemas/StoreFusionStats" }
+        scrub: { $ref: "#/components/schemas/StoreScrubStats" }
+        group_commit: { $ref: "#/components/schemas/StoreGroupCommitStats" }
+        cluster:
+          $ref: "#/components/schemas/ClusterMetrics"
+          description: Present only when data gravity is enabled (same object as `ClusterStatus.metrics`).
+        packs:
+          type: object
+          additionalProperties: true
+          description: Pack-file stats (in development; shape not final - clients should treat it as opaque).
+    StoreGroupCommitStats:
+      type: object
+      description: Group commit of concurrent uploads (one index transaction per batch).
+      required: [batches, jobs, max_batch, window_ms]
+      properties:
+        batches: { type: integer, format: int64, description: Index transactions committed. }
+        jobs: { type: integer, format: int64, description: Uploads committed. }
+        max_batch: { type: integer, format: int64, description: Largest batch seen. }
+        window_ms: { type: number, description: "Batching window (`REACTOR_GROUP_COMMIT_MS`, default 2, ≤ 100)." }
+    ClusterMetrics:
+      type: object
+      description: Data-gravity counters since start (`cache_*` and `leases_active` are gauges).
+      required: [gossip_rounds, pulls, pull_bytes, pull_failures, drops, origin_transfers, repairs, remote_reads,
+                 remote_read_bytes, remote_objects_fetched, remote_fetch_bytes, remote_fetch_failures, cache_hits,
+                 cache_bytes, cache_objects, tombstones_applied, quarantine_repairs, quarantine_repair_failures,
+                 leases_granted, leases_refused, leases_active, evictions_confirmed, unpins_forwarded]
+      properties:
+        gossip_rounds: { type: integer, format: int64 }
+        pulls: { type: integer, format: int64, description: Full replicas pulled (gravity or repair). }
+        pull_bytes: { type: integer, format: int64 }
+        pull_failures: { type: integer, format: int64 }
+        drops: { type: integer, format: int64, description: Cold replicas dropped after leases were granted. }
+        origin_transfers: { type: integer, format: int64 }
+        repairs: { type: integer, format: int64, description: Under-replicated files pulled by this node. }
+        remote_reads: { type: integer, format: int64, description: Reads served from a peer holder. }
+        remote_read_bytes: { type: integer, format: int64 }
+        remote_objects_fetched: { type: integer, format: int64 }
+        remote_fetch_bytes: { type: integer, format: int64 }
+        remote_fetch_failures: { type: integer, format: int64 }
+        cache_hits: { type: integer, format: int64, description: Remote-read object cache hits. }
+        cache_bytes: { type: integer, format: int64, description: Decoded bytes currently cached (`REACTOR_REMOTE_CACHE_BYTES`). }
+        cache_objects: { type: integer, format: int64 }
+        tombstones_applied: { type: integer, format: int64, description: Peer tombstones that deleted a local replica. }
+        quarantine_repairs: { type: integer, format: int64 }
+        quarantine_repair_failures: { type: integer, format: int64 }
+        leases_granted: { type: integer, format: int64 }
+        leases_refused: { type: integer, format: int64 }
+        leases_active: { type: integer, format: int64, description: Unexpired leases this node granted. }
+        evictions_confirmed: { type: integer, format: int64, description: Store evictions allowed by the gravity policy. }
+        unpins_forwarded: { type: integer, format: int64, description: DELETEs forwarded to the origin holder. }
+    DemandEntry:
+      type: object
+      required: [file_id, score]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        score: { type: number, description: "Exponentially decayed request count (`REACTOR_DEMAND_HALFLIFE_MS`)." }
+    ClusterPeer:
+      type: object
+      required: [url, node_id, region, healthy, is_self, last_ok_ms, last_error, last_error_ms,
+                 consecutive_failures, inventory_version, files, capacity, used]
+      properties:
+        url: { type: string, description: "Base URL from `REACTOR_PEERS`." }
+        node_id: { type: [string, "null"], description: Null until the first successful inventory fetch. }
+        region: { type: [string, "null"] }
+        healthy:
+          type: boolean
+          description: Last inventory fetch succeeded and is younger than 3 × the gossip interval.
+        is_self: { type: boolean, description: The URL points back at this node (ignored). }
+        last_ok_ms: { type: [integer, "null"], format: int64 }
+        last_error: { type: [string, "null"] }
+        last_error_ms: { type: [integer, "null"], format: int64 }
+        consecutive_failures: { type: integer, format: int64 }
+        inventory_version: { type: integer, format: int64, description: Last inventory version received. }
+        files: { type: integer, format: int64, description: Files the peer advertises. }
+        capacity: { type: [integer, "null"], format: int64 }
+        used: { type: integer, format: int64 }
+    FileHolders:
+      type: object
+      required: [file_id, holders, local, demand]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        holders:
+          type: array
+          description: Node ids holding a replica (sorted; includes this node when `local`).
+          items: { type: string }
+        local: { type: boolean }
+        demand: { type: number, description: Local demand score. }
+    ClusterStatus:
+      type: object
+      description: "`GET /cluster/status` body. Clients should tolerate fields added later."
+      required: [node_id, region, tls, cluster_size, min_replicas, min_replicas_effective, gravity_pull,
+                 demand_half_life_ms, gossip_interval_ms, capacity, used, peers, holders_sample, demand_top, metrics]
+      properties:
+        node_id: { type: string, description: "Stable random id (32 hex), `$REACTOR_STATE_DIR/node_id`." }
+        region: { type: [string, "null"], description: "`REACTOR_REGION`." }
+        tls: { type: boolean, description: "This node serves HTTPS (`REACTOR_TLS_CERT`/`REACTOR_TLS_KEY`)." }
+        cluster_size: { type: integer, description: This node plus its non-self peers. }
+        min_replicas: { type: integer, description: "`REACTOR_MIN_REPLICAS` (default 2)." }
+        min_replicas_effective: { type: integer, description: "`min(min_replicas, cluster_size)`." }
+        gravity_pull: { type: number, description: "`REACTOR_GRAVITY_PULL` (default 3)." }
+        demand_half_life_ms: { type: integer, format: int64 }
+        gossip_interval_ms: { type: integer, format: int64 }
+        capacity: { type: [integer, "null"], format: int64, description: "`REACTOR_STORE_MAX_BYTES`; null = unlimited." }
+        used: { type: [integer, "null"], format: int64, description: Live physical + in-flight bytes. }
+        peers:
+          type: array
+          items: { $ref: "#/components/schemas/ClusterPeer" }
+        holders_sample:
+          type: array
+          description: Up to 40 files (local first, then peers') with their known holders.
+          items: { $ref: "#/components/schemas/FileHolders" }
+        demand_top:
+          type: array
+          description: Up to 20 files with the highest local demand (≥ 0.01).
+          items: { $ref: "#/components/schemas/DemandEntry" }
+        metrics: { $ref: "#/components/schemas/ClusterMetrics" }
+    PeerManifest:
+      type: object
+      required: [file_id, size, created_ms, origin, chunks, objects]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        size: { type: integer, format: int64 }
+        created_ms: { type: integer, format: int64, description: A tombstone with a later `deleted_ms` wins. }
+        origin: { type: boolean, description: This holder is the file's origin. }
+        chunks:
+          type: array
+          items:
+            type: object
+            required: [id, len, object_id, object_offset]
+            properties:
+              id: { $ref: "#/components/schemas/Sha256" }
+              len: { type: integer }
+              object_id: { $ref: "#/components/schemas/Sha256" }
+              object_offset: { type: integer, description: Offset of the chunk in the object's plaintext. }
+        objects:
+          type: array
+          items:
+            type: object
+            required: [object_id, stored_len, plain_len, members]
+            properties:
+              object_id: { $ref: "#/components/schemas/Sha256" }
+              stored_len: { type: integer, format: int64 }
+              plain_len: { type: integer, format: int64 }
+              members:
+                type: array
+                items:
+                  type: object
+                  required: [id, len]
+                  properties:
+                    id: { $ref: "#/components/schemas/Sha256" }
+                    len: { type: integer }
+    Inventory:
+      type: object
+      required: [node_id, region, version, full, more, capacity, used, added, removed, tombstones, demand, now_ms]
+      properties:
+        node_id: { type: string }
+        region: { type: [string, "null"] }
+        version: { type: integer, format: int64, description: "Version covered by this response (resume with `since=version`)." }
+        full: { type: boolean, description: "`added` is the complete file list (the receiver replaces its view)." }
+        more: { type: boolean, description: "More delta events are available beyond `version`." }
+        capacity: { type: [integer, "null"], format: int64, description: "`REACTOR_STORE_MAX_BYTES`; null = unlimited." }
+        used: { type: integer, format: int64, description: Live physical bytes (+ in-flight writes). }
+        added:
+          type: array
+          items: { $ref: "#/components/schemas/Sha256" }
+        removed:
+          type: array
+          items: { $ref: "#/components/schemas/Sha256" }
+        tombstones:
+          type: array
+          items:
+            type: object
+            required: [file_id, deleted_ms]
+            properties:
+              file_id: { $ref: "#/components/schemas/Sha256" }
+              deleted_ms: { type: integer, format: int64 }
+        demand:
+          type: array
+          items: { $ref: "#/components/schemas/DemandEntry" }
+        now_ms: { type: integer, format: int64, description: "Server clock (the next `tsince`)." }
+    HoldLease:
+      type: object
+      required: [file_id, node_id, granted, expires_ms, lease_ms, origin_accepted, reason]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        node_id: { type: string, description: The holder's node id. }
+        granted: { type: boolean }
+        expires_ms: { type: integer, format: int64, description: "Lease expiry (holder clock, unix ms); 0 when not granted." }
+        lease_ms: { type: integer, format: int64, description: Lease duration (10 min). }
+        origin_accepted: { type: boolean, description: The holder took over origin and the pins as requested. }
+        reason:
+          type: [string, "null"]
+          description: Why the lease was refused.
+          examples: ["not held", "dropping"]
+    UnpinResult:
+      type: object
+      required: [file_id, node_id, held, origin, pins, deleted]
+      properties:
+        file_id: { $ref: "#/components/schemas/Sha256" }
+        node_id: { type: string }
+        held: { type: boolean, description: This node holds the file. }
+        origin: { type: boolean, description: "Held as a pinned origin (only then was the unpin applied)." }
+        pins: { type: integer, format: int64, description: Pin count after the request. }
+        deleted: { type: boolean }

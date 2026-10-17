@@ -1,0 +1,468 @@
+{
+  "fixtures": [
+    {
+      "blob": "raw_text.v2.bin",
+      "dict": null,
+      "name": "raw_text",
+      "original": "raw_text.input.bin",
+      "recipe": {
+        "codec": "raw",
+        "dict": null,
+        "filter": "none",
+        "level": 0,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "raw_delta2_tiny.v2.bin",
+      "dict": null,
+      "name": "raw_delta2_tiny",
+      "original": "raw_delta2_tiny.input.bin",
+      "recipe": {
+        "codec": "raw",
+        "dict": null,
+        "filter": "delta",
+        "level": 0,
+        "stride": 2,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "lz4_text.v2.bin",
+      "dict": null,
+      "name": "lz4_text",
+      "original": "lz4_text.input.bin",
+      "recipe": {
+        "codec": "lz4",
+        "dict": null,
+        "filter": "none",
+        "level": 0,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "lz4_delta4_f32.v2.bin",
+      "dict": null,
+      "name": "lz4_delta4_f32",
+      "original": "lz4_delta4_f32.input.bin",
+      "recipe": {
+        "codec": "lz4",
+        "dict": null,
+        "filter": "delta",
+        "level": 0,
+        "stride": 4,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "lz4_empty.v2.bin",
+      "dict": null,
+      "name": "lz4_empty",
+      "original": "lz4_empty.input.bin",
+      "recipe": {
+        "codec": "lz4",
+        "dict": null,
+        "filter": "none",
+        "level": 0,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "lz4_one_byte.v2.bin",
+      "dict": null,
+      "name": "lz4_one_byte",
+      "original": "lz4_one_byte.input.bin",
+      "recipe": {
+        "codec": "lz4",
+        "dict": null,
+        "filter": "none",
+        "level": 0,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "deflate6_json.v2.bin",
+      "dict": null,
+      "name": "deflate6_json",
+      "original": "deflate6_json.input.bin",
+      "recipe": {
+        "codec": "deflate",
+        "dict": null,
+        "filter": "none",
+        "level": 6,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "deflate9_shuffle8_f64.v2.bin",
+      "dict": null,
+      "name": "deflate9_shuffle8_f64",
+      "original": "deflate9_shuffle8_f64.input.bin",
+      "recipe": {
+        "codec": "deflate",
+        "dict": null,
+        "filter": "shuffle",
+        "level": 9,
+        "stride": 8,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "deflate0_text.v2.bin",
+      "dict": null,
+      "name": "deflate0_text",
+      "original": "deflate0_text.input.bin",
+      "recipe": {
+        "codec": "deflate",
+        "dict": null,
+        "filter": "none",
+        "level": 0,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd3_json.v2.bin",
+      "dict": null,
+      "name": "zstd3_json",
+      "original": "zstd3_json.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd19_w20_json.v2.bin",
+      "dict": null,
+      "name": "zstd19_w20_json",
+      "original": "zstd19_w20_json.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "none",
+        "level": 19,
+        "stride": 0,
+        "window_log": 20
+      }
+    },
+    {
+      "blob": "zstd9_shuffle4_f32.v2.bin",
+      "dict": null,
+      "name": "zstd9_shuffle4_f32",
+      "original": "zstd9_shuffle4_f32.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "shuffle",
+        "level": 9,
+        "stride": 4,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd9_delta4_f32.v2.bin",
+      "dict": null,
+      "name": "zstd9_delta4_f32",
+      "original": "zstd9_delta4_f32.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "delta",
+        "level": 9,
+        "stride": 4,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd3_shuffle8_tail.v2.bin",
+      "dict": null,
+      "name": "zstd3_shuffle8_tail",
+      "original": "zstd3_shuffle8_tail.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "shuffle",
+        "level": 3,
+        "stride": 8,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd1_delta8_short.v2.bin",
+      "dict": null,
+      "name": "zstd1_delta8_short",
+      "original": "zstd1_delta8_short.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "delta",
+        "level": 1,
+        "stride": 8,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd3_empty.v2.bin",
+      "dict": null,
+      "name": "zstd3_empty",
+      "original": "zstd3_empty.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd3_random.v2.bin",
+      "dict": null,
+      "name": "zstd3_random",
+      "original": "zstd3_random.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "brotli5_text.v2.bin",
+      "dict": null,
+      "name": "brotli5_text",
+      "original": "brotli5_text.input.bin",
+      "recipe": {
+        "codec": "brotli",
+        "dict": null,
+        "filter": "none",
+        "level": 5,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "brotli11_w18_json.v2.bin",
+      "dict": null,
+      "name": "brotli11_w18_json",
+      "original": "brotli11_w18_json.input.bin",
+      "recipe": {
+        "codec": "brotli",
+        "dict": null,
+        "filter": "none",
+        "level": 11,
+        "stride": 0,
+        "window_log": 18
+      }
+    },
+    {
+      "blob": "brotli9_delta1_text.v2.bin",
+      "dict": null,
+      "name": "brotli9_delta1_text",
+      "original": "brotli9_delta1_text.input.bin",
+      "recipe": {
+        "codec": "brotli",
+        "dict": null,
+        "filter": "delta",
+        "level": 9,
+        "stride": 1,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "brotli0_shuffle2_tail.v2.bin",
+      "dict": null,
+      "name": "brotli0_shuffle2_tail",
+      "original": "brotli0_shuffle2_tail.input.bin",
+      "recipe": {
+        "codec": "brotli",
+        "dict": null,
+        "filter": "shuffle",
+        "level": 0,
+        "stride": 2,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "brotli5_empty.v2.bin",
+      "dict": null,
+      "name": "brotli5_empty",
+      "original": "brotli5_empty.input.bin",
+      "recipe": {
+        "codec": "brotli",
+        "dict": null,
+        "filter": "none",
+        "level": 5,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd3_dict_json.v2.bin",
+      "dict": "dicts/1cfdd14dbb49d719d277cae67dbf0a038525823db67bde497b630541b5566f39.dict",
+      "name": "zstd3_dict_json",
+      "original": "zstd3_dict_json.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": "1cfdd14dbb49d719d277cae67dbf0a038525823db67bde497b630541b5566f39",
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "zstd19_dict_shuffle1_json.v2.bin",
+      "dict": "dicts/1cfdd14dbb49d719d277cae67dbf0a038525823db67bde497b630541b5566f39.dict",
+      "name": "zstd19_dict_shuffle1_json",
+      "original": "zstd19_dict_shuffle1_json.input.bin",
+      "recipe": {
+        "codec": "zstd",
+        "dict": "1cfdd14dbb49d719d277cae67dbf0a038525823db67bde497b630541b5566f39",
+        "filter": "shuffle",
+        "level": 19,
+        "stride": 1,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_mixed.v2.bin",
+      "dict": null,
+      "name": "procedural3_mixed",
+      "original": "procedural3_mixed.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural19_arith_widths.v2.bin",
+      "dict": null,
+      "name": "procedural19_arith_widths",
+      "original": "procedural19_arith_widths.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 19,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural1_delta4_counter.v2.bin",
+      "dict": null,
+      "name": "procedural1_delta4_counter",
+      "original": "procedural1_delta4_counter.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "delta",
+        "level": 1,
+        "stride": 4,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_shuffle8_mixed.v2.bin",
+      "dict": null,
+      "name": "procedural3_shuffle8_mixed",
+      "original": "procedural3_shuffle8_mixed.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "shuffle",
+        "level": 3,
+        "stride": 8,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural5_periodic_text.v2.bin",
+      "dict": null,
+      "name": "procedural5_periodic_text",
+      "original": "procedural5_periodic_text.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 5,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_fill_only.v2.bin",
+      "dict": null,
+      "name": "procedural3_fill_only",
+      "original": "procedural3_fill_only.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_random.v2.bin",
+      "dict": null,
+      "name": "procedural3_random",
+      "original": "procedural3_random.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_empty.v2.bin",
+      "dict": null,
+      "name": "procedural3_empty",
+      "original": "procedural3_empty.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    },
+    {
+      "blob": "procedural3_one_byte.v2.bin",
+      "dict": null,
+      "name": "procedural3_one_byte",
+      "original": "procedural3_one_byte.input.bin",
+      "recipe": {
+        "codec": "procedural",
+        "dict": null,
+        "filter": "none",
+        "level": 3,
+        "stride": 0,
+        "window_log": null
+      }
+    }
+  ],
+  "format": "datran blob v2 (core-reactor/docs/EVOLUTION_SPEC.md)",
+  "generator": "core-reactor tests/fixtures_v2.rs"
+}
