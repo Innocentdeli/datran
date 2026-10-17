@@ -1,30 +1,25 @@
 {
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
-    "devPath": "http://localhost:3000",
-    "distDir": "../dist"
+    "beforeDevCommand": "npm --prefix ../diocom-app run dev -- -p 3001",
+    "beforeBuildCommand": "",
+    "devPath": "http://localhost:3001",
+    "distDir": "http://localhost:3001"
   },
   "package": {
     "productName": "Datran",
-    "version": "1.4.0-godtier"
+    "version": "0.1.0"
   },
   "tauri": {
     "allowlist": {
       "all": false,
-      "fs": {
-        "all": true,
-        "scope": ["$HOME/*", "$DESKTOP/*"]
-      },
-      "path": {
-        "all": true
-      },
       "shell": {
-        "all": true,
+        "all": false,
         "open": true
       },
       "clipboard": {
-        "all": true
+        "all": false,
+        "writeText": true,
+        "readText": false
       }
     },
     "bundle": {
@@ -43,25 +38,29 @@
         "icons/icon.ico"
       ],
       "identifier": "io.diocom.datran",
-      "longDescription": "The world's fastest, zero-knowledge file sharing platform.",
+      "longDescription": "Desktop shell for the Datran file-sharing portal.",
       "macOS": {
         "entitlements": null,
         "exceptionDomain": "",
         "frameworks": [],
-        "providerBundleIdentifier": null,
+        "providerShortName": null,
         "signingIdentity": null
       },
       "resources": [],
-      "shortDescription": "Warp-speed P2P sharing.",
+      "shortDescription": "Datran file sharing.",
       "targets": "all",
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
-        "timestampServer": ""
+        "timestampUrl": ""
       }
     },
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http://localhost:3001; connect-src 'self' http://localhost:3001 ws://localhost:3001; img-src 'self' data: blob: http://localhost:3001; media-src 'self' blob: http://localhost:3001; style-src 'self' 'unsafe-inline' http://localhost:3001; script-src 'self' http://localhost:3001"
+    },
+    "systemTray": {
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": false
     },
     "updater": {
       "active": false
@@ -71,7 +70,7 @@
         "fullscreen": false,
         "height": 800,
         "resizable": true,
-        "title": "Datran Sovereign",
+        "title": "Datran",
         "width": 1000
       }
     ]

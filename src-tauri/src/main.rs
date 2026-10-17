@@ -5,17 +5,18 @@ use tauri::{Manager, CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayMenuI
 use std::env;
 
 /**
- * Datran Sovereign - Core Rust Module
- * 
- * Implements OS-level integrations like Context Menus and Clipboard hooks.
+ * Datran desktop shell.
+ *
+ * Wraps the diocom-app web portal and adds a system tray.
  */
 
-// Command to generate a link from the native side (simulated bridge)
+// Native link generation is not implemented yet; uploads go through the web portal.
 #[tauri::command]
-fn generate_datran_link(file_path: String) -> String {
-    println!("[Native] Generating Datran link for: {}", file_path);
-    // In production, this would call the Datran engine via a background worker or API
-    format!("https://diocom.io/v1/{}?godtier=true", uuid::Uuid::new_v4())
+fn generate_datran_link(file_path: String) -> Result<String, String> {
+    Err(format!(
+        "Native link generation is not implemented; upload '{}' through the portal",
+        file_path
+    ))
 }
 
 fn main() {
@@ -50,9 +51,10 @@ fn main() {
                             std::process::exit(0);
                         }
                         OPEN => {
-                            let window = app.get_window("main").unwrap();
-                            window.show().unwrap();
-                            window.set_focus().unwrap();
+                            if let Some(window) = app.get_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
                         }
                         _ => {}
                     }

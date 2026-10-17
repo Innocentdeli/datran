@@ -8,7 +8,8 @@ import { Dashboard } from './src/components/Dashboard';
 import { Inbox } from './src/components/Inbox';
 
 // Default to local dev server
-const DEFAULT_API_URL = 'http://10.8.0.126:3000/api/ingest';
+// Set your dev machine's LAN address in the app's settings field; port matches scripts/start-all.
+const DEFAULT_API_URL = 'http://localhost:3001/api/ingest';
 
 type Tab = 'upload' | 'dashboard' | 'inbox';
 
@@ -41,6 +42,9 @@ export default function App() {
 
         try {
             const formData = new FormData();
+            // Declared before the file so the server can stream it and knows it may be sampled.
+            formData.append('is_encrypted', 'false');
+            formData.append('password', '');
             // @ts-ignore - FormData expects this structure in RN
             formData.append('file', {
                 uri: file.uri,
