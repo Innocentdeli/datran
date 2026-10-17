@@ -1,0 +1,28 @@
+# Datran production edge: HTTP/3 (QUIC, UDP 443) + HTTP/2 + HTTP/1.1 with automatic TLS.
+#
+# Caddy enables h1/h2/h3 by default and advertises HTTP/3 with an Alt-Svc header on every
+# HTTPS response; browsers then switch to QUIC on UDP 443. Certificates come from Let's
+# Encrypt/ZeroSSL via ACME once SITE_ADDRESS resolves to this host and ports 80/443 are open.
+#
+# Env: SITE_ADDRESS (e.g. datran.example.com), APP_HOST/APP_PORT (Next.js upstream),
+#      INGEST_MAX_BODY, DEFAULT_MAX_BODY (see app.caddy).
+{
+	# Optional: ACME account email for expiry notices. Uncomment and set.
+	# email you@example.com
+
+	servers {
+		protocols h1 h2 h3
+		timeouts {
+			# Slow-header protection; bodies may take long on multi-GB transfers.
+			read_header 30s
+			# Upper bound for receiving one request incl. body (uploads).
+			read_body 6h
+			# No write timeout: multi-GB downloads may take hours. Idle keep-alive only.
+			idle 5m
+		}
+	}
+}
+
+{$SITE_ADDRESS} {
+	import app.caddy
+}

@@ -1,0 +1,16 @@
+**/node_modules
+**/.next
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/.storage
+diocom-app/data
+core-reactor
+src-tauri
+diocom-mobile
+clients
+dist
+deploy
+.git
+.claude

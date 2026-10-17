@@ -1,0 +1,16 @@
+# Rust reactor (core-reactor). Internal service: compose never publishes its port.
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY core-reactor/ ./
+RUN cargo build --release --locked --bin core-reactor
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10002 reactor && mkdir -p /data/reactor-state && chown reactor /data/reactor-state
+COPY --from=build /src/target/release/core-reactor /usr/local/bin/core-reactor
+ENV REACTOR_PORT=3005 REACTOR_STATE_DIR=/data/reactor-state
+USER reactor
+EXPOSE 3005
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -fsS "http://127.0.0.1:${REACTOR_PORT}/health" || exit 1
+CMD ["core-reactor"]

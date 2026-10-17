@@ -1,0 +1,24 @@
+# Local test: same site config as production, but with Caddy's internal CA (no ACME),
+# unprivileged ports and no attempt to install the root CA into the OS trust store.
+#   APP_HOST=127.0.0.1 APP_PORT=3001 caddy run --config deploy/caddy/Caddyfile.local
+# Then: https://localhost:8443 (HTTP/2 + Alt-Svc h3=":8443", QUIC on UDP 8443).
+{
+	admin off
+	skip_install_trust
+	http_port {$LOCAL_HTTP_PORT:8080}
+	https_port {$LOCAL_HTTPS_PORT:8443}
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2 h3
+		timeouts {
+			read_header 30s
+			read_body 6h
+			idle 5m
+		}
+	}
+}
+
+https://localhost:{$LOCAL_HTTPS_PORT:8443} {
+	tls internal
+	import app.caddy
+}

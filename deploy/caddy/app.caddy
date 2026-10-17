@@ -1,0 +1,78 @@
+# Shared site configuration for Datran, imported by Caddyfile (production) and
+# Caddyfile.local (local test). Everything here sits in front of the Next.js app only;
+# the Rust reactor is internal and is never proxied or published.
+
+# --- Request body limits ----------------------------------------------------------------
+# Only the upload endpoint takes large bodies. Keep INGEST_MAX_BODY a little above the app's
+# MAX_UPLOAD_BYTES (multipart boundaries + form fields), e.g. MAX_UPLOAD_BYTES=209715200
+# (200 MiB) -> INGEST_MAX_BODY=201MiB. The app enforces the exact limit itself; this stops
+# oversized bodies at the edge. Bodies are streamed, never buffered (see reverse_proxy).
+@ingest path /api/ingest /api/ingest/*
+request_body @ingest {
+	max_size {$INGEST_MAX_BODY:201MiB}
+}
+@notIngest not path /api/ingest /api/ingest/*
+request_body @notIngest {
+	max_size {$DEFAULT_MAX_BODY:16MiB}
+}
+
+# --- Security headers -------------------------------------------------------------------
+# No Content-Security-Policy beyond frame-ancestors: a script/style CSP for this Next.js app
+# needs per-request nonces (inline bootstrap scripts, framer-motion inline styles), so it
+# has to come from the app, not the proxy. frame-ancestors 'self' because the PDF viewer
+# frames same-origin /api/stream URLs.
+header {
+	Strict-Transport-Security "max-age=31536000"
+	X-Content-Type-Options "nosniff"
+	X-Frame-Options "SAMEORIGIN"
+	Content-Security-Policy "frame-ancestors 'self'"
+	?Referrer-Policy "strict-origin-when-cross-origin"
+	?Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	-Server
+	-X-Powered-By
+}
+
+# --- Compression ------------------------------------------------------------------------
+# Text types only, never Range requests (byte offsets must refer to the stored bytes) and
+# never the download/stream/upload/SSE endpoints (file bytes are often already compressed
+# and clients need exact Content-Length). Responses that already carry Content-Encoding
+# (e.g. gzip from `next start`) are passed through untouched.
+@compressible {
+	not header Range *
+	not path /api/stream /api/stream/* /api/thumbnail/* /api/ingest /api/ingest/* /api/progress /api/progress/*
+}
+encode @compressible zstd gzip {
+	minimum_length 1024
+	match {
+		header Content-Type text/html*
+		header Content-Type text/css*
+		header Content-Type text/plain*
+		header Content-Type text/javascript*
+		header Content-Type application/javascript*
+		header Content-Type application/json*
+		header Content-Type application/manifest+json*
+		header Content-Type application/xml*
+		header Content-Type image/svg+xml*
+	}
+}
+
+# --- Reverse proxy to Next.js -----------------------------------------------------------
+reverse_proxy {$APP_HOST:app}:{$APP_PORT:3000} {
+	# Stream responses (downloads, SSE progress) to the client immediately.
+	flush_interval -1
+	# Stream request bodies (uploads) to the app as they arrive; no buffering in Caddy.
+	request_buffers 0
+	response_buffers 0
+
+	# Caddy replaces X-Forwarded-For/-Proto/-Host with values derived from the client
+	# connection (incoming X-Forwarded-* from untrusted clients are dropped), so the app can
+	# run with TRUST_PROXY=true.
+
+	transport http {
+		dial_timeout 10s
+		# Time from the end of the request body until response headers. Large uploads are
+		# compressed/stored before the app answers, so this is generous.
+		response_header_timeout 15m
+		keepalive 2m
+	}
+}

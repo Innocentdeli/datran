@@ -1,0 +1,92 @@
+# Datran production stack: Caddy (HTTP/3 + HTTP/2 + automatic TLS) -> Next.js app -> Rust reactor.
+#
+#   cp deploy/.env.example deploy/.env   # fill in secrets
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+#
+# Only Caddy publishes ports. The app and the reactor are reachable only on the internal
+# network (the reactor port is never published).
+
+name: datran
+
+services:
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"          # ACME HTTP-01 challenge + redirect to HTTPS
+      - "443:443/tcp"    # HTTP/1.1 + HTTP/2 over TLS
+      - "443:443/udp"    # HTTP/3 over QUIC
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS (public DNS name)}
+      APP_HOST: app
+      APP_PORT: ${APP_PORT:-3000}
+      INGEST_MAX_BODY: ${INGEST_MAX_BODY:-201MiB}
+      DEFAULT_MAX_BODY: ${DEFAULT_MAX_BODY:-16MiB}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/app.caddy:/etc/caddy/app.caddy:ro
+      - caddy-data:/data        # certificates + ACME account (keep!)
+      - caddy-config:/config
+    networks: [edge]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.app
+    restart: unless-stopped
+    depends_on:
+      - reactor
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: ${APP_PORT:-3000}
+      HOSTNAME: 0.0.0.0
+      TRUST_PROXY: "true"                    # Caddy overwrites X-Forwarded-For
+      REACTOR_URL: http://reactor:3005
+      REACTOR_STATE_DIR: /data/reactor-state # TS fallback reads zstd dictionaries from here
+      DIOCOM_STORAGE_PATH: /data/app/storage
+      LOCAL_DB_PATH: /data/app/local_db.json
+    expose:
+      - "${APP_PORT:-3000}"
+    volumes:
+      - app-data:/data/app
+      - reactor-state:/data/reactor-state:ro
+    networks: [edge, internal]
+
+  reactor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.reactor
+    restart: unless-stopped
+    environment:
+      REACTOR_PORT: 3005
+      # Binding beyond loopback (needed inside the container network) requires both tokens.
+      REACTOR_BIND: 0.0.0.0
+      REACTOR_TOKEN: ${REACTOR_TOKEN:?set REACTOR_TOKEN}
+      REACTOR_CLUSTER_TOKEN: ${REACTOR_CLUSTER_TOKEN:?set REACTOR_CLUSTER_TOKEN}
+      REACTOR_STATE_DIR: /data/reactor-state
+      REACTOR_PEERS: ${REACTOR_PEERS:-}
+      REACTOR_TLS_CERT: ${REACTOR_TLS_CERT:-}
+      REACTOR_TLS_KEY: ${REACTOR_TLS_KEY:-}
+      REACTOR_TLS_CA: ${REACTOR_TLS_CA:-}
+    # No `ports:` on purpose: the reactor API is internal. Multi-node clusters connect
+    # reactors directly with their own TLS (REACTOR_TLS_*); publish 3005 only on a private
+    # interface for that, never through Caddy.
+    expose:
+      - "3005"
+    volumes:
+      - reactor-state:/data/reactor-state
+    networks: [internal]
+
+networks:
+  edge: {}
+  internal:
+    internal: true   # no route to the internet from the reactor network
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}
+  app-data: {}
+  reactor-state: {}
