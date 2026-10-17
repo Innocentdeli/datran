@@ -1,199 +1,121 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, TouchableOpacity, ActivityIndicator, Alert, ScrollView, TextInput } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import { useState, useEffect } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Dashboard } from './src/components/Dashboard';
-import { Inbox } from './src/components/Inbox';
+import { getAccessToken } from './src/auth/session';
+import { InboxScreen } from './src/screens/InboxScreen';
+import { SettingsScreen } from './src/screens/SettingsScreen';
+import { UploadScreen } from './src/screens/UploadScreen';
+import { addHistoryItem, loadHistory, saveHistory, type HistoryItem } from './src/storage/history';
+import { loadSettings, saveSettings, type Settings } from './src/storage/settings';
+import { colors } from './src/theme';
 
-// Default to local dev server
-// Set your dev machine's LAN address in the app's settings field; port matches scripts/start-all.
-const DEFAULT_API_URL = 'http://localhost:3001/api/ingest';
+type Tab = 'upload' | 'inbox' | 'settings';
 
-type Tab = 'upload' | 'dashboard' | 'inbox';
+const TABS: readonly { key: Tab; icon: string; label: string }[] = [
+    { key: 'upload', icon: '↑', label: 'UPLOAD' },
+    { key: 'inbox', icon: '☰', label: 'MY UPLOADS' },
+    { key: 'settings', icon: '⚙', label: 'SETTINGS' },
+];
 
 export default function App() {
-    const [uploading, setUploading] = useState(false);
-    const [lastLink, setLastLink] = useState(null);
-    const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
-    const [stats, setStats] = useState(null);
+    return (
+        <SafeAreaProvider>
+            <Main />
+            <StatusBar style="light" />
+        </SafeAreaProvider>
+    );
+}
+
+function Main() {
+    const insets = useSafeAreaInsets();
     const [activeTab, setActiveTab] = useState<Tab>('upload');
-    const [inboxItems, setInboxItems] = useState([]);
+    const [settings, setSettings] = useState<Settings | null>(null);
+    const [history, setHistory] = useState<HistoryItem[]>([]);
+    const [signedIn, setSignedIn] = useState(false);
 
-    const pickDocument = async () => {
-        try {
-            const result = await DocumentPicker.getDocumentAsync({
-                type: '*/*',
-                copyToCacheDirectory: true,
-            });
+    useEffect(() => {
+        let alive = true;
+        void Promise.all([loadSettings(), loadHistory(), getAccessToken()]).then(([s, h, token]) => {
+            if (!alive) return;
+            setSettings(s);
+            setHistory(h);
+            setSignedIn(token !== null);
+        });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
-            if (result.type === 'success') {
-                uploadFile(result);
-            }
-        } catch (err) {
-            console.log('Pick error', err);
-        }
-    };
+    const updateHistory = useCallback((update: (items: HistoryItem[]) => HistoryItem[]) => {
+        setHistory((prev) => {
+            const next = update(prev);
+            saveHistory(next).catch((err: unknown) => console.warn('Failed to persist upload history', err));
+            return next;
+        });
+    }, []);
 
-    const uploadFile = async (file: any) => {
-        setUploading(true);
-        setStats(null);
+    const handleSaveSettings = useCallback(async (next: Settings) => {
+        await saveSettings(next);
+        setSettings(next);
+    }, []);
 
-        try {
-            const formData = new FormData();
-            // Declared before the file so the server can stream it and knows it may be sampled.
-            formData.append('is_encrypted', 'false');
-            formData.append('password', '');
-            // @ts-ignore - FormData expects this structure in RN
-            formData.append('file', {
-                uri: file.uri,
-                name: file.name,
-                type: file.mimeType || 'application/octet-stream'
-            });
-
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'multipart/form-data',
-                },
-                body: formData,
-            });
-
-            const data = await response.json();
-
-            if (data.success) {
-                setLastLink(data.link);
-                setStats(data.stats);
-                Alert.alert('Singularity Achieved', 'File has been evolved and distributed.');
-                // Simulate adding to inbox for demo
-                setInboxItems(prev => [
-                    { id: Date.now().toString(), sender: 'SYSTEM', filename: file.name, timestamp: 'JUST NOW' },
-                    ...prev
-                ] as any);
-            } else {
-                throw new Error(data.message || 'Transmission failed');
-            }
-
-        } catch (error: any) {
-            Alert.alert('Transmission Error', error.message);
-        } finally {
-            setUploading(false);
-        }
-    };
-
-    const renderContent = () => {
-        switch (activeTab) {
-            case 'dashboard':
-                return <Dashboard stats={stats} />;
-            case 'inbox':
-                return <Inbox items={inboxItems} />;
-            default:
-                return (
-                    <>
-                        <View style={styles.configCard}>
-                            <Text style={styles.cardLabel}>NODE CONFIGURATION</Text>
-                            <TextInput
-                                style={styles.input}
-                                value={apiUrl}
-                                onChangeText={setApiUrl}
-                                placeholder="API Endpoint"
-                                placeholderTextColor="#444"
-                            />
-                        </View>
-
-                        <View style={styles.mainCard}>
-                            <Text style={styles.cardLabel}>INGESTION PORTAL</Text>
-                            <Text style={styles.description}>
-                                Select a payload for multi-dimensional compression and swarm distribution.
-                            </Text>
-                            
-                            <TouchableOpacity
-                                style={[styles.button, uploading && styles.disabled]}
-                                onPress={pickDocument}
-                                disabled={uploading}
-                            >
-                                {uploading ? (
-                                    <ActivityIndicator color="#000" />
-                                ) : (
-                                    <Text style={styles.buttonText}>INITIATE UPLOAD</Text>
-                                )}
-                            </TouchableOpacity>
-                        </View>
-
-                        {lastLink && (
-                            <View style={styles.resultCard}>
-                                <Text style={styles.resultLabel}>TRANSMISSION SUCCESSFUL</Text>
-                                <View style={styles.linkContainer}>
-                                    <Text style={styles.linkText} numberOfLines={1}>{lastLink}</Text>
-                                </View>
-                                
-                                {stats && (
-                                    <View style={styles.statsGrid}>
-                                        <View style={styles.statItem}>
-                                            <Text style={styles.statVal}>{stats.ratio}</Text>
-                                            <Text style={styles.statLabel}>RATIO</Text>
-                                        </View>
-                                        <View style={styles.statItem}>
-                                            <Text style={styles.statVal}>{stats.speed}</Text>
-                                            <Text style={styles.statLabel}>LATENCY</Text>
-                                        </View>
-                                        <View style={styles.statItem}>
-                                            <Text style={styles.statVal}>{stats.fidelity || '99.9%'}</Text>
-                                            <Text style={styles.statLabel}>FIDELITY</Text>
-                                        </View>
-                                    </View>
-                                )}
-                            </View>
-                        )}
-                    </>
-                );
-        }
-    };
+    if (!settings) {
+        return (
+            <View style={[styles.container, styles.center]}>
+                <ActivityIndicator color={colors.accent} />
+            </View>
+        );
+    }
 
     return (
         <View style={styles.container}>
-            <LinearGradient
-                colors={['#0a0a0a', '#050505']}
-                style={styles.background}
-            />
-            
-            <ScrollView contentContainerStyle={styles.scrollContent}>
-                <View style={styles.headerTitleContainer}>
-                    <Text style={styles.title}>DIOCOM<Text style={styles.highlight}>//</Text>MOBILE</Text>
-                    <Text style={styles.subtitle}>Autonomous Compression Swarm</Text>
-                </View>
+            <LinearGradient colors={['#0d0d0d', colors.background]} style={StyleSheet.absoluteFill} />
 
-                {renderContent()}
+            <ScrollView
+                contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top + 32, paddingBottom: insets.bottom + 100 }]}
+                keyboardShouldPersistTaps="handled"
+            >
+                {activeTab === 'upload' ? (
+                    <UploadScreen
+                        settings={settings}
+                        signedIn={signedIn}
+                        onUploaded={(item) => updateHistory((items) => addHistoryItem(items, item))}
+                        onOpenSettings={() => setActiveTab('settings')}
+                    />
+                ) : null}
+                {activeTab === 'inbox' ? (
+                    <InboxScreen
+                        items={history}
+                        onRemove={(id) => updateHistory((items) => items.filter((i) => i.id !== id))}
+                        onClear={() => updateHistory(() => [])}
+                    />
+                ) : null}
+                {activeTab === 'settings' ? (
+                    <SettingsScreen settings={settings} signedIn={signedIn} onSave={handleSaveSettings} />
+                ) : null}
             </ScrollView>
 
-            <View style={styles.tabBar}>
-                <TouchableOpacity 
-                    style={[styles.tabItem, activeTab === 'upload' && styles.activeTab]} 
-                    onPress={() => setActiveTab('upload')}
-                >
-                    <Text style={[styles.tabIcon, activeTab === 'upload' && styles.activeTabIcon]}>↑</Text>
-                    <Text style={[styles.tabLabel, activeTab === 'upload' && styles.activeTabLabel]}>INGEST</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                    style={[styles.tabItem, activeTab === 'dashboard' && styles.activeTab]} 
-                    onPress={() => setActiveTab('dashboard')}
-                >
-                    <Text style={[styles.tabIcon, activeTab === 'dashboard' && styles.activeTabIcon]}>📊</Text>
-                    <Text style={[styles.tabLabel, activeTab === 'dashboard' && styles.activeTabLabel]}>STATS</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity 
-                    style={[styles.tabItem, activeTab === 'inbox' && styles.activeTab]} 
-                    onPress={() => setActiveTab('inbox')}
-                >
-                    <Text style={[styles.tabIcon, activeTab === 'inbox' && styles.activeTabIcon]}>📩</Text>
-                    <Text style={[styles.tabLabel, activeTab === 'inbox' && styles.activeTabLabel]}>INBOX</Text>
-                </TouchableOpacity>
+            <View style={[styles.tabBar, { paddingBottom: insets.bottom + 8 }]} accessibilityRole="tablist">
+                {TABS.map((tab) => {
+                    const active = tab.key === activeTab;
+                    return (
+                        <TouchableOpacity
+                            key={tab.key}
+                            style={[styles.tabItem, active && styles.activeTab]}
+                            onPress={() => setActiveTab(tab.key)}
+                            accessibilityRole="tab"
+                            accessibilityState={{ selected: active }}
+                            accessibilityLabel={tab.label}
+                        >
+                            <Text style={[styles.tabIcon, active && styles.activeText]}>{tab.icon}</Text>
+                            <Text style={[styles.tabLabel, active && styles.activeText]}>{tab.label}</Text>
+                        </TouchableOpacity>
+                    );
+                })}
             </View>
-
-            <StatusBar style="light" />
         </View>
     );
 }
@@ -201,65 +123,52 @@ export default function App() {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#050505',
+        backgroundColor: colors.background,
     },
-    background: {
-        position: 'absolute',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
+    center: {
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     scrollContent: {
-        padding: 24,
-        paddingTop: 80,
-        paddingBottom: 100,
+        paddingHorizontal: 20,
+        width: '100%',
+        maxWidth: 640,
+        alignSelf: 'center',
     },
-    headerTitleContainer: {
-        marginBottom: 40,
-    },
-    title: {
-        fontSize: 38,
-        fontWeight: '900',
-        color: '#fff',
-        letterSpacing: -2,
-    },
-    // ... (other styles remain the same)
     tabBar: {
         position: 'absolute',
         bottom: 0,
         left: 0,
         right: 0,
-        height: 80,
-        backgroundColor: 'rgba(5,5,5,0.95)',
         flexDirection: 'row',
+        backgroundColor: 'rgba(5,5,5,0.96)',
         borderTopWidth: 1,
-        borderColor: 'rgba(255,255,255,0.05)',
-        paddingBottom: 20,
+        borderColor: colors.border,
+        paddingTop: 8,
     },
     tabItem: {
         flex: 1,
         alignItems: 'center',
         justifyContent: 'center',
+        paddingVertical: 6,
+        borderRadius: 10,
+        marginHorizontal: 6,
     },
     activeTab: {
-        backgroundColor: 'rgba(0,242,255,0.03)',
+        backgroundColor: colors.accentSoft,
     },
     tabIcon: {
         fontSize: 18,
-        color: '#444',
-    },
-    activeTabIcon: {
-        color: '#00F2FF',
+        color: colors.textFaint,
     },
     tabLabel: {
-        fontSize: 8,
+        fontSize: 9,
         fontWeight: '900',
-        color: '#444',
+        color: colors.textFaint,
         marginTop: 4,
         letterSpacing: 1,
     },
-    activeTabLabel: {
-        color: '#00F2FF',
+    activeText: {
+        color: colors.accent,
     },
 });
