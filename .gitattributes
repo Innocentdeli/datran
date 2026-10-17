@@ -1,0 +1,17 @@
+# Normalize text to LF in the repository; never touch binary data.
+* text=auto
+
+# Codec fixtures and dictionaries are byte-exact test vectors
+*.bin   binary
+*.dict  binary
+*.acs   binary
+
+# Images and icons
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.icns  binary
+
+# Scripts that must keep LF to run in containers
+*.sh    text eol=lf
+Dockerfile* text eol=lf
