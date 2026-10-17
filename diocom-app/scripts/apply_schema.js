@@ -213,15 +213,12 @@ COMMIT;
 `;
 
 async function migrate() {
-    const config = {
-        user: 'postgres',
-        host: 'localhost',
-        database: 'datran',
-        password: 'REDACTED',
-        port: 5432,
-    };
+    if (!process.env.DATABASE_URL) {
+        console.error('❌ DATABASE_URL is not set (e.g. postgres://user:pass@localhost:5432/datran)');
+        process.exit(1);
+    }
 
-    const client = new Client(config);
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
 
     try {
         await client.connect();

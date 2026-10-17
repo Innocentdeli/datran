@@ -2,12 +2,16 @@ const { Client } = require('pg');
 
 async function testConnection() {
     const config = {
-        user: 'postgres',
-        host: 'localhost',
+        user: process.env.PGUSER || 'postgres',
+        host: process.env.PGHOST || 'localhost',
         database: 'postgres', // Connect to default first to check if target exists
-        password: 'REDACTED',
-        port: 5432,
+        password: process.env.PGPASSWORD,
+        port: Number(process.env.PGPORT || 5432),
     };
+    if (!config.password) {
+        console.error('❌ PGPASSWORD is not set');
+        process.exit(1);
+    }
 
     const client = new Client(config);
 

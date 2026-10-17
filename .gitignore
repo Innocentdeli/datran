@@ -32,6 +32,21 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Rust build output
+target/
+
+# Runtime data (databases, ledgers, uploads) — never commit
+diocom-app/data/
+diocom-app/.storage/
+*.db
+*.db-wal
+*.db-shm
+local_db.json
+
+# Logs
+*.log
+build_log.txt
+
 # User added
 STREAM_DEBUG.log
 *.omni.acs
@@ -40,3 +55,8 @@ visual_dna.acs
 *.png
 *.pdf
 *.jpg
+# ...except the desktop app's icons, which the Tauri build requires
+!src-tauri/icons/*.png
+
+# Rust reactor runtime state (may contain dictionaries derived from user data)
+core-reactor/reactor-state/

@@ -1,12 +1,15 @@
 
+// Usage: DATABASE_URL=... npx tsx scripts/run_init_schema.ts
+//    or: node --env-file=.env --import tsx scripts/run_init_schema.ts
 import { Pool } from 'pg';
 import { initializeSchema } from '../src/db/schema';
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-
-dotenv.config({ path: path.join(__dirname, '../.env') });
 
 async function runInit() {
+    if (!process.env.DATABASE_URL) {
+        console.error('❌ DATABASE_URL is not set');
+        process.exit(1);
+    }
+
     const pool = new Pool({
         connectionString: process.env.DATABASE_URL
     });
