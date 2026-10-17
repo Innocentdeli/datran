@@ -10,7 +10,7 @@ import { warmIntent } from '@/lib/prefetcher';
  */
 export async function POST(request: Request) {
     try {
-        const limited = enforceRateLimit(request, 'prefetch', { maxRequests: 30, windowMs: 60_000 });
+        const limited = await enforceRateLimit(request, 'prefetch', { maxRequests: 30, windowMs: 60_000 });
         if (limited) return limited;
 
         const body = await request.json().catch(() => null);

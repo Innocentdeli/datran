@@ -4,7 +4,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '../../[...nextauth]/route';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
-import { getWebAuthnConfig, encodeChallenge, decodeChallenge } from '../_shared';
+import { getWebAuthnConfig, storeChallenge, takeChallenge } from '../_shared';
 
 const LIMIT = { maxRequests: 10, windowMs: 60_000 };
 
@@ -23,7 +23,7 @@ export async function GET(request: Request) {
         const user = await getSessionUser();
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-        const limited = enforceRateLimit(request, 'webauthn-reg-options', LIMIT, user.id);
+        const limited = await enforceRateLimit(request, 'webauthn-reg-options', LIMIT, user.id);
         if (limited) return limited;
 
         const { rpID, rpName } = getWebAuthnConfig();
@@ -43,7 +43,7 @@ export async function GET(request: Request) {
             },
         });
 
-        await db.query('UPDATE users SET current_challenge = $1 WHERE id = $2', [encodeChallenge(options.challenge), user.id]);
+        await storeChallenge('reg', user.id, options.challenge);
         return NextResponse.json(options);
     } catch (e) {
         console.error('[webauthn/register GET]', e);
@@ -56,15 +56,13 @@ export async function POST(request: Request) {
         const user = await getSessionUser();
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-        const limited = enforceRateLimit(request, 'webauthn-reg-verify', LIMIT, user.id);
+        const limited = await enforceRateLimit(request, 'webauthn-reg-verify', LIMIT, user.id);
         if (limited) return limited;
 
         const body = await request.json();
-        const expectedChallenge = decodeChallenge(user.current_challenge);
+        // Single-use challenge, atomically consumed (GETDEL)
+        const expectedChallenge = await takeChallenge('reg', user.id);
         if (!expectedChallenge) return NextResponse.json({ error: 'Challenge expired' }, { status: 400 });
-
-        // Single-use challenge
-        await db.query('UPDATE users SET current_challenge = NULL WHERE id = $1', [user.id]);
 
         const { rpID, origin } = getWebAuthnConfig();
         const verification = await verifyRegistrationResponse({

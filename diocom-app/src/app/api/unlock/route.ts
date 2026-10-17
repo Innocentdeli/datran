@@ -23,10 +23,10 @@ export async function POST(request: Request) {
         }
 
         // Per-IP limit across all files, plus a tighter per-(IP, file) limit against brute force.
-        const limited = enforceRateLimit(request, 'unlock', { maxRequests: 30, windowMs: 60_000 });
+        const limited = await enforceRateLimit(request, 'unlock', { maxRequests: 30, windowMs: 60_000 });
         if (limited) return limited;
         const ip = getClientIp(request);
-        if (!consumeRateLimit(`unlock:file:${ip}:${shareId}`, { maxRequests: 5, windowMs: 60_000 })) {
+        if (!(await consumeRateLimit(`unlock:file:${ip}:${shareId}`, { maxRequests: 5, windowMs: 60_000 }))) {
             return NextResponse.json({ success: false, error: 'Too many requests' }, { status: 429, headers: { 'Retry-After': '60' } });
         }
 

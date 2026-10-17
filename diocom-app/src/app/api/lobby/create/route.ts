@@ -17,7 +17,7 @@ function generateCode() {
 
 // POST /api/lobby/create — create a lobby
 export async function POST(request: Request) {
-  const limited = enforceRateLimit(request, 'lobby-create', { maxRequests: 10, windowMs: 60_000 });
+  const limited = await enforceRateLimit(request, 'lobby-create', { maxRequests: 10, windowMs: 60_000 });
   if (limited) return limited;
 
   try {

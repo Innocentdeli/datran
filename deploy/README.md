@@ -63,13 +63,49 @@ browser ──h3 / h2──▶ Caddy :443 (tcp+udp) ──http/1.1──▶ app 
    Large UDP receive buffers help QUIC throughput on Linux:
    `sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000`.
 3. **Config**: `cp deploy/.env.example deploy/.env`, set `SITE_ADDRESS`, `NEXTAUTH_URL`,
-   `WEBAUTHN_*`, `DIOCOM_SECRET`, `DATABASE_URL`, `REACTOR_TOKEN`, `REACTOR_CLUSTER_TOKEN`.
+   `WEBAUTHN_*`, `DIOCOM_SECRET`, `DATABASE_URL`, `REDIS_PASSWORD`, `REACTOR_TOKEN`,
+   `REACTOR_CLUSTER_TOKEN`.
 4. **Run**: `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build`.
    Caddy obtains the certificate on first start (watch `docker compose logs -f caddy`).
 
 Volumes: `caddy-data` (certificates; keep it or you'll hit ACME rate limits), `app-data`
 (uploads + local DB), `reactor-state` (populations, dictionaries, object store; mounted
 read-only into the app for the TS fallback decoder).
+
+## Running several app instances (Redis)
+
+Everything an app instance used to keep in its own memory and that must be consistent across
+instances lives in Redis (`diocom-app/src/lib/kv`):
+
+| State | Redis mechanism |
+| --- | --- |
+| Rate limits (all routes, sign-in, unlock) | sliding-window log, one Lua script (atomic, Redis clock) |
+| Passkey login tokens | `SET PX` 2 min under SHA-256(token); redeemed with `GETDEL` (exactly once) |
+| WebAuthn challenges | `SET PX` 5 min per user+purpose; consumed with `GETDEL` before verifying |
+| Swarm signaling | peer secret `SET NX PX` (id claimed once), bounded live sets, bounded mailbox lists (`RPUSH`+`LTRIM`, drained in `MULTI`) |
+| Upload progress (SSE) | pub/sub channel per upload id + last-state key, so `/api/progress` works on any instance |
+| Swarm daily credit cap | capped increment (Lua) |
+| Cleanup job | lock `SET NX PX` + compare-and-delete/renew (Lua): one instance per round |
+| Prediction | access events and file deletions broadcast via pub/sub; per-instance metrics aggregated for the admin view; reactor demand touches de-duplicated |
+
+The decoded-file stream cache stays per instance on purpose (each serve re-checks the DB first).
+
+- The compose file runs `redis:7-alpine` on the `internal` network only (no published port),
+  password-protected (`REDIS_PASSWORD`), **persistence off** (all keys expire within minutes; a
+  restart only drops in-flight tokens/progress and resets rate-limit windows) and
+  `maxmemory-policy noeviction` (when full, writes fail and the app fails closed instead of
+  silently evicting rate-limit state). The app gets `REDIS_URL` and `REQUIRE_REDIS=true`.
+- Scale out: `docker compose ... up -d --scale app=3`. Caddy resolves `app` via Docker DNS; for
+  active load balancing and health checks across replicas, use dynamic upstreams in
+  `caddy/app.caddy` (`reverse_proxy { dynamic a app {$APP_PORT:3000} }`). Sessions are stateless
+  JWTs, so no sticky sessions are needed.
+- Multiple instances also need a shared database (`DATABASE_URL`) and shared storage
+  (`STORAGE_BACKEND=reactor` or `s3`); the local JSON DB and local disk storage are per instance.
+- Without `REDIS_URL` the app uses in-process state and, in production, logs a prominent warning
+  that it must run as a **single** instance (legitimate for small deployments).
+  `REQUIRE_REDIS=true` turns a missing `REDIS_URL` into a startup failure. Redis >= 6.2 required.
+- If Redis becomes unreachable, rate-limited routes answer 503 (fail closed), passkey tokens
+  cannot be redeemed, and signaling/progress return errors; nothing falls back to per-process state.
 
 ## Verifying HTTP/3
 

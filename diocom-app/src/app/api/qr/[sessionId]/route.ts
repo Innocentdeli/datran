@@ -30,7 +30,7 @@ async function loadSession(sessionId: string) {
 
 // GET /api/qr/[sessionId] — poll QR session state
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
-  const limited = enforceRateLimit(req, 'qr-get', LIMIT);
+  const limited = await enforceRateLimit(req, 'qr-get', LIMIT);
   if (limited) return limited;
 
   try {
@@ -60,7 +60,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
 
 // PATCH /api/qr/[sessionId] — update session state (waiting -> paired -> complete)
 export async function PATCH(request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
-  const limited = enforceRateLimit(request, 'qr-patch', LIMIT);
+  const limited = await enforceRateLimit(request, 'qr-patch', LIMIT);
   if (limited) return limited;
 
   try {

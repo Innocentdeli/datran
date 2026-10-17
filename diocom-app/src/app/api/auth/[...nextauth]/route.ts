@@ -87,13 +87,13 @@ export const authOptions: NextAuthOptions = {
             },
             async authorize(credentials, req) {
                 const ip = ipFromAuthorizeReq(req);
-                if (!consumeRateLimit(`signin:ip:${ip}`, SIGNIN_LIMIT)) {
+                if (!(await consumeRateLimit(`signin:ip:${ip}`, SIGNIN_LIMIT))) {
                     throw new Error('Too many attempts. Please try again later.');
                 }
 
                 // Passkey login: only a server-issued, single-use token bound to a user is accepted
                 if (credentials?.passkeyToken) {
-                    const userId = consumePasskeyLoginToken(credentials.passkeyToken);
+                    const userId = await consumePasskeyLoginToken(credentials.passkeyToken);
                     if (!userId) throw new Error('Passkey session expired. Please try again.');
                     const user = await PostgresAdapter.getUser(userId);
                     if (!user) throw new Error('Passkey session expired. Please try again.');
@@ -102,14 +102,14 @@ export const authOptions: NextAuthOptions = {
 
                 const email = typeof credentials?.email === 'string' ? credentials.email.trim() : '';
                 if (!email || !EMAIL_RE.test(email)) return null;
-                if (!consumeRateLimit(`signin:email:${email.toLowerCase()}`, SIGNIN_LIMIT)) {
+                if (!(await consumeRateLimit(`signin:email:${email.toLowerCase()}`, SIGNIN_LIMIT))) {
                     throw new Error('Too many attempts. Please try again later.');
                 }
 
                 const user = await PostgresAdapter.getUserByEmail(email);
 
                 if (credentials?.isSignUp === 'true') {
-                    if (!consumeRateLimit(`signup:ip:${ip}`, SIGNUP_LIMIT)) {
+                    if (!(await consumeRateLimit(`signup:ip:${ip}`, SIGNUP_LIMIT))) {
                         throw new Error('Too many attempts. Please try again later.');
                     }
                     if (!credentials.password || credentials.password.length < MIN_PASSWORD_LENGTH) {

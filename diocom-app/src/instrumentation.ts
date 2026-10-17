@@ -1,11 +1,25 @@
 /**
  * Next.js instrumentation hook: runs once per server process (Node.js runtime only).
+ *  - Shared-state backend check (REDIS_URL / REQUIRE_REDIS, see src/lib/kv).
  *  - Expired-file cleanup + access-event retention. Env: CLEANUP_INTERVAL_MS (default 15 minutes; 0 disables).
+ *    Scheduled on every instance; a distributed lock makes sure only one runs it at a time.
  *  - Access prediction & prefetch (NETWORK_SPEC §5): rebuilds the model from persisted events, then warms predicted
  *    files every PREFETCH_INTERVAL_MS (default 60 s; 0 disables periodic prefetch, PREDICT_ENABLED=false disables all).
  */
 export async function register() {
     if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+    // Shared-state backend (src/lib/kv): REQUIRE_REDIS=true without REDIS_URL is fatal; production without
+    // REDIS_URL logs a prominent single-instance warning. Connecting eagerly surfaces a bad REDIS_URL at boot.
+    const { checkKvConfig, getKV, KvConfigError } = await import('./lib/kv');
+    try {
+        checkKvConfig(false);
+        getKV();
+    } catch (e) {
+        // Thrown from register(): Next.js aborts server startup.
+        if (e instanceof KvConfigError) console.error('[kv] FATAL:', e.message);
+        throw e;
+    }
 
     const g = globalThis as typeof globalThis & {
         __diocomCleanupTimer?: ReturnType<typeof setInterval>;

@@ -11,7 +11,7 @@ const LOOKUP_LIMIT = { maxRequests: 60, windowMs: 60_000 };
 
 // GET /api/lobby/[code] — poll lobby state
 export async function GET(req: Request, { params }: { params: Promise<{ code: string }> }) {
-  const limited = enforceRateLimit(req, 'lobby-get', LOOKUP_LIMIT);
+  const limited = await enforceRateLimit(req, 'lobby-get', LOOKUP_LIMIT);
   if (limited) return limited;
 
   try {
@@ -36,7 +36,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ code: st
 
 // PATCH /api/lobby/[code] — join or update lobby
 export async function PATCH(request: Request, { params }: { params: Promise<{ code: string }> }) {
-  const limited = enforceRateLimit(request, 'lobby-patch', { maxRequests: 20, windowMs: 60_000 });
+  const limited = await enforceRateLimit(request, 'lobby-patch', { maxRequests: 20, windowMs: 60_000 });
   if (limited) return limited;
 
   try {

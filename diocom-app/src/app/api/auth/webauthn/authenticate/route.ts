@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
-import { getWebAuthnConfig, encodeChallenge, decodeChallenge, issuePasskeyLoginToken } from '../_shared';
+import { getWebAuthnConfig, storeChallenge, takeChallenge, issuePasskeyLoginToken } from '../_shared';
 
 const LIMIT = { maxRequests: 10, windowMs: 60_000 };
 const GENERIC_UNAVAILABLE = 'Passkey sign-in is not available for this account';
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const email = normEmail(searchParams.get('email'));
     if (!email) return NextResponse.json({ error: 'Email required' }, { status: 400 });
 
-    const limited = enforceRateLimit(request, 'webauthn-auth-options', LIMIT, email);
+    const limited = await enforceRateLimit(request, 'webauthn-auth-options', LIMIT, email);
     if (limited) return limited;
 
     try {
@@ -39,7 +39,7 @@ export async function GET(request: Request) {
             userVerification: 'preferred',
         });
 
-        await db.query('UPDATE users SET current_challenge = $1 WHERE id = $2', [encodeChallenge(options.challenge), user.id]);
+        await storeChallenge('auth', user.id, options.challenge);
         return NextResponse.json(options);
     } catch (e) {
         console.error('[webauthn/authenticate GET]', e);
@@ -58,20 +58,18 @@ export async function POST(request: Request) {
     const email = normEmail(_email);
     if (!email) return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
 
-    const limited = enforceRateLimit(request, 'webauthn-auth-verify', LIMIT, email);
+    const limited = await enforceRateLimit(request, 'webauthn-auth-verify', LIMIT, email);
     if (limited) return limited;
 
     try {
         const { rpID, origin } = getWebAuthnConfig();
         const userRes = await db.query('SELECT * FROM users WHERE LOWER(email) = $1', [email]);
         const user = userRes.rows[0];
-        const expectedChallenge = user ? decodeChallenge(user.current_challenge) : null;
+        // Challenge is single-use: atomically consumed (GETDEL) before verifying, so it can never be replayed
+        const expectedChallenge = user ? await takeChallenge('auth', user.id) : null;
         if (!user || !expectedChallenge) {
             return NextResponse.json({ error: 'Invalid or expired challenge' }, { status: 400 });
         }
-
-        // Challenge is single-use: clear it before verifying to prevent replay
-        await db.query('UPDATE users SET current_challenge = NULL WHERE id = $1', [user.id]);
 
         const rawId = (authResponse as { id?: unknown }).id;
         if (typeof rawId !== 'string') return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
@@ -110,7 +108,7 @@ export async function POST(request: Request) {
             credential.id,
         ]);
 
-        const loginToken = issuePasskeyLoginToken(user.id);
+        const loginToken = await issuePasskeyLoginToken(user.id);
         return NextResponse.json({ verified: true, loginToken });
     } catch (e) {
         console.error('[webauthn/authenticate POST]', e);

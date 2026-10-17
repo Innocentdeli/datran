@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getClientIp } from '@/lib/security';
+import { getKV } from '@/lib/kv';
 
-interface RateLimitEntry {
-    count: number;
-    resetAt: number;
-}
-
-const rateLimitStore = new Map<string, RateLimitEntry>();
-const MAX_STORE_ENTRIES = 50000;
+/**
+ * Sliding-window rate limiting on the shared KV (src/lib/kv): with REDIS_URL the counts are global across all
+ * app instances (atomic Lua sliding-window log); without it they are per process (single-instance deployments).
+ *
+ * Fails CLOSED: if the shared store is unreachable the request is refused (503), so a Redis outage cannot be used
+ * to bypass brute-force limits on sign-in / unlock.
+ */
 
 export interface RateLimitConfig {
     maxRequests: number;
@@ -19,45 +20,20 @@ export interface RateLimitResult {
     remaining: number;
     resetAt: number;
     retryAfter?: number;
+    /** True when the store could not be reached (request refused). */
+    unavailable?: boolean;
 }
 
-function sweep(now: number) {
-    for (const [key, entry] of rateLimitStore.entries()) {
-        if (now >= entry.resetAt) rateLimitStore.delete(key);
+export async function checkRateLimit(identifier: string, config: RateLimitConfig): Promise<RateLimitResult> {
+    try {
+        const r = await getKV().slidingWindow(`rl:${identifier}`, config.maxRequests, config.windowMs);
+        return r.allowed
+            ? { allowed: true, remaining: r.remaining, resetAt: r.resetAt }
+            : { allowed: false, remaining: 0, resetAt: r.resetAt, retryAfter: Math.max(1, Math.ceil(r.retryAfterMs / 1000)) };
+    } catch (e) {
+        console.error('[rateLimit] shared store unavailable, refusing request:', e instanceof Error ? e.message : e);
+        return { allowed: false, remaining: 0, resetAt: Date.now() + 5_000, retryAfter: 5, unavailable: true };
     }
-}
-
-export function checkRateLimit(
-    identifier: string,
-    config: RateLimitConfig
-): RateLimitResult {
-    const now = Date.now();
-    const entry = rateLimitStore.get(identifier);
-
-    // No previous entry or window expired
-    if (!entry || now >= entry.resetAt) {
-        if (rateLimitStore.size >= MAX_STORE_ENTRIES) sweep(now);
-        const resetAt = now + config.windowMs;
-        rateLimitStore.set(identifier, { count: 1, resetAt });
-        return { allowed: true, remaining: config.maxRequests - 1, resetAt };
-    }
-
-    // Within window, check if limit exceeded
-    if (entry.count >= config.maxRequests) {
-        return {
-            allowed: false,
-            remaining: 0,
-            resetAt: entry.resetAt,
-            retryAfter: Math.ceil((entry.resetAt - now) / 1000)
-        };
-    }
-
-    entry.count++;
-    return {
-        allowed: true,
-        remaining: config.maxRequests - entry.count,
-        resetAt: entry.resetAt
-    };
 }
 
 /**
@@ -70,38 +46,34 @@ export function getClientIdentifier(request: Request): string {
 }
 
 /**
- * Reusable route helper. Returns a 429 NextResponse when the limit is exceeded,
- * or null when the request may proceed.
+ * Reusable route helper. Returns a 429 (or 503 if the store is down) NextResponse when the request must be
+ * refused, or null when it may proceed.
  *
- *   const limited = enforceRateLimit(req, 'unlock', { maxRequests: 10, windowMs: 60_000 }, shareId);
+ *   const limited = await enforceRateLimit(req, 'unlock', { maxRequests: 10, windowMs: 60_000 }, shareId);
  *   if (limited) return limited;
  */
-export function enforceRateLimit(
+export async function enforceRateLimit(
     request: Request,
     scope: string,
     config: RateLimitConfig,
     extraKey?: string
-): NextResponse | null {
+): Promise<NextResponse | null> {
     const ip = getClientIp(request);
     const keys = [`${scope}:ip:${ip}`];
     if (extraKey) keys.push(`${scope}:key:${extraKey}`);
     for (const key of keys) {
-        const result = checkRateLimit(key, config);
+        const result = await checkRateLimit(key, config);
         if (!result.allowed) {
             return NextResponse.json(
-                { error: 'Too many requests' },
-                { status: 429, headers: { 'Retry-After': String(result.retryAfter ?? 60) } }
+                { error: result.unavailable ? 'Service temporarily unavailable' : 'Too many requests' },
+                { status: result.unavailable ? 503 : 429, headers: { 'Retry-After': String(result.retryAfter ?? 60) } }
             );
         }
     }
     return null;
 }
 
-/** Non-HTTP variant (e.g. inside NextAuth authorize). Returns true if allowed. */
-export function consumeRateLimit(key: string, config: RateLimitConfig): boolean {
-    return checkRateLimit(key, config).allowed;
+/** Non-HTTP variant (e.g. inside NextAuth authorize). Resolves true if allowed. */
+export async function consumeRateLimit(key: string, config: RateLimitConfig): Promise<boolean> {
+    return (await checkRateLimit(key, config)).allowed;
 }
-
-// Cleanup old entries periodically
-const timer = setInterval(() => sweep(Date.now()), 60000);
-if (typeof (timer as { unref?: () => void }).unref === 'function') (timer as { unref: () => void }).unref();

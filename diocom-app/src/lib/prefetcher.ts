@@ -2,6 +2,7 @@ import { createHmac } from 'crypto';
 import { getToken } from 'next-auth/jwt';
 import { FileRepository, FileRecord } from '@/db/files';
 import { getAppSecret, getClientIp } from '@/lib/security';
+import type { MetricsSnapshot } from '@/lib/predict/metrics';
 import {
     PredictionEngine, PredictionModel, ModelConfig, EngineConfig, CacheOutcome, CacheSource, selectWithinBudget,
 } from '@/lib/predict';
@@ -13,6 +14,7 @@ import {
 } from '@/lib/accessEvents';
 import { parseReactorStoragePath } from '@/lib/storage/reactorStoreCore';
 import { touchStoreFile } from '@/lib/storage/reactorStore';
+import { getKV, instanceId, type KV } from '@/lib/kv';
 
 /**
  * Access prediction & prefetch runtime (NETWORK_SPEC §5).
@@ -29,6 +31,16 @@ import { touchStoreFile } from '@/lib/storage/reactorStore';
  *    for data gravity (NETWORK_SPEC §4/§5). Files that fit the cache/prefetch budget are read fully and cached;
  *    larger ones get a small ranged GET ("touch") that is drained, never cached.
  *  - The model is rebuilt from persisted events on startup; all state is bounded.
+ *
+ * Multiple instances (REDIS_URL set; see src/lib/kv):
+ *  - The stream cache stays per instance (each instance warms its own cache; share ids are immutable and every
+ *    serve re-checks the DB record, so a stale local entry can never be served for a deleted/expired file).
+ *  - Every observed access is broadcast on `predict:observe`; other instances feed it into their model (no metrics,
+ *    no successor warming there), so all models learn from all traffic. Only the serving instance persists it.
+ *  - forgetFile() is broadcast on `predict:forget` so every instance drops the file from model/meta/cache.
+ *  - Reactor "touches" (demand signals for files too large to cache) are de-duplicated cluster-wide with a short
+ *    SET NX key, so N instances do not report the same demand N times.
+ *  - Each instance publishes its metrics snapshot (`predict:status:<instance>`); the admin endpoint aggregates them.
  */
 
 function envInt(name: string, fallback: number, min = 0): number {
@@ -72,6 +84,12 @@ const MAX_PENDING_OBSERVE = 10_000;
 const META_TTL_MS = 60_000;
 const MAX_META = 5_000;
 const MAX_REACTOR_TOUCHES_PER_TICK = 10;
+const TOUCH_DEDUP_MS = 60_000;
+const OBSERVE_CHANNEL = 'predict:observe';
+const FORGET_CHANNEL = 'predict:forget';
+const STATUS_INSTANCES_KEY = 'predict:instances';
+const statusKey = (id: string) => `predict:status:${id}`;
+const MAX_STATUS_INSTANCES = 256;
 
 interface WarmJob { fileId: string; source: Exclude<CacheSource, 'demand'>; ttlMs: number }
 
@@ -91,6 +109,7 @@ interface Runtime {
     init: Promise<void> | null;
     pending: { fileId: string; ts: number; actor: string | null }[];
     warmQueue: WarmJob[];
+    clusterSync: boolean;
     warmKeys: Set<string>;
     warmActive: number;
     tickRunning: boolean;
@@ -125,6 +144,7 @@ function rt(): Runtime {
             init: null,
             pending: [],
             warmQueue: [],
+            clusterSync: false,
             warmKeys: new Set(),
             warmActive: 0,
             tickRunning: false,
@@ -137,7 +157,57 @@ function rt(): Runtime {
             },
         };
     }
+    if (!g.__diocomPrefetch.clusterSync) {
+        g.__diocomPrefetch.clusterSync = true;
+        void startClusterSync();
+    }
     return g.__diocomPrefetch;
+}
+
+/** Shared KV only when it is Redis (in-memory means one process: nothing to sync). */
+function clusterKV(): KV | null {
+    try {
+        const kv = getKV();
+        return kv.backend === 'redis' ? kv : null;
+    } catch {
+        return null;
+    }
+}
+
+async function startClusterSync() {
+    const kv = clusterKV();
+    if (!kv) return;
+    const me = instanceId();
+    try {
+        await kv.subscribe(OBSERVE_CHANNEL, (raw) => {
+            try {
+                const m = JSON.parse(raw) as { o: string; f: string; t: number; a: string | null };
+                if (m.o === me || typeof m.f !== 'string' || typeof m.t !== 'number') return;
+                const r = rt();
+                if (!r.ready) {
+                    if (r.pending.length < MAX_PENDING_OBSERVE) r.pending.push({ fileId: m.f, ts: m.t, actor: m.a });
+                    return;
+                }
+                r.engine.model.observe(m.f, m.t, m.a);
+            } catch { /* malformed */ }
+        });
+        await kv.subscribe(FORGET_CHANNEL, (raw) => {
+            try {
+                const m = JSON.parse(raw) as { o: string; s: string };
+                if (m.o !== me && typeof m.s === 'string') forgetLocal(m.s);
+            } catch { /* malformed */ }
+        });
+    } catch (e) {
+        console.warn('[PREDICT] Cluster sync unavailable:', e instanceof Error ? e.message : e);
+        if (g.__diocomPrefetch) g.__diocomPrefetch.clusterSync = false; // retry on next access
+    }
+}
+
+function broadcast(channel: string, payload: object) {
+    const kv = clusterKV();
+    if (!kv) return;
+    kv.publish(channel, JSON.stringify({ o: instanceId(), ...payload }))
+        .catch((e) => console.warn('[PREDICT] broadcast failed:', e instanceof Error ? e.message : e));
 }
 
 function warmConcurrency(): number {
@@ -251,6 +321,7 @@ export function recordStreamAccess(a: StreamAccess): void {
 function onObserved(fileId: string, ts: number, actor: string | null) {
     const r = rt();
     enqueueAccessEvent({ file_id: fileId, ts, actor: actor ?? '' });
+    broadcast(OBSERVE_CHANNEL, { f: fileId, t: ts, a: actor });
     if (!r.ready) {
         if (r.pending.length < MAX_PENDING_OBSERVE) r.pending.push({ fileId, ts, actor });
         void initPrediction();
@@ -268,8 +339,13 @@ export function warmIntent(fileId: string): boolean {
     return enqueueWarm({ fileId, source: 'intent', ttlMs: INTENT_TTL_MS });
 }
 
-/** Drops a deleted/expired file from the model, metadata memo and cache. */
+/** Drops a deleted/expired file from the model, metadata memo and cache, on every instance. */
 export function forgetFile(shareId: string) {
+    forgetLocal(shareId);
+    broadcast(FORGET_CHANNEL, { s: shareId });
+}
+
+function forgetLocal(shareId: string) {
     const r = g.__diocomPrefetch;
     if (r) {
         r.engine.model.forget(shareId);
@@ -337,6 +413,11 @@ async function warmOne(job: WarmJob): Promise<void> {
     if (size > cache.opts.maxItemBytes || size > cache.opts.prefetchMaxBytes) {
         if (!storeId) return skip('too_large');
         // Too big to cache: still tell the reactor this file is wanted here (gravity), without buffering it.
+        // One touch per file per TOUCH_DEDUP_MS across all instances.
+        const kv = clusterKV();
+        if (kv && !(await kv.setNX(`prefetch:touch:${storeId}`, instanceId(), TOUCH_DEDUP_MS).catch(() => true))) {
+            return skip('touch_dedup');
+        }
         if (!(await touchStoreFile(storeId))) return skip('not_in_store');
         r.stats.reactorTouches++;
         return skip('too_large_touched');
@@ -423,6 +504,7 @@ export async function runPrefetchTick(): Promise<void> {
         }));
         r.stats.ticks++;
         r.stats.lastTickAt = now;
+        void publishStatus(now);
     } finally {
         r.stats.lastTickMs = Date.now() - t0;
         r.tickRunning = false;
@@ -488,5 +570,76 @@ export function getPredictionStatus() {
         },
         events: accessEventStats(),
         topPredictions: r.top,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Cluster status (admin): per-instance snapshots in the shared KV, aggregated on read
+// ---------------------------------------------------------------------------
+
+function statusTtlMs(): number {
+    return Math.max(prefetchIntervalMs(), 60_000) * 3;
+}
+
+async function publishStatus(now: number) {
+    const kv = clusterKV();
+    if (!kv) return;
+    try {
+        const ttl = statusTtlMs();
+        const id = instanceId();
+        const snap = { instance: id, at: now, metrics: rt().engine.metrics.snapshot(now), cache: getStreamCache().stats() };
+        await kv.set(statusKey(id), JSON.stringify(snap), ttl);
+        await kv.zAddCapped(STATUS_INSTANCES_KEY, id, now, now - ttl, MAX_STATUS_INSTANCES, ttl);
+    } catch (e) {
+        console.warn('[PREDICT] status publish failed:', e instanceof Error ? e.message : e);
+    }
+}
+
+type Rate = { numerator: number; denominator: number; rate: number | null };
+const sumRates = (xs: Rate[]): Rate => {
+    const n = xs.reduce((a, x) => a + x.numerator, 0);
+    const d = xs.reduce((a, x) => a + x.denominator, 0);
+    return { numerator: n, denominator: d, rate: d > 0 ? n / d : null };
+};
+
+/**
+ * Local status plus, when REDIS_URL is set, every live instance's latest metrics snapshot and their sums
+ * (precision/recall/hit-rate numerators and denominators add up; TTFB percentiles stay per instance).
+ */
+export async function getClusterPredictionStatus() {
+    const local = getPredictionStatus();
+    const kv = clusterKV();
+    if (!kv) return { ...local, instance: instanceId(), cluster: null };
+    await publishStatus(Date.now());
+    const ids = await kv.zMembers(STATUS_INSTANCES_KEY, Date.now() - statusTtlMs());
+    const snaps: { instance: string; at: number; metrics: MetricsSnapshot }[] = [];
+    for (const id of ids) {
+        const raw = await kv.get(statusKey(id));
+        if (!raw) continue;
+        try { snaps.push(JSON.parse(raw)); } catch { /* skip */ }
+    }
+    const ms = snaps.map((x) => x.metrics);
+    return {
+        ...local,
+        instance: instanceId(),
+        cluster: {
+            instances: snaps,
+            aggregate: {
+                precision: {
+                    temporal: sumRates(ms.map((m) => m.precision.temporal)),
+                    sequential: sumRates(ms.map((m) => m.precision.sequential)),
+                    intent: sumRates(ms.map((m) => m.precision.intent)),
+                    all: sumRates(ms.map((m) => m.precision.all)),
+                },
+                recall: sumRates(ms.map((m) => m.recall)),
+                hitRate: {
+                    predicted: sumRates(ms.map((m) => m.hitRate.predicted)),
+                    unpredicted: sumRates(ms.map((m) => m.hitRate.unpredicted)),
+                    all: sumRates(ms.map((m) => m.hitRate.all)),
+                },
+                requests: ms.reduce((a, m) => a + m.requests, 0),
+                openPredictions: ms.reduce((a, m) => a + m.openPredictions, 0),
+            },
+        },
     };
 }

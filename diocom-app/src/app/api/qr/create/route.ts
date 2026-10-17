@@ -11,7 +11,7 @@ const MAX_FILES = 20;
 // POST /api/qr/create — create a QR pairing session.
 // The (random UUID) session id is the pairing secret embedded in the QR code.
 export async function POST(request: Request) {
-  const limited = enforceRateLimit(request, 'qr-create', { maxRequests: 20, windowMs: 60_000 });
+  const limited = await enforceRateLimit(request, 'qr-create', { maxRequests: 20, windowMs: 60_000 });
   if (limited) return limited;
 
   try {

@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     const userId = (session?.user as { id?: string } | undefined)?.id;
     if (!userId) return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
 
-    const limited = enforceRateLimit(request, 'swarm-pulse', { maxRequests: 30, windowMs: 60_000 }, userId);
+    const limited = await enforceRateLimit(request, 'swarm-pulse', { maxRequests: 30, windowMs: 60_000 }, userId);
     if (limited) return limited;
 
     try {

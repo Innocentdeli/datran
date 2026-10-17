@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
-import { getPredictionStatus } from '@/lib/prefetcher';
+import { getClusterPredictionStatus } from '@/lib/prefetcher';
 
 /** Admin-only: access prediction & prefetch status and measured metrics (NETWORK_SPEC §5). */
 export async function GET() {
@@ -13,7 +13,7 @@ export async function GET() {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
     try {
-        return NextResponse.json(getPredictionStatus(), { headers: { 'Cache-Control': 'no-store' } });
+        return NextResponse.json(await getClusterPredictionStatus(), { headers: { 'Cache-Control': 'no-store' } });
     } catch (e) {
         console.error('[admin/prediction]', e);
         return NextResponse.json({ error: 'Failed to load prediction status' }, { status: 500 });

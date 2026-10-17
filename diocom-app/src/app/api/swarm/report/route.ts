@@ -4,6 +4,7 @@ import { authOptions } from '../../../api/auth/[...nextauth]/route';
 import { SovereignCredit } from '@/lib/SovereignCredit';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { enforceRateLimit } from '@/lib/rateLimit';
+import { getKV } from '@/lib/kv';
 
 /**
  * Swarm Report API
@@ -17,9 +18,10 @@ import { enforceRateLimit } from '@/lib/rateLimit';
 const BYTES_PER_CREDIT = 1024 * 1024 * 1024; // 1 $DTN per GB
 const MAX_REPORT_BYTES = 10 * BYTES_PER_CREDIT;
 
-type DailyEntry = { day: string; earned: number };
-const g = globalThis as unknown as { __diocomSwarmDaily?: Map<string, DailyEntry> };
-const daily: Map<string, DailyEntry> = g.__diocomSwarmDaily ?? (g.__diocomSwarmDaily = new Map());
+// Daily earnings are tracked in the shared KV (atomic capped increment) so the cap holds across instances.
+// Units: 1e-4 $DTN (amounts are rounded to 4 decimals).
+const UNITS_PER_CREDIT = 10_000;
+const DAY_TTL_MS = 48 * 3_600_000;
 
 function dailyCap(): number {
     const v = parseFloat(process.env.SWARM_DAILY_CREDIT_CAP || '1');
@@ -33,7 +35,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const limited = enforceRateLimit(request, 'swarm-report', { maxRequests: 30, windowMs: 60_000 }, userId);
+    const limited = await enforceRateLimit(request, 'swarm-report', { maxRequests: 30, windowMs: 60_000 }, userId);
     if (limited) return limited;
 
     try {
@@ -49,18 +51,19 @@ export async function POST(request: Request) {
         }
 
         const day = new Date().toISOString().slice(0, 10);
-        const entry = daily.get(userId);
-        const earnedToday = entry && entry.day === day ? entry.earned : 0;
-        const remaining = Math.max(0, dailyCap() - earnedToday);
-
         const claimed = Math.min(bytes, MAX_REPORT_BYTES) / BYTES_PER_CREDIT;
-        const amount = parseFloat(Math.min(claimed, remaining).toFixed(4));
+        // Reserve atomically: min(claimed, cap - earnedToday), never exceeding the cap under concurrency.
+        const grantedUnits = await getKV().incrCapped(
+            `swarm:daily:${day}:${userId}`,
+            Math.floor(claimed * UNITS_PER_CREDIT),
+            Math.floor(dailyCap() * UNITS_PER_CREDIT),
+            DAY_TTL_MS,
+        );
+        const amount = grantedUnits / UNITS_PER_CREDIT;
 
         if (amount <= 0) {
             return NextResponse.json({ success: true, earned: 0, message: 'Daily reward cap reached.' });
         }
-
-        daily.set(userId, { day, earned: earnedToday + amount });
 
         await SovereignCredit.earn(userId, amount, `Seeded file: ${String(fileId).slice(0, 64)}`);
         await AuditLogger.record({

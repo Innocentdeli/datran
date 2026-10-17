@@ -13,7 +13,7 @@ export async function POST(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const limited = enforceRateLimit(request, 'inbox-send', { maxRequests: 20, windowMs: 60_000 }, session.user.id);
+  const limited = await enforceRateLimit(request, 'inbox-send', { maxRequests: 20, windowMs: 60_000 }, session.user.id);
   if (limited) return limited;
 
   try {
@@ -57,7 +57,7 @@ export async function GET(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const limited = enforceRateLimit(request, 'inbox-search', { maxRequests: 60, windowMs: 60_000 }, session.user.id);
+  const limited = await enforceRateLimit(request, 'inbox-search', { maxRequests: 60, windowMs: 60_000 }, session.user.id);
   if (limited) return limited;
 
   try {

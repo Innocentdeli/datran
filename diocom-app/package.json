@@ -7,7 +7,9 @@
     "dev:all": "node ../scripts/start-all.js",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:migrate": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --env-file-if-exists=.env.local scripts/db.mjs migrate",
+    "db:status": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --env-file-if-exists=.env.local scripts/db.mjs status"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.975.0",
@@ -16,6 +18,7 @@
     "busboy": "^1.6.0",
     "clsx": "^2.1.1",
     "framer-motion": "^12.29.0",
+    "ioredis": "^5.11.1",
     "lucide-react": "^0.563.0",
     "next": "16.1.4",
     "next-auth": "^4.24.13",

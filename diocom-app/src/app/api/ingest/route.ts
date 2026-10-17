@@ -38,6 +38,7 @@ import { FHELight } from '@/lib/FHELight';
 import { hashPassword, randomToken } from '@/lib/security';
 import { compressPayload } from '@/lib/reactorWorker';
 import { DCE2_DB_MARKER, DCE2_FORMAT_FIELD } from '@/lib/crypto/dce2';
+import { createProgressReporter, isValidUploadId, type ProgressReporter } from '@/lib/uploadProgress';
 import '@/db/schema'; // Initialize DB Schema
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -51,6 +52,13 @@ const DEFER_BYTES = 8 * 1024 * 1024;
 /** Images above this size get no thumbnail (the image must be buffered for sharp). */
 const THUMBNAIL_MAX_BYTES = 25 * 1024 * 1024;
 const MAX_FIELD_BYTES = 1024 * 1024;
+
+function countedBody(src: Readable, progress: ProgressReporter | null): Readable {
+    if (!progress) return src;
+    const counter = progress.counter();
+    src.on('error', (e) => counter.destroy(e));
+    return src.pipe(counter);
+}
 
 type SinkResult = { kind: 'reactor'; put: StorePutResult } | { kind: 'temp'; path: string };
 
@@ -168,7 +176,29 @@ async function moveIntoLocalStorage(tempPath: string, key: string): Promise<stri
     return dest;
 }
 
+/**
+ * Optional progress reporting: if the client sends `x-upload-id` (or `?uploadId=`), body bytes are counted and
+ * published to the shared KV for GET /api/progress (which may be served by another instance).
+ */
 export async function POST(request: Request) {
+    const rawId = request.headers.get('x-upload-id') ?? new URL(request.url).searchParams.get('uploadId');
+    const total = Number(request.headers.get('content-length'));
+    const progress = isValidUploadId(rawId) ? createProgressReporter(rawId, Number.isFinite(total) && total > 0 ? total : null) : null;
+    let res: Response;
+    try {
+        res = await handleIngest(request, progress);
+    } catch (e) {
+        await progress?.fail('Upload failed');
+        throw e;
+    }
+    if (progress) {
+        if (res.ok) await progress.done();
+        else await progress.fail(`Upload failed (${res.status})`);
+    }
+    return res;
+}
+
+async function handleIngest(request: Request, progress: ProgressReporter | null): Promise<Response> {
     console.log(`[INGEST] Incoming request at ${new Date().toISOString()}`);
     const storedObjects: string[] = [];
     const tempFiles: string[] = [];
@@ -178,7 +208,7 @@ export async function POST(request: Request) {
         // Rate limiting
         if (config.rateLimit.enabled) {
             const clientId = getClientIdentifier(request);
-            const rateLimitResult = checkRateLimit(`ingest:${clientId}`, {
+            const rateLimitResult = await checkRateLimit(`ingest:${clientId}`, {
                 maxRequests: config.rateLimit.maxRequests,
                 windowMs: config.rateLimit.windowMs
             });
@@ -236,7 +266,7 @@ export async function POST(request: Request) {
         let parsed: ParsedUpload<SinkResult>;
         try {
             parsed = await parseMultipartUpload<SinkResult>(
-                Readable.fromWeb(request.body as unknown as NodeWebReadableStream<Uint8Array>),
+                countedBody(Readable.fromWeb(request.body as unknown as NodeWebReadableStream<Uint8Array>), progress),
                 { 'content-type': contentType },
                 {
                     maxFileBytes: maxBytes,
@@ -270,6 +300,7 @@ export async function POST(request: Request) {
             throw err;
         }
 
+        progress?.processing();
         const { fields } = parsed;
         const file = parsed.file;
         if (file?.sinkResult?.kind === 'reactor') {
