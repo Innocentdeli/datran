@@ -1,0 +1,314 @@
+# Main CI: Rust reactor (Linux + Windows), shared release binary for the client test suites,
+# root TypeScript, diocom-app (Next.js), Tauri shell, OpenAPI lint and Docker image builds.
+#
+# Actions are pinned to major versions (not SHAs). Dependabot (github-actions ecosystem) keeps
+# them current; switch to full commit SHAs if supply-chain hardening becomes a requirement.
+name: CI
+
+on:
+  push:
+    branches: [main, overhaul]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  NODE_VERSION: "24"
+  PYTHON_VERSION: "3.11"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  # ---------------------------------------------------------------- core-reactor
+  reactor-lint:
+    name: reactor / fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: core-reactor
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core-reactor -> target
+          key: lint
+      # TODO: make blocking once the tree is rustfmt-clean (cargo fmt currently reports diffs
+      # in core-reactor, clients/rust and src-tauri; there is no rustfmt.toml).
+      - name: cargo fmt --check (non-blocking)
+        continue-on-error: true
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  reactor-test:
+    name: reactor / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the primary dev platform: packs, fsync and file locking behave differently.
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: core-reactor
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core-reactor -> target
+          key: test
+      # Includes the multi-node cluster/gossip integration tests (tests/cluster.rs, tests/gossip.rs).
+      - name: cargo test
+        run: cargo test --locked --all-targets
+      - name: doc tests
+        run: cargo test --locked --doc
+
+  reactor-bin:
+    name: reactor / release binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core-reactor -> target
+          key: release
+      - name: cargo build --release
+        working-directory: core-reactor
+        run: cargo build --locked --release --bin core-reactor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: core-reactor/target/release/core-reactor
+          retention-days: 3
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- clients (live against REACTOR_BIN)
+  client-python:
+    name: client / python
+    needs: reactor-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      REACTOR_BIN: ${{ github.workspace }}/reactor-bin/core-reactor
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: reactor-bin
+      - run: chmod +x reactor-bin/core-reactor
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: clients/python/pyproject.toml
+      - name: install (validates packaging; stdlib-only)
+        run: python -m pip install -e clients/python
+      - name: unittest
+        working-directory: clients/python
+        run: python -m unittest -v
+
+  client-rust:
+    name: client / rust
+    needs: reactor-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      REACTOR_BIN: ${{ github.workspace }}/reactor-bin/core-reactor
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: reactor-bin
+      - run: chmod +x "$REACTOR_BIN"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/rust -> target
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --locked
+
+  client-cpp:
+    name: client / c++
+    needs: reactor-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      REACTOR_BIN: ${{ github.workspace }}/reactor-bin/core-reactor
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: reactor-bin
+      - run: chmod +x "$REACTOR_BIN"
+      - name: configure
+        run: cmake -S clients/cpp -B "$RUNNER_TEMP/cpp-build" -DCMAKE_BUILD_TYPE=Release -DDATRAN_BUILD_TESTS=ON
+      - name: build
+        run: cmake --build "$RUNNER_TEMP/cpp-build" --parallel
+      - name: ctest
+        run: ctest --test-dir "$RUNNER_TEMP/cpp-build" --output-on-failure
+
+  client-typescript:
+    name: client / typescript
+    needs: reactor-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      REACTOR_BIN: ${{ github.workspace }}/reactor-bin/core-reactor
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: reactor-bin
+      - run: chmod +x "$REACTOR_BIN"
+      # No package-lock.json is committed for this client (single devDependency), so no npm cache
+      # and `npm install` instead of `npm ci`. TODO: commit a lockfile and switch to npm ci + cache.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm install --no-audit --no-fund
+      - name: build + node --test
+        run: npm test
+
+  # ---------------------------------------------------------------- root TypeScript
+  root-ts:
+    name: root / tsc + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - name: typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+      - name: test
+        run: npm test
+
+  # ---------------------------------------------------------------- diocom-app (Next.js)
+  app:
+    name: diocom-app / tsc + lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            diocom-app/package-lock.json
+      # The app imports shared TypeScript from ../src, which resolves the root dependencies.
+      - name: npm ci (root)
+        run: npm ci
+      - name: npm ci (diocom-app)
+        working-directory: diocom-app
+        run: npm ci
+      - name: typecheck
+        working-directory: diocom-app
+        run: npx tsc --noEmit
+      # TODO: drop continue-on-error once the pending lint cleanup lands (~28 pre-existing errors).
+      - name: eslint (non-blocking until cleanup)
+        working-directory: diocom-app
+        continue-on-error: true
+        run: npx eslint src
+      - uses: actions/cache@v4
+        with:
+          path: diocom-app/.next/cache
+          key: next-${{ runner.os }}-${{ hashFiles('diocom-app/package-lock.json') }}-${{ hashFiles('diocom-app/src/**') }}
+          restore-keys: |
+            next-${{ runner.os }}-${{ hashFiles('diocom-app/package-lock.json') }}-
+      - name: next build
+        working-directory: diocom-app
+        run: npm run build
+
+  # ---------------------------------------------------------------- Tauri desktop shell
+  tauri-check:
+    name: src-tauri / cargo check
+    # Tauri v1 links webkit2gtk-4.0, which Ubuntu 24.04 (ubuntu-latest) no longer ships; 22.04
+    # still has libwebkit2gtk-4.0-dev. Linux is cheaper/faster than windows-latest, and the
+    # Windows reactor job already covers Windows-specific Rust behaviour.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v5
+      - name: install webkit/gtk deps
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: cargo check
+        run: cargo check --locked --all-targets
+
+  # ---------------------------------------------------------------- OpenAPI
+  openapi:
+    name: openapi / redocly lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npx --yes @redocly/cli@2 lint core-reactor/openapi.yaml
+
+  # ---------------------------------------------------------------- Docker images (build only)
+  docker:
+    name: docker / build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [app, reactor]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.${{ matrix.image }}
+          push: false
+          tags: datran-${{ matrix.image }}:ci
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
