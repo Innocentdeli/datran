@@ -1,7 +1,6 @@
 
 import { NeuralService } from '../src/lib/NeuralService';
 import { FileRepository } from '../src/db/files';
-import '../src/db/schema'; // Ensure DB is initialized
 
 async function verify() {
     console.log('🚀 Verifying Phase 31: Advanced Intelligence');
@@ -42,7 +41,7 @@ async function verify() {
         expires_at: Date.now() + 86400000
     };
 
-    const savedFile = await FileRepository.create(fileData as any);
+    const savedFile = await FileRepository.create(fileData as unknown as Parameters<typeof FileRepository.create>[0]);
     console.log('Saved File:', savedFile.id);
 
     const fetched = await FileRepository.findByShareId(savedFile.share_id);

@@ -39,7 +39,6 @@ import { hashPassword, randomToken } from '@/lib/security';
 import { compressPayload } from '@/lib/reactorWorker';
 import { DCE2_DB_MARKER, DCE2_FORMAT_FIELD } from '@/lib/crypto/dce2';
 import { createProgressReporter, isValidUploadId, type ProgressReporter } from '@/lib/uploadProgress';
-import '@/db/schema'; // Initialize DB Schema
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const globalNode = new ACSNode(); // Persistent node for the server lifecycle

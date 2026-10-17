@@ -1,7 +1,7 @@
 import db from './index';
 import { randomUUID } from 'crypto';
 import { DCE2_DB_MARKER } from '../lib/crypto/dce2';
-import { Chunk, Variant } from '../../../src/core/types';
+import type { Variant } from '../../../src/core/types';
 
 export interface FileRecord {
     id: string;
@@ -113,7 +113,7 @@ export const FileRepository = {
 
     /**
      * Records the Rust reactor's content class and recipe for a file. Best effort: a database whose
-     * schema predates these columns (initializeSchema not re-run) only logs a warning.
+     * failure (e.g. a dev database that has not run `npm run db:migrate`) only logs a warning.
      */
     setReactorMeta: async (shareId: string, reactorClass: string | null, reactorRecipe: string | null) => {
         try {
@@ -124,7 +124,7 @@ export const FileRepository = {
         } catch (e) {
             if (!reactorMetaWarned) {
                 reactorMetaWarned = true;
-                console.warn('[DB] Could not store reactor metadata (run the schema init to add files.reactor_class/reactor_recipe):',
+                console.warn('[DB] Could not store reactor metadata (run `npm run db:migrate`):',
                     e instanceof Error ? e.message : e);
             }
         }

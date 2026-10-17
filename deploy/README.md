@@ -63,14 +63,40 @@ browser ──h3 / h2──▶ Caddy :443 (tcp+udp) ──http/1.1──▶ app 
    Large UDP receive buffers help QUIC throughput on Linux:
    `sysctl -w net.core.rmem_max=7500000 net.core.wmem_max=7500000`.
 3. **Config**: `cp deploy/.env.example deploy/.env`, set `SITE_ADDRESS`, `NEXTAUTH_URL`,
-   `WEBAUTHN_*`, `DIOCOM_SECRET`, `DATABASE_URL`, `REDIS_PASSWORD`, `REACTOR_TOKEN`,
-   `REACTOR_CLUSTER_TOKEN`.
+   `WEBAUTHN_*`, `DIOCOM_SECRET`, `POSTGRES_PASSWORD` (or an external `DATABASE_URL`),
+   `REDIS_PASSWORD`, `REACTOR_TOKEN`, `REACTOR_CLUSTER_TOKEN`.
 4. **Run**: `docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build`.
    Caddy obtains the certificate on first start (watch `docker compose logs -f caddy`).
 
 Volumes: `caddy-data` (certificates; keep it or you'll hit ACME rate limits), `app-data`
-(uploads + local DB), `reactor-state` (populations, dictionaries, object store; mounted
-read-only into the app for the TS fallback decoder).
+(local uploads), `db-data` (PostgreSQL: all metadata — back it up), `reactor-state`
+(populations, dictionaries, object store; mounted read-only into the app for the TS fallback
+decoder).
+
+## Database
+
+- **PostgreSQL is required in production.** With `NODE_ENV=production` the app refuses to start
+  when `DATABASE_URL` is unset, the server is unreachable, or migrations are pending/inconsistent.
+  The JSON store (`LOCAL_DB_PATH`) is a development/test emulator only; the old
+  `DB_ALLOW_LOCAL_FALLBACK` escape hatch was removed (it is ignored, with an error log).
+- **Migrations** are numbered SQL files in `diocom-app/migrations/` applied by
+  `diocom-app/src/db/migrate.ts`: each in its own transaction, recorded in `schema_migrations`
+  with a SHA-256 checksum, under a PostgreSQL advisory lock (replicas starting together are safe).
+  The runner refuses to run if an applied file was edited or removed, or a new file is numbered
+  below the latest applied one — never edit a released migration, add `NNNN_next.sql` instead.
+- Commands (from `diocom-app/`, reading `DATABASE_URL` from the env or `.env.local`):
+  `npm run db:migrate` (apply) and `npm run db:status` (read-only; exit 1 if not current).
+  Nothing in the tooling drops or resets data (the old destructive `scripts/apply_schema.js` and
+  the ad-hoc schema scripts are gone).
+- **Compose** runs a `postgres:16-alpine` service (internal network, `db-data` volume) and the app
+  container runs `npm run db:migrate` before `next start`; a failing migration stops the container
+  before it serves traffic. Outside compose, either run `db:migrate` as a release step or set
+  `DB_AUTO_MIGRATE=true` to migrate on server start.
+- **Existing databases** created by the old `initializeSchema()` are detected (tables present, no
+  `schema_migrations`), verified table-by-table/column-by-column, and marked as `0001` (baseline)
+  instead of failing; columns/tables that old versions added lazily (`files.reactor_*`,
+  `access_events`) are created first. A schema that does not match is refused with the list of
+  what is missing. Take a `pg_dump` before the first migrate of an existing database.
 
 ## Running several app instances (Redis)
 
@@ -99,8 +125,8 @@ The decoded-file stream cache stays per instance on purpose (each serve re-check
   active load balancing and health checks across replicas, use dynamic upstreams in
   `caddy/app.caddy` (`reverse_proxy { dynamic a app {$APP_PORT:3000} }`). Sessions are stateless
   JWTs, so no sticky sessions are needed.
-- Multiple instances also need a shared database (`DATABASE_URL`) and shared storage
-  (`STORAGE_BACKEND=reactor` or `s3`); the local JSON DB and local disk storage are per instance.
+- Multiple instances also need shared storage (`STORAGE_BACKEND=reactor` or `s3`); local disk
+  storage is per instance. They share the one PostgreSQL (see [Database](#database)).
 - Without `REDIS_URL` the app uses in-process state and, in production, logs a prominent warning
   that it must run as a **single** instance (legitimate for small deployments).
   `REQUIRE_REDIS=true` turns a missing `REDIS_URL` into a startup failure. Redis >= 6.2 required.

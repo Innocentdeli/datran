@@ -10,7 +10,6 @@ import { recordStreamAccess } from '@/lib/prefetcher';
 import { getStoreFile, ReactorStoreUnavailableError } from '@/lib/storage/reactorStore';
 import { parseReactorStoragePath, forwardableRange, mapReactorResponse, isCountedAccess } from '@/lib/storage/reactorStoreCore';
 import type { CacheOutcome } from '@/lib/predict';
-import '@/db/schema';
 
 // The decompression cache lives in src/lib/streamCache.ts (shared with the prefetcher, NETWORK_SPEC §5).
 

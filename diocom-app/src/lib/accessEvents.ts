@@ -8,7 +8,8 @@ import db from '@/db';
  * in batches (multi-row INSERT) off the request path. Retention: PREDICT_RETENTION_DAYS (default 30) plus a row cap
  * PREDICT_MAX_EVENTS (default 500 000), enforced by pruneAccessEvents() from the cleanup job.
  *
- * Queries are deliberately simple: the local JSON store emulates exactly these statements (src/db/index.ts).
+ * Queries are deliberately simple: the dev JSON store emulates exactly these statements (src/db/localStore.ts).
+ * The table is owned by migrations/0001_initial.sql; ensureAccessEventsTable() is a harmless IF NOT EXISTS guard.
  */
 
 export interface AccessEventRow {
