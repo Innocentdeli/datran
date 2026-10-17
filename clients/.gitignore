@@ -1,0 +1,9 @@
+# build outputs of the SDKs
+python/**/__pycache__/
+python/**/*.egg-info/
+python/build/
+python/dist/
+rust/target/
+cpp/build/
+typescript/node_modules/
+typescript/dist/

@@ -1,0 +1,26 @@
+[package]
+name = "datran-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Async client for the Datran core reactor: compression data plane, evolution status and the chunked object store"
+license = "UNLICENSED"
+publish = false
+
+# Standalone crate: not part of core-reactor (or any other) workspace; builds into its own ./target.
+[workspace]
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+bytes = "1.6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1.38", features = ["fs", "io-util", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { version = "1.38", features = ["full"] }
+sha2 = "0.11.1"
+hex = "0.4.3"
