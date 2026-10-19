@@ -41,7 +41,10 @@ tags:
     description: |
       Data gravity (NETWORK_SPEC §4): `/cluster/status` is the operator view (`x-reactor-token`); every other
       `/cluster/*` endpoint is internal peer-to-peer (`x-cluster-token`, `x-internal: true`) and not for
-      application use.
+      application use. The peer endpoints (plus `/evolution/champions`, `/evolution/dict/{sha256}` and
+      `/health`) are also served over HTTP/3 on the optional QUIC listener (`REACTOR_QUIC_PORT`, UDP, TLS 1.3,
+      optional mTLS) with identical paths, auth, bodies and status codes; that listener serves nothing else
+      (`404`). An unsafe method received in 0-RTT is held until the handshake completes, else `425`.
 security:
   - reactorToken: []
 
@@ -455,7 +458,11 @@ paths:
       summary: Data-gravity status - node config, per-peer health, sampled holders, demand, metrics
       description: |
         Operator view of this node's cluster state (auth `x-reactor-token`, like the store). `503` when
-        data gravity is disabled (store off or no `REACTOR_CLUSTER_TOKEN`).
+        data gravity is disabled (store off or no `REACTOR_CLUSTER_TOKEN`). Also reports the peer transport:
+        `peers[].transport` (`transport` used last: `quic` / `https` / `http`, `configured_transport`,
+        `quic_fallbacks`, `quic_error`, `quic_retry_in_ms`), `transport` (per-transport request / error /
+        byte counters, fallbacks, QUIC client counters incl. 0-RTT) and `quic_server` (listener counters or
+        null).
       responses:
         "200":
           description: Cluster status.
@@ -1123,7 +1130,7 @@ components:
       required: [url, node_id, region, healthy, is_self, last_ok_ms, last_error, last_error_ms,
                  consecutive_failures, inventory_version, files, capacity, used]
       properties:
-        url: { type: string, description: "Base URL from `REACTOR_PEERS`." }
+        url: { type: string, description: "Base URL from `REACTOR_PEERS` (`http://`, `https://` or `quic://`)." }
         node_id: { type: [string, "null"], description: Null until the first successful inventory fetch. }
         region: { type: [string, "null"] }
         healthy:
@@ -1138,6 +1145,12 @@ components:
         files: { type: integer, format: int64, description: Files the peer advertises. }
         capacity: { type: [integer, "null"], format: int64 }
         used: { type: integer, format: int64 }
+        transport:
+          type: object
+          description: |
+            `transport` (used by the last request: `quic`, `https`, `http`), `configured_transport`,
+            `quic_fallbacks`, `quic_error` and `quic_retry_in_ms` (HTTPS back-off after a failed handshake).
+          additionalProperties: true
     FileHolders:
       type: object
       required: [file_id, holders, local, demand]
@@ -1178,6 +1191,22 @@ components:
           description: Up to 20 files with the highest local demand (≥ 0.01).
           items: { $ref: "#/components/schemas/DemandEntry" }
         metrics: { $ref: "#/components/schemas/ClusterMetrics" }
+        transport:
+          type: object
+          description: |
+            Peer transport counters: `preference` (`REACTOR_PEER_TRANSPORT`), `quic` / `https` / `http`
+            (`{requests, errors, response_bytes}` of outgoing peer requests), `fallbacks` (QUIC handshake
+            failed, sent over HTTPS), `quic_client` (`connections`, `open_connections`, `handshake_failures`,
+            `zero_rtt_accepted`, `zero_rtt_rejected`, `early_sent_safe`, `early_sent_unsafe` (always 0),
+            `reconnects`; null before the first QUIC request) and `quic_settings`.
+          additionalProperties: true
+        quic_server:
+          type: [object, "null"]
+          description: |
+            QUIC listener counters (null when `REACTOR_QUIC_PORT` is off): `connections`, `handshake_failures`,
+            `requests`, `response_bytes`, `early_safe`, `early_unsafe`, `early_unsafe_deferred`,
+            `early_unsafe_refused`.
+          additionalProperties: true
     PeerManifest:
       type: object
       required: [file_id, size, created_ms, origin, chunks, objects]

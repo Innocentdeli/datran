@@ -344,3 +344,23 @@ has a `reactor` job that authenticates with `Authorization: Bearer` from
 compose secret `reactor_metrics_token` (`environment: REACTOR_METRICS_TOKEN`) and mount it into the
 `prometheus` service. Set `REACTOR_LOG_FORMAT=json` for JSON logs; every response carries
 `x-request-id`.
+
+## Reactor cluster over QUIC (optional)
+
+Reactors can exchange cluster traffic (inventory gossip, manifests, objects, leases, recipes) over
+QUIC / HTTP/3 instead of HTTPS: one UDP connection per peer carries many object fetches in parallel
+(NETWORK_SPEC §4 "QUIC transport"). It is node-to-node only; clients and the app still use TCP.
+
+1. Give every node a certificate for the name/IP its peers dial, signed by a private CA
+   (`REACTOR_TLS_CERT`, `REACTOR_TLS_KEY`, `REACTOR_TLS_CA`). QUIC refuses to start without them.
+   For `REACTOR_QUIC_MTLS=true` the same certificate is the client certificate, so it needs the
+   `clientAuth` extended key usage (or no EKU at all).
+2. Set `REACTOR_QUIC_PORT=3005` (UDP) and list peers as `quic://10.0.0.2:3005` (or keep
+   `https://` peers and set `REACTOR_PEER_TRANSPORT=quic`). A failed handshake falls back to
+   `https://<same host>:<same port>` for 60 s; `quic-only` disables the fallback.
+3. Open **UDP 3005 between the reactor hosts only** (in addition to TCP 3005), e.g.
+   `ufw allow proto udp from 10.0.0.0/24 to any port 3005`, and publish it on the private interface:
+   `ports: ["10.0.0.1:3005:3005/tcp", "10.0.0.1:3005:3005/udp"]` (never through Caddy, never public).
+4. Check `GET /cluster/status` (`peers[].transport.transport` is `quic`, `transport.fallbacks` stays 0)
+   and the `reactor_cluster_peer_requests_total{transport="quic"}` / `reactor_quic_*` metrics.
+   Large UDP buffers help throughput: `sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608`.

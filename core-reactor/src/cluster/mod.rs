@@ -30,11 +30,15 @@
 
 pub mod http;
 mod policy;
+pub mod quic;
 pub mod remote;
 pub mod tls;
+pub mod transport;
 
 use crate::state::now_ms;
 use crate::store::{self, id_hex, parse_id, FileMeta, Id, Manifest, Store, StoreError};
+use ::http::Method;
+use transport::{PeerClient, PeerTransport, TransportConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -111,6 +115,18 @@ pub struct ClusterConfig {
     pub state_dir: PathBuf,
     /// This node serves HTTPS (`REACTOR_TLS_CERT`/`REACTOR_TLS_KEY`); informational.
     pub tls_server: bool,
+    /// `REACTOR_PEER_TRANSPORT` (http, quic, quic-only).
+    pub peer_transport: PeerTransport,
+    /// QUIC tuning (`REACTOR_QUIC_*`), shared with the QUIC listener.
+    pub quic: quic::QuicTuning,
+    /// Client certificate for QUIC mutual TLS (`REACTOR_TLS_CERT` / `REACTOR_TLS_KEY`).
+    pub tls_identity: Option<tls::TlsSettings>,
+    /// After a failed QUIC handshake a peer is served over HTTP(S) for this long (60 s).
+    pub fallback_retry: Duration,
+    /// Objects fetched concurrently by a replica pull (`REACTOR_PULL_CONCURRENCY`, default 8).
+    pub pull_concurrency: usize,
+    /// Counters of this node's QUIC listener (reported in `/cluster/status`).
+    pub quic_server: Option<Arc<quic::QuicServerStats>>,
 }
 
 /// Loads `<state_dir>/node_id` or creates it (16 random bytes, hex).
@@ -164,6 +180,12 @@ impl ClusterConfig {
             tls_ca: None,
             state_dir: state_dir.to_path_buf(),
             tls_server: false,
+            peer_transport: PeerTransport::Http,
+            quic: quic::QuicTuning::default(),
+            tls_identity: None,
+            fallback_retry: Duration::from_secs(60),
+            pull_concurrency: 8,
+            quic_server: None,
         })
     }
 
@@ -193,7 +215,27 @@ impl ClusterConfig {
         }
         c.tls_server = tls::TlsSettings::from_env().is_some();
         c.tls_ca = std::env::var("REACTOR_TLS_CA").ok().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        if let Some(n) = env_parse::<usize>("REACTOR_PULL_CONCURRENCY").filter(|n| (1..=256).contains(n)) {
+            c.pull_concurrency = n;
+        }
+        let t = TransportConfig::from_env().map_err(std::io::Error::other)?;
+        c.peer_transport = t.prefer;
+        c.quic = t.quic;
+        c.tls_identity = t.identity;
         Ok(c)
+    }
+
+    /// Peer client settings derived from this configuration.
+    pub fn transport_config(&self) -> TransportConfig {
+        TransportConfig {
+            prefer: self.peer_transport,
+            tls_ca: self.tls_ca.clone(),
+            identity: self.tls_identity.clone(),
+            request_timeout: self.request_timeout,
+            connect_timeout: self.connect_timeout,
+            fallback_retry: self.fallback_retry,
+            quic: self.quic.clone(),
+        }
     }
 }
 
@@ -449,7 +491,8 @@ pub enum PullReason {
 pub struct Cluster {
     pub cfg: ClusterConfig,
     pub store: Arc<Store>,
-    client: reqwest::Client,
+    /// Peer requests (QUIC or HTTP(S), see [`transport`]).
+    pub transport: PeerClient,
     peers: Mutex<Vec<Peer>>,
     demand: Mutex<HashMap<Id, Demand>>,
     leases: Mutex<LeaseBook>,
@@ -466,17 +509,22 @@ impl Cluster {
     /// Builds the cluster, installs the store hooks (eviction policy, read hook, quarantine
     /// hook) and spawns the quarantine-repair worker. Must be called inside a tokio runtime.
     pub fn start(cfg: ClusterConfig, store: Arc<Store>) -> Result<Arc<Cluster>, String> {
+        let client = PeerClient::new(cfg.transport_config())?;
+        Cluster::start_with_client(cfg, store, client)
+    }
+
+    /// [`Cluster::start`] with a peer client shared with recipe gossip.
+    pub fn start_with_client(cfg: ClusterConfig, store: Arc<Store>, client: PeerClient) -> Result<Arc<Cluster>, String> {
         if cfg.cluster_token.is_none() {
             return Err("data gravity needs REACTOR_CLUSTER_TOKEN".into());
         }
-        let client = build_client(&cfg, true)?;
         let leases = load_leases(&cfg.state_dir);
         let peers = cfg.peers.iter().map(|u| Peer { url: u.clone(), ..Default::default() }).collect();
         let cache = remote::ObjCache::new(cfg.cache_bytes);
         let cluster = Arc::new_cyclic(|me| Cluster {
             cfg,
             store: store.clone(),
-            client,
+            transport: client,
             peers: Mutex::new(peers),
             demand: Mutex::new(HashMap::new()),
             leases: Mutex::new(leases),
@@ -613,11 +661,11 @@ impl Cluster {
     // ---- HTTP client helpers ---------------------------------------------------------------
 
     pub(crate) async fn get_capped(&self, url: &str, cap: usize) -> Result<Vec<u8>, String> {
-        send_capped(self.client.get(url).header("x-cluster-token", self.token()), cap).await
+        self.transport.get(url, self.token(), cap).await
     }
 
     pub(crate) async fn post_capped(&self, url: &str, cap: usize) -> Result<Vec<u8>, String> {
-        send_capped(self.client.post(url).header("x-cluster-token", self.token()), cap).await
+        self.transport.post(url, self.token(), cap).await
     }
 
     // ---- inventory -------------------------------------------------------------------------
@@ -925,38 +973,80 @@ impl Cluster {
         };
         let me = self.arc().ok_or("cluster shut down")?;
         let handle = tokio::runtime::Handle::current();
+        let concurrency = self.cfg.pull_concurrency.max(1);
         let outcome = tokio::task::spawn_blocking(move || -> Result<store::PutOutcome, String> {
             let mut imp = me.store.begin_import(pm.manifest()).map_err(|e| e.to_string())?;
             let missing: HashSet<Id> = imp.missing_chunks().into_iter().collect();
             // group the missing chunks by the holder's objects
             let mut needed: Vec<Id> = Vec::new();
+            let mut seen: HashSet<Id> = HashSet::new();
             for c in &pm.chunks {
-                if missing.contains(&c.id) && !needed.contains(&c.object_id) {
+                if missing.contains(&c.id) && seen.insert(c.object_id) {
                     needed.push(c.object_id);
                 }
             }
             let objects: HashMap<Id, &PeerObject> = pm.objects.iter().map(|o| (o.object_id, o)).collect();
-            for oid in needed {
-                let o = objects.get(&oid).ok_or("manifest lists no such object")?;
-                let cached = lock(&me.cache).get(&oid);
-                match cached {
-                    Some(plain) => {
-                        let mut off = 0usize;
-                        for m in &o.members {
-                            let end = off + m.len as usize;
-                            if end > plain.len() {
-                                return Err("cached object shorter than its members".into());
-                            }
-                            imp.add_chunk(&m.id, &plain[off..end]).map_err(|e| e.to_string())?;
-                            off = end;
+            if needed.iter().any(|o| !objects.contains_key(o)) {
+                return Err("manifest lists no such object".into());
+            }
+            // Objects are fetched `concurrency` at a time (in order, so memory stays bounded at
+            // about `concurrency` objects) while this thread imports them.
+            enum Got {
+                Plain(Arc<Vec<u8>>),
+                Raw(Vec<u8>),
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(Id, Result<Got, String>)>(concurrency);
+            let fetcher = {
+                let me = me.clone();
+                let holders = holders.clone();
+                handle.spawn(async move {
+                    use futures_util::StreamExt;
+                    let mut results = futures_util::stream::iter(needed.into_iter().map(|oid| {
+                        let me = me.clone();
+                        let holders = holders.clone();
+                        async move {
+                            let cached = lock(&me.cache).get(&oid);
+                            let r = match cached {
+                                Some(p) => Ok(Got::Plain(p)),
+                                None => me.fetch_object(&oid, &holders).await.map(|(raw, _)| Got::Raw(raw)),
+                            };
+                            (oid, r)
+                        }
+                    }))
+                    .buffered(concurrency);
+                    while let Some(item) = results.next().await {
+                        let failed = item.1.is_err();
+                        if tx.send(item).await.is_err() || failed {
+                            break;
                         }
                     }
-                    None => {
-                        let (raw, _) = handle.block_on(me.fetch_object(&oid, &holders))?;
-                        imp.add_object(&oid, &raw, &o.members).map_err(|e| e.to_string())?;
+                })
+            };
+            let res = (|| {
+                while let Some((oid, got)) = rx.blocking_recv() {
+                    let o = objects.get(&oid).ok_or("manifest lists no such object")?;
+                    match got? {
+                        Got::Plain(plain) => {
+                            let mut off = 0usize;
+                            for m in &o.members {
+                                let end = off + m.len as usize;
+                                if end > plain.len() {
+                                    return Err("cached object shorter than its members".to_string());
+                                }
+                                imp.add_chunk(&m.id, &plain[off..end]).map_err(|e| e.to_string())?;
+                                off = end;
+                            }
+                        }
+                        Got::Raw(raw) => {
+                            imp.add_object(&oid, &raw, &o.members).map_err(|e| e.to_string())?;
+                        }
                     }
                 }
-            }
+                Ok(())
+            })();
+            drop(rx);
+            fetcher.abort();
+            res?;
             imp.commit().map_err(|e| e.to_string())
         })
         .await
@@ -1088,16 +1178,15 @@ impl Cluster {
 
     /// Requests hold-leases from other holders until `need` granted (one of them taking over
     /// origin when `origin_pins` is set). Returns `(granted, origin_accepted)`.
-    async fn acquire_leases(&self, client: &reqwest::Client, file: &Id, need: usize, origin_pins: Option<u64>) -> (usize, bool) {
+    async fn acquire_leases(&self, pooled: bool, file: &Id, need: usize, origin_pins: Option<u64>) -> (usize, bool) {
         let hold = |url: &str, origin: Option<u64>| {
             let mut q = format!("{}/cluster/hold/{}?node={}", url, id_hex(file), self.cfg.node_id);
             if let Some(pins) = origin {
                 q.push_str(&format!("&origin=1&pins={}", pins));
             }
-            let req = client.post(q).header("x-cluster-token", self.token());
             let fid = id_hex(file);
             async move {
-                let body = send_capped(req, MAX_SMALL_BYTES).await.ok()?;
+                let body = self.transport.request(Method::POST, &q, self.token(), MAX_SMALL_BYTES, pooled).await.ok()?;
                 let h: HoldResponse = serde_json::from_slice(&body).ok()?;
                 (h.granted && h.file_id == fid).then_some(h)
             }
@@ -1140,7 +1229,7 @@ impl Cluster {
             l.dropping.insert(file, now);
         }
         let origin_pins = if meta.origin && meta.pins > 0 { Some(meta.pins) } else { None };
-        let (granted, origin_ok) = self.acquire_leases(&self.client, &file, need, origin_pins).await;
+        let (granted, origin_ok) = self.acquire_leases(true, &file, need, origin_pins).await;
         let res = if granted >= need && origin_ok {
             let store = self.store.clone();
             let dropped = tokio::task::spawn_blocking(move || store.drop_replica(&file)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
@@ -1387,6 +1476,7 @@ impl Cluster {
                         "files": p.files.len(),
                         "capacity": p.capacity,
                         "used": p.used,
+                        "transport": self.transport.peer_json(&p.url),
                     })
                 })
                 .collect();
@@ -1433,6 +1523,8 @@ impl Cluster {
             "holders_sample": sample,
             "demand_top": self.demand_top(20, 0.01).into_iter().map(|(id, s)| serde_json::json!({ "file_id": id_hex(&id), "score": s })).collect::<Vec<_>>(),
             "metrics": self.metrics_json(),
+            "transport": self.transport.stats_json(),
+            "quic_server": self.cfg.quic_server.as_ref().map(|s| s.json()),
         })
     }
 }
@@ -1447,41 +1539,3 @@ fn load_leases(state_dir: &Path) -> LeaseBook {
     book
 }
 
-/// HTTP client for peers: timeouts, no redirects, optional private CA (`REACTOR_TLS_CA`).
-fn build_client(cfg: &ClusterConfig, pooled: bool) -> Result<reqwest::Client, String> {
-    let mut b = reqwest::Client::builder()
-        .timeout(cfg.request_timeout)
-        .connect_timeout(cfg.connect_timeout)
-        .redirect(reqwest::redirect::Policy::none());
-    if !pooled {
-        b = b.pool_max_idle_per_host(0);
-    }
-    if let Some(ca) = &cfg.tls_ca {
-        let pem = std::fs::read(ca).map_err(|e| format!("REACTOR_TLS_CA {}: {}", ca.display(), e))?;
-        let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| format!("REACTOR_TLS_CA: {}", e))?;
-        if certs.is_empty() {
-            return Err("REACTOR_TLS_CA contains no certificates".into());
-        }
-        b = b.tls_certs_only(certs);
-    }
-    b.build().map_err(|e| format!("failed to build cluster HTTP client: {}", e))
-}
-
-/// Sends a request and reads at most `cap` body bytes (content-length checked up front).
-async fn send_capped(req: reqwest::RequestBuilder, cap: usize) -> Result<Vec<u8>, String> {
-    let mut resp = req.send().await.map_err(|e| format!("request failed: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status().as_u16()));
-    }
-    if resp.content_length().is_some_and(|l| l > cap as u64) {
-        return Err(format!("response larger than {} bytes", cap));
-    }
-    let mut buf = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read failed: {}", e))? {
-        if buf.len() + chunk.len() > cap {
-            return Err(format!("response larger than {} bytes", cap));
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(buf)
-}

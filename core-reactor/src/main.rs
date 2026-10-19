@@ -1,4 +1,6 @@
+use core_reactor::cluster::quic::{QuicServer, QuicServerSettings};
 use core_reactor::cluster::tls::{self, TlsSettings};
+use core_reactor::cluster::transport::{PeerClient, TransportConfig};
 use core_reactor::cluster::{Cluster, ClusterConfig};
 use core_reactor::evolution::{spawn_scheduler, Engine, EvoConfig};
 use core_reactor::gossip::{Gossip, GossipConfig};
@@ -71,8 +73,26 @@ async fn main() {
     };
     let mut evo_cfg = EvoConfig::from_env();
     evo_cfg.keys = keys.clone();
+    // QUIC (NETWORK_SPEC §4 "QUIC transport"): a listener without a certificate, or mTLS
+    // without a CA, refuses to start.
+    let tls = TlsSettings::from_env();
+    let quic_settings = match QuicServerSettings::from_env(tls.as_ref()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("{}", e);
+            std::process::exit(2);
+        }
+    };
+    // One peer client (QUIC / HTTP(S)) for recipe gossip and data gravity.
+    let transport = match TransportConfig::from_env().and_then(PeerClient::new) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("{}", e);
+            std::process::exit(2);
+        }
+    };
     let engine = Arc::new(tokio::task::spawn_blocking(move || Engine::new(evo_cfg)).await.expect("engine init"));
-    let gossip = Arc::new(Gossip::new(gossip_cfg));
+    let gossip = Arc::new(Gossip::with_client(gossip_cfg, transport.clone()));
     let store_enabled = std::env::var("REACTOR_STORE")
         .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
         .unwrap_or(true);
@@ -90,16 +110,20 @@ async fn main() {
         None
     };
     // Data gravity (NETWORK_SPEC Â§4): needs the store and a cluster token.
+    let quic_stats = Arc::new(core_reactor::cluster::quic::QuicServerStats::default());
     let cluster = match (&store, gossip_cfg_token_set(&gossip)) {
         (Some(s), true) => {
-            let cfg = match ClusterConfig::from_env(&engine.cfg.state_dir) {
+            let mut cfg = match ClusterConfig::from_env(&engine.cfg.state_dir) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!("cannot create node id: {}", e);
+                    tracing::error!("cluster configuration: {}", e);
                     std::process::exit(2);
                 }
             };
-            match Cluster::start(cfg, s.clone()) {
+            if quic_settings.is_some() {
+                cfg.quic_server = Some(quic_stats.clone());
+            }
+            match Cluster::start_with_client(cfg, s.clone(), transport.clone()) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     tracing::error!("data gravity disabled: {}", e);
@@ -109,7 +133,6 @@ async fn main() {
         }
         _ => None,
     };
-    let tls = TlsSettings::from_env();
     let state = AppState {
         engine: engine.clone(),
         gossip: gossip.clone(),
@@ -127,6 +150,26 @@ async fn main() {
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind TCP listener");
+    let quic_server = match &quic_settings {
+        Some((qport, qs)) => match QuicServer::start_with_stats(SocketAddr::new(bind, *qport), server::peer_router(state.clone()), qs, quic_stats.clone()) {
+            Ok(q) => {
+                tracing::info!(
+                    mtls = qs.client_ca.is_some(),
+                    zero_rtt = qs.tuning.zero_rtt,
+                    congestion = ?qs.tuning.congestion,
+                    max_streams = qs.tuning.max_streams,
+                    "QUIC (HTTP/3) peer listener on udp://{}",
+                    q.local_addr()
+                );
+                Some(q)
+            }
+            Err(e) => {
+                tracing::error!("QUIC listener: {}", e);
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
     tracing::info!(
         profile = engine.cfg.profile.name(),
         "Datran core reactor listening on {}://{} (encryption {}, evolution {}, state dir {}, gossip {}, peers {}, store {}, gravity {})",
@@ -150,6 +193,10 @@ async fn main() {
     tls::serve(listener, server::router_with(state, server::MetricsAuth::from_env(bind)), tls, shutdown_signal()).await.expect("Reactor server failed");
 
     tracing::info!("shutting down; saving evolution state");
+    if let Some(q) = &quic_server {
+        q.close();
+        let _ = tokio::time::timeout(Duration::from_secs(5), q.wait_idle()).await;
+    }
     let _ = tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(60), scheduler).await;
     if let Some(t) = store_task {

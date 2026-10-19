@@ -169,18 +169,34 @@ pub fn router_with(state: AppState, metrics_auth: MetricsAuth) -> Router {
         .merge(crate::store::http::routes())
         .merge(crate::cluster::http::status_routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
-    let cluster = Router::new()
-        .route("/evolution/champions", get(champions_handler))
-        .route("/evolution/dict/:sha256", get(dict_handler))
-        .merge(crate::cluster::http::cluster_routes())
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_cluster));
     Router::new()
         .route("/health", get(health_check))
         .merge(protected)
-        .merge(cluster)
+        .merge(peer_api(&state))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
         .merge(metrics)
+        .layer(middleware::from_fn(observe))
+}
+
+/// Node-to-node endpoints (`x-cluster-token`): recipe gossip and data gravity.
+fn peer_api(state: &AppState) -> Router<AppState> {
+    Router::new()
+        .route("/evolution/champions", get(champions_handler))
+        .route("/evolution/dict/:sha256", get(dict_handler))
+        .merge(crate::cluster::http::cluster_routes())
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_cluster))
+}
+
+/// Router of the QUIC listener (NETWORK_SPEC §4 "QUIC transport"): the same peer handlers and
+/// `x-cluster-token` check as the HTTP listener, plus `/health`; no client or operator
+/// endpoints.
+pub fn peer_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health_check))
+        .merge(peer_api(&state))
+        .layer(DefaultBodyLimit::max(64 << 10))
+        .with_state(state)
         .layer(middleware::from_fn(observe))
 }
 
@@ -194,7 +210,7 @@ async fn health_check(State(st): State<AppState>) -> impl IntoResponse {
         "max_output_bytes": st.max_output,
         "evolution": st.engine.cfg.enabled,
         "profile": st.engine.cfg.profile,
-        "features": ["shannon_entropy", "symbit_packing", "lz4_flex", "zlib_fast", "blob_v2", "zstd", "brotli", "procedural", "evolution", "gossip", "store", "fusion", "gravity", "metrics", "backup"]
+        "features": ["shannon_entropy", "symbit_packing", "lz4_flex", "zlib_fast", "blob_v2", "zstd", "brotli", "procedural", "evolution", "gossip", "store", "fusion", "gravity", "metrics", "backup", "quic"]
     }))
 }
 

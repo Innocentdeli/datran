@@ -1,6 +1,11 @@
 //! Data gravity (NETWORK_SPEC §4): multi-node clusters in one process, ephemeral ports, temp
 //! dirs. Background loops are not started; tests drive maintenance rounds explicitly so they are
 //! deterministic.
+//!
+//! Every multi-node scenario runs twice: over plain HTTP and over QUIC (HTTP/3, TLS 1.3 with a
+//! test CA, peers given as `quic://127.0.0.1:<port>`; the QUIC listener uses the UDP port with
+//! the same number as the node's HTTPS port). QUIC-specific behaviour (mTLS, fallback, 0-RTT,
+//! loss) is tested at the end.
 
 mod common;
 
@@ -8,25 +13,38 @@ use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use common::*;
+use core_reactor::cluster::quic::{QuicServer, QuicServerSettings, QuicTuning};
 use core_reactor::cluster::tls::{self, TlsSettings};
+use core_reactor::cluster::transport::{PeerClient, PeerTransport, TransportConfig};
 use core_reactor::cluster::{Cluster, ClusterConfig, PullReason};
 use core_reactor::evolution::Engine;
 use core_reactor::gossip::{Gossip, GossipConfig};
-use core_reactor::server::{router, AppState};
+use core_reactor::server::{peer_router, router, AppState};
 use core_reactor::store::{id_hex, sha256, Id, Store, StoreConfig};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const CTOK: &str = "cluster-secret";
 const RTOK: &str = "reactor-secret";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Http,
+    Quic,
+}
+
 struct Node {
     url: String,
     store: Arc<Store>,
     cluster: Arc<Cluster>,
+    engine: Arc<Engine>,
     down: Arc<AtomicBool>,
+    quic: Option<QuicServer>,
+    /// The peer router (with the `down` switch) for extra QUIC listeners.
+    peer_app: axum::Router,
     _dir: tempfile::TempDir,
 }
 
@@ -34,13 +52,57 @@ struct Node {
 struct Opts {
     max_bytes: Option<u64>,
     tls: Option<TlsSettings>,
-    tls_ca: Option<std::path::PathBuf>,
+    tls_ca: Option<PathBuf>,
     token: Option<String>,
     min_replicas: Option<usize>,
     /// Encryption at rest: `(key id, master key)`.
     key: Option<(&'static str, [u8; 32])>,
     /// `REACTOR_PACK_THRESHOLD` override (0 = every object is its own file).
     pack_threshold: Option<usize>,
+    /// Serve the peer API over QUIC on the UDP port with the same number (needs `tls`).
+    quic: bool,
+    /// QUIC listener requires client certificates from this CA.
+    mtls_ca: Option<PathBuf>,
+    /// Client certificate presented to QUIC peers.
+    identity: Option<TlsSettings>,
+    peer_transport: Option<PeerTransport>,
+    connect_timeout: Option<Duration>,
+    unsafe_0rtt: bool,
+    pull_concurrency: Option<usize>,
+}
+
+/// Test PKI: a CA with a leaf for 127.0.0.1 / localhost, and an unrelated second CA + leaf.
+struct Pki {
+    ca: PathBuf,
+    leaf: TlsSettings,
+    other_leaf: TlsSettings,
+}
+
+fn make_ca_and_leaf(dir: &std::path::Path, name: &str) -> (PathBuf, TlsSettings) {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.distinguished_name.push(rcgen::DnType::CommonName, format!("datran test CA {}", name));
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()]).unwrap();
+    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+    let ca_path = dir.join(format!("{}-ca.pem", name));
+    std::fs::write(&ca_path, ca.pem()).unwrap();
+    std::fs::write(dir.join(format!("{}-cert.pem", name)), leaf.pem()).unwrap();
+    std::fs::write(dir.join(format!("{}-key.pem", name)), leaf_key.serialize_pem()).unwrap();
+    (ca_path, TlsSettings { cert: dir.join(format!("{}-cert.pem", name)), key: dir.join(format!("{}-key.pem", name)) })
+}
+
+fn pki() -> &'static Pki {
+    static PKI: OnceLock<Pki> = OnceLock::new();
+    PKI.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let (ca, leaf) = make_ca_and_leaf(&dir, "main");
+        let (_, other_leaf) = make_ca_and_leaf(&dir, "other");
+        Pki { ca, leaf, other_leaf }
+    })
 }
 
 struct Pending {
@@ -53,6 +115,14 @@ async fn bind(https: bool) -> Pending {
     let addr = listener.local_addr().unwrap();
     let scheme = if https { "https" } else { "http" };
     Pending { listener, url: format!("{}://{}", scheme, addr) }
+}
+
+fn peer_url_of(p: &Pending, quic: bool) -> String {
+    if quic {
+        p.url.replace("https://", "quic://")
+    } else {
+        p.url.clone()
+    }
 }
 
 async fn start(p: Pending, peers: Vec<String>, o: Opts) -> Node {
@@ -78,9 +148,24 @@ async fn start(p: Pending, peers: Vec<String>, o: Opts) -> Node {
     cc.min_replicas = o.min_replicas.unwrap_or(2);
     cc.tls_ca = o.tls_ca.clone();
     cc.tls_server = o.tls.is_some();
+    cc.tls_identity = o.identity.clone();
+    if let Some(t) = o.peer_transport {
+        cc.peer_transport = t;
+    }
+    if let Some(t) = o.connect_timeout {
+        cc.connect_timeout = t;
+    }
+    if let Some(n) = o.pull_concurrency {
+        cc.pull_concurrency = n;
+    }
+    cc.quic.unsafe_0rtt_for_tests = o.unsafe_0rtt;
+    let quic_stats = Arc::new(core_reactor::cluster::quic::QuicServerStats::default());
+    if o.quic {
+        cc.quic_server = Some(quic_stats.clone());
+    }
     let cluster = Cluster::start(cc, store.clone()).unwrap();
     let state = AppState {
-        engine,
+        engine: engine.clone(),
         gossip: Arc::new(Gossip::new(GossipConfig::disabled())),
         reactor_token: Some(Arc::new(RTOK.as_bytes().to_vec())),
         max_output: 64 << 20,
@@ -88,40 +173,90 @@ async fn start(p: Pending, peers: Vec<String>, o: Opts) -> Node {
         cluster: Some(cluster.clone()),
     };
     let down = Arc::new(AtomicBool::new(false));
-    let d = down.clone();
-    // simulated node failure: every request answers 503 while `down` is set
-    let app = router(state).layer(axum::middleware::from_fn(move |req: Request, next: Next| {
-        let d = d.clone();
-        async move {
-            if d.load(Ordering::SeqCst) {
-                (axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").into_response()
-            } else {
-                next.run(req).await
+    // simulated node failure: every request answers 503 while `down` is set (both listeners)
+    let down_layer = |d: Arc<AtomicBool>| {
+        axum::middleware::from_fn(move |req: Request, next: Next| {
+            let d = d.clone();
+            async move {
+                if d.load(Ordering::SeqCst) {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "down").into_response()
+                } else {
+                    next.run(req).await
+                }
             }
-        }
-    }));
+        })
+    };
+    let app = router(state.clone()).layer(down_layer(down.clone()));
+    let peer_app = peer_router(state).layer(down_layer(down.clone()));
+    let addr = p.listener.local_addr().unwrap();
+    let quic = if o.quic {
+        let tls_files = o.tls.clone().expect("QUIC needs a certificate");
+        let mut qs = QuicServerSettings::new(&tls_files);
+        qs.client_ca = o.mtls_ca.clone();
+        qs.tuning = QuicTuning::default();
+        let q = QuicServer::start_with_stats(addr, peer_app.clone(), &qs, quic_stats).unwrap();
+        assert_eq!(q.local_addr().port(), addr.port());
+        Some(q)
+    } else {
+        None
+    };
     let tls_cfg = o.tls.clone();
     tokio::spawn(async move { tls::serve(p.listener, app, tls_cfg, std::future::pending()).await.unwrap() });
-    Node { url: p.url, store, cluster, down, _dir: dir }
+    Node { url: p.url, store, cluster, engine, down, quic, peer_app, _dir: dir }
 }
 
-/// `n` plain-HTTP nodes, each with every other node as a peer.
-async fn cluster_of(n: usize, opts: &[Opts]) -> Vec<Node> {
+/// Opts for a node of a QUIC cluster (TLS + QUIC listener, trusts the test CA).
+fn quic_opts(mut o: Opts) -> Opts {
+    let pk = pki();
+    o.tls = Some(pk.leaf.clone());
+    o.tls_ca = Some(pk.ca.clone());
+    o.quic = true;
+    o
+}
+
+/// `n` nodes, each with every other node as a peer, over `t`.
+async fn cluster_t(t: Transport, n: usize, opts: &[Opts]) -> Vec<Node> {
+    let quic = t == Transport::Quic;
     let mut pend = Vec::new();
     for _ in 0..n {
-        pend.push(bind(false).await);
+        pend.push(bind(quic).await);
     }
-    let urls: Vec<String> = pend.iter().map(|p| p.url.clone()).collect();
+    let urls: Vec<String> = pend.iter().map(|p| peer_url_of(p, quic)).collect();
     let mut nodes = Vec::new();
     for (i, p) in pend.into_iter().enumerate() {
         let peers = urls.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, u)| u.clone()).collect();
-        nodes.push(start(p, peers, opts.get(i).cloned().unwrap_or_default()).await);
+        let o = opts.get(i).cloned().unwrap_or_default();
+        nodes.push(start(p, peers, if quic { quic_opts(o) } else { o }).await);
     }
     nodes
 }
 
+/// QUIC mode: all peer traffic went over QUIC (no fallback, no HTTPS request at all).
+fn assert_transport(t: Transport, nodes: &[&Node]) {
+    let total_quic: u64 = nodes.iter().map(|n| n.cluster.transport.stats().requests("quic")).sum();
+    for n in nodes {
+        let s = n.cluster.transport.stats();
+        match t {
+            Transport::Quic => {
+                assert_eq!(s.requests("https") + s.requests("http"), 0, "no HTTP(S) peer request in QUIC mode: {}", n.cluster.transport.stats_json());
+                assert_eq!(s.fallbacks.load(Ordering::Relaxed), 0);
+            }
+            Transport::Http => assert_eq!(s.requests("quic"), 0),
+        }
+    }
+    if t == Transport::Quic {
+        assert!(total_quic > 0, "peer requests went over QUIC");
+        let served: u64 = nodes.iter().filter_map(|n| n.quic.as_ref()).map(|q| q.stats.requests.load(Ordering::Relaxed)).sum();
+        assert!(served > 0, "requests served by the QUIC listeners");
+    }
+}
+
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap()
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&std::fs::read(&pki().ca).unwrap()).unwrap())
+        .build()
+        .unwrap()
 }
 
 async fn put(n: &Node, data: &[u8]) -> reqwest::Response {
@@ -187,9 +322,26 @@ fn objects_for_range(n: &Node, id: &Id, s: u64, e: u64) -> usize {
     objs.len()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_read_gravity_pull_and_leased_drop() {
-    let nodes = cluster_of(3, &[]).await;
+/// Runs a scenario over HTTP and over QUIC.
+macro_rules! both_transports {
+    ($name:ident) => {
+        mod $name {
+            use super::*;
+            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            async fn http() {
+                super::$name(Transport::Http).await
+            }
+            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            async fn quic() {
+                super::$name(Transport::Quic).await
+            }
+        }
+    };
+}
+
+both_transports!(remote_read_gravity_pull_and_leased_drop);
+async fn remote_read_gravity_pull_and_leased_drop(t: Transport) {
+    let nodes = cluster_t(t, 3, &[]).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let data = random_bytes(1_500_000, 7);
     let fid = put_ok(a, &data).await;
@@ -217,7 +369,8 @@ async fn remote_read_gravity_pull_and_leased_drop() {
     // third request reaches REACTOR_GRAVITY_PULL (3) -> C pulls a replica
     let (st, _, _) = get(c, &fid, Some("bytes=0-99")).await;
     assert_eq!(st, 206);
-    wait_for("gravity pull on C", || holds(c, &fid)).await;
+    // the pull commits before its counter is bumped: wait for both
+    wait_for("gravity pull on C", || holds(c, &fid) && metric(c, "pulls") == 1).await;
     assert_eq!(metric(c, "pulls"), 1);
     let cm = c.store.file_meta(&fid).unwrap().unwrap();
     assert!(!cm.origin && cm.pins == 0, "replicas are not origin and carry no pins");
@@ -263,11 +416,12 @@ async fn remote_read_gravity_pull_and_leased_drop() {
     assert!(!holds(c, &fid));
     gossip_all(&[b]).await;
     assert!(!holds(b, &fid), "tombstone removed B's replica");
+    assert_transport(t, &[a, b, c]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn repair_after_node_loss_without_stampede() {
-    let nodes = cluster_of(4, &[]).await;
+both_transports!(repair_after_node_loss_without_stampede);
+async fn repair_after_node_loss_without_stampede(t: Transport) {
+    let nodes = cluster_t(t, 4, &[]).await;
     let all: Vec<&Node> = nodes.iter().collect();
     let a = &nodes[0];
     let data = text(400_000, 3);
@@ -301,11 +455,12 @@ async fn repair_after_node_loss_without_stampede() {
     assert!(holds(new_leader, &fid));
     assert_eq!(metric(new_leader, "repairs"), 1);
     assert_eq!(new_leader.store.read_to_vec(&fid, None).unwrap(), data);
+    assert_transport(t, &all);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tombstones_propagate_and_old_replicas_do_not_resurrect() {
-    let nodes = cluster_of(3, &[]).await;
+both_transports!(tombstones_propagate_and_old_replicas_do_not_resurrect);
+async fn tombstones_propagate_and_old_replicas_do_not_resurrect(t: Transport) {
+    let nodes = cluster_t(t, 3, &[]).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let data = json_logs(500_000, 4);
     let fid = put_ok(a, &data).await;
@@ -344,11 +499,12 @@ async fn tombstones_propagate_and_old_replicas_do_not_resurrect() {
     assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap(), "newer manifest beats the tombstone");
     gossip_all(&[c, b, a]).await;
     assert!(holds(a, &fid) && holds(b, &fid));
+    assert_transport(t, &[a, b, c]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn corrupt_object_is_quarantined_and_repaired_from_peer() {
-    let nodes = cluster_of(2, &[]).await;
+both_transports!(corrupt_object_is_quarantined_and_repaired_from_peer);
+async fn corrupt_object_is_quarantined_and_repaired_from_peer(t: Transport) {
+    let nodes = cluster_t(t, 2, &[]).await;
     let (a, b) = (&nodes[0], &nodes[1]);
     let data = text(600_000, 9);
     let fid = put_ok(a, &data).await;
@@ -374,16 +530,17 @@ async fn corrupt_object_is_quarantined_and_repaired_from_peer() {
     assert!(!b.store.object_meta(&oid).unwrap().unwrap().quarantined);
     assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
     assert!(b.store.verify_index(true).unwrap().ok());
+    assert_transport(t, &[a, b]);
 }
 
+both_transports!(encrypted_nodes_with_different_keys_replicate_and_repair);
 /// Encryption at rest across nodes with DIFFERENT master keys: objects travel in transport form
 /// (blob v2, decrypted but compressed) and are re-sealed under the receiver's key; a tampered
 /// encrypted object fails its AEAD tag in scrub, is quarantined and repaired from the peer.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn encrypted_nodes_with_different_keys_replicate_and_repair() {
+async fn encrypted_nodes_with_different_keys_replicate_and_repair(t: Transport) {
     let ka = Opts { key: Some(("node-a-key", [0xa1; 32])), pack_threshold: Some(0), ..Default::default() };
     let kb = Opts { key: Some(("node-b-key", [0xb2; 32])), pack_threshold: Some(0), ..Default::default() };
-    let nodes = cluster_of(2, &[ka, kb]).await;
+    let nodes = cluster_t(t, 2, &[ka, kb]).await;
     let (a, b) = (&nodes[0], &nodes[1]);
     let data = text(700_000, 21);
     let fid = put_ok(a, &data).await;
@@ -425,15 +582,20 @@ async fn encrypted_nodes_with_different_keys_replicate_and_repair() {
     assert_eq!(core_reactor::crypto::sealed_key_id(&std::fs::read(&bpath).unwrap()), Some("node-b-key"), "repaired copy is re-sealed under B's key");
     assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
     assert!(b.store.verify_index(true).unwrap().ok());
+    assert_transport(t, &[a, b]);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cluster_auth_and_wire_shapes() {
-    let mut pend = vec![bind(false).await, bind(false).await];
+both_transports!(cluster_auth_and_wire_shapes);
+async fn cluster_auth_and_wire_shapes(t: Transport) {
+    let quic = t == Transport::Quic;
+    let mut pend = vec![bind(quic).await, bind(quic).await];
     let (pb, pa) = (pend.pop().unwrap(), pend.pop().unwrap());
-    let (ua, ub) = (pa.url.clone(), pb.url.clone());
-    let a = start(pa, vec![ub.clone()], Opts::default()).await;
-    let b = start(pb, vec![ua.clone()], Opts { token: Some("wrong-token".into()), ..Default::default() }).await;
+    let ua = pa.url.clone();
+    let (pua, pub_) = (peer_url_of(&pa, quic), peer_url_of(&pb, quic));
+    let oa = if quic { quic_opts(Opts::default()) } else { Opts::default() };
+    let ob = Opts { token: Some("wrong-token".into()), ..Default::default() };
+    let a = start(pa, vec![pub_], oa).await;
+    let b = start(pb, vec![pua], if quic { quic_opts(ob) } else { ob }).await;
     let data = text(200_000, 1);
     let fid = put_ok(&a, &data).await;
     let c = client();
@@ -456,6 +618,12 @@ async fn cluster_auth_and_wire_shapes() {
     assert_eq!(st["peers"][0]["healthy"], false);
     assert!(st["peers"][0]["last_error"].as_str().unwrap().contains("401"));
     assert_eq!(get(&b, &fid, None).await.0, 502, "remote read is refused too");
+    if quic {
+        // the 401 came over QUIC (token check is defence in depth on top of TLS)
+        assert_eq!(st["peers"][0]["transport"]["transport"], "quic", "{}", st["peers"][0]);
+        assert!(b.cluster.transport.stats().requests("quic") >= 1);
+        assert!(a.quic.as_ref().unwrap().stats.requests.load(Ordering::Relaxed) >= 1);
+    }
 
     // inventory shape
     let inv: Value = c.get(format!("{}/cluster/inventory?since=0", ua)).header("x-cluster-token", CTOK).send().await.unwrap().json().await.unwrap();
@@ -521,38 +689,25 @@ async fn cluster_auth_and_wire_shapes() {
     assert_eq!(c.get(format!("{}/cluster/status", ua)).send().await.unwrap().status(), 401);
     assert_eq!(c.get(format!("{}/cluster/status", ua)).header("x-cluster-token", CTOK).send().await.unwrap().status(), 401);
     let st: Value = c.get(format!("{}/cluster/status", ua)).header("x-reactor-token", RTOK).send().await.unwrap().json().await.unwrap();
-    for k in ["node_id", "region", "tls", "cluster_size", "min_replicas", "min_replicas_effective", "peers", "holders_sample", "demand_top", "metrics"] {
+    for k in ["node_id", "region", "tls", "cluster_size", "min_replicas", "min_replicas_effective", "peers", "holders_sample", "demand_top", "metrics", "transport"] {
         assert!(st.get(k).is_some(), "status.{}", k);
     }
     assert_eq!(st["holders_sample"][0]["holders"], serde_json::json!([a.cluster.cfg.node_id]));
     for k in ["pulls", "drops", "repairs", "remote_read_bytes", "leases_active"] {
         assert!(st["metrics"][k].is_number(), "status.metrics.{}", k);
     }
+    assert!(st["peers"][0]["transport"]["transport"].is_string());
+    if quic {
+        assert!(st["quic_server"]["requests"].is_number(), "{}", st["quic_server"]);
+    }
     let stats: Value = c.get(format!("{}/store/stats", ua)).header("x-reactor-token", RTOK).send().await.unwrap().json().await.unwrap();
     assert!(stats["cluster"]["pulls"].is_number(), "/store/stats carries the gravity metrics");
-}
-
-fn make_ca_and_leaf(dir: &std::path::Path) -> (std::path::PathBuf, TlsSettings) {
-    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
-    let ca_key = KeyPair::generate().unwrap();
-    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.distinguished_name.push(rcgen::DnType::CommonName, "datran test CA");
-    let ca = ca_params.self_signed(&ca_key).unwrap();
-    let leaf_key = KeyPair::generate().unwrap();
-    let leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()]).unwrap();
-    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
-    let ca_path = dir.join("ca.pem");
-    std::fs::write(&ca_path, ca.pem()).unwrap();
-    std::fs::write(dir.join("cert.pem"), leaf.pem()).unwrap();
-    std::fs::write(dir.join("key.pem"), leaf_key.serialize_pem()).unwrap();
-    (ca_path, TlsSettings { cert: dir.join("cert.pem"), key: dir.join("key.pem") })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_between_peers() {
     let certs = tempfile::tempdir().unwrap();
-    let (ca, tls_files) = make_ca_and_leaf(certs.path());
+    let (ca, tls_files) = make_ca_and_leaf(certs.path(), "tls");
     let pa = bind(true).await;
     let ua = pa.url.clone();
     let a = start(pa, vec![], Opts { tls: Some(tls_files), ..Default::default() }).await;
@@ -576,24 +731,30 @@ async fn tls_between_peers() {
     b.cluster.gossip_round().await;
     assert_eq!(b.cluster.status()["peers"][0]["healthy"], true, "{}", b.cluster.status()["peers"][0]);
     assert_eq!(b.cluster.holders(&fid).len(), 1);
-    let (st, body, _) = get(&b, &fid, None).await;
+    let (st, body, _) = {
+        let r = reqwest::Client::new().get(format!("{}/store/files/{}", b.url, id_hex(&fid))).header("x-reactor-token", RTOK).send().await.unwrap();
+        let st = r.status().as_u16();
+        let h = r.headers().clone();
+        (st, r.bytes().await.unwrap().to_vec(), h)
+    };
     assert!(st == 200 && body == data, "remote read over TLS");
     assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap());
     assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    assert_eq!(b.cluster.status()["peers"][0]["transport"]["transport"], "https");
 
     // without the CA the peer's certificate is not trusted
     c.cluster.gossip_round().await;
     assert_eq!(c.cluster.status()["peers"][0]["healthy"], false);
     assert!(a.cluster.status()["tls"].as_bool().unwrap());
     // plain HTTP to the TLS port fails
-    let plain = client().get(format!("{}/health", ua.replace("https://", "http://"))).send().await;
+    let plain = reqwest::Client::new().get(format!("{}/health", ua.replace("https://", "http://"))).send().await;
     assert!(!plain.map(|r| r.status().is_success()).unwrap_or(false));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn eviction_never_drops_below_min_replicas() {
+both_transports!(eviction_never_drops_below_min_replicas);
+async fn eviction_never_drops_below_min_replicas(t: Transport) {
     let opts = [Opts::default(), Opts { max_bytes: Some(1_600_000), ..Default::default() }, Opts::default()];
-    let nodes = cluster_of(3, &opts).await;
+    let nodes = cluster_t(t, 3, &opts).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let x = random_bytes(1_000_000, 11);
     let fx = put_ok(a, &x).await;
@@ -618,4 +779,339 @@ async fn eviction_never_drops_below_min_replicas() {
 
     // now X is at exactly 2 replicas and leased: C cannot evict or drop it either
     assert_eq!(c.cluster.drop_pass().await, 0);
+    assert_transport(t, &[a, b, c]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// QUIC specifics
+// ---------------------------------------------------------------------------------------------
+
+/// Mutual TLS: the QUIC listener refuses clients without a certificate or with one from another
+/// CA (handshake failure, counted on both sides); a client with a certificate from the cluster
+/// CA gets through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_mtls_rejects_wrong_ca_and_missing_client_cert() {
+    let pk = pki();
+    let pa = bind(true).await;
+    let ua = peer_url_of(&pa, true);
+    let a = start(pa, vec![], quic_opts(Opts { mtls_ca: Some(pk.ca.clone()), ..Default::default() })).await;
+    let fid = put_ok(&a, &text(100_000, 5)).await;
+    let strict = |identity: Option<TlsSettings>| Opts {
+        identity,
+        peer_transport: Some(PeerTransport::QuicOnly),
+        connect_timeout: Some(Duration::from_secs(3)),
+        ..quic_opts(Opts::default())
+    };
+    let wrong_ca = start(bind(true).await, vec![ua.clone()], strict(Some(pk.other_leaf.clone()))).await;
+    let no_cert = start(bind(true).await, vec![ua.clone()], strict(None)).await;
+    let good = start(bind(true).await, vec![ua.clone()], strict(Some(pk.leaf.clone()))).await;
+
+    let server = &a.quic.as_ref().unwrap().stats;
+    for n in [&wrong_ca, &no_cert] {
+        let before = server.handshake_failures.load(Ordering::Relaxed);
+        n.cluster.gossip_round().await;
+        let st = n.cluster.status();
+        assert_eq!(st["peers"][0]["healthy"], false, "{}", st["peers"][0]);
+        assert!(n.cluster.transport.stats().requests("https") == 0, "quic-only never falls back");
+        assert!(st["transport"]["quic_client"]["handshake_failures"].as_u64().unwrap() >= 1, "{}", st["transport"]);
+        wait_for("server-side handshake failure", || server.handshake_failures.load(Ordering::Relaxed) > before).await;
+        assert!(n.cluster.pull(&fid, PullReason::Manual).await.is_err());
+    }
+    assert_eq!(server.requests.load(Ordering::Relaxed), 0, "no request from a refused client reached the router");
+
+    good.cluster.gossip_round().await;
+    let st = good.cluster.status();
+    assert_eq!(st["peers"][0]["healthy"], true, "{}", st["peers"][0]);
+    assert_eq!(st["peers"][0]["transport"]["transport"], "quic");
+    assert!(good.cluster.pull(&fid, PullReason::Manual).await.unwrap());
+    assert!(server.requests.load(Ordering::Relaxed) >= 2);
+}
+
+/// Token check over QUIC (defence in depth): a TLS-authenticated client with the wrong
+/// `x-cluster-token` is answered 401 by the same middleware as over HTTP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_token_reject() {
+    let pk = pki();
+    let pa = bind(true).await;
+    let ua = peer_url_of(&pa, true);
+    let a = start(pa, vec![], quic_opts(Opts::default())).await;
+    let cfg = TransportConfig { prefer: PeerTransport::QuicOnly, tls_ca: Some(pk.ca.clone()), ..TransportConfig::default() };
+    let pc = PeerClient::new(cfg).unwrap();
+    for (tok, expect) in [("", "HTTP 401"), ("wrong", "HTTP 401"), (RTOK, "HTTP 401")] {
+        let e = pc.get(&format!("{}/cluster/inventory", ua), tok, 1 << 20).await.unwrap_err();
+        assert_eq!(e, expect);
+    }
+    let e = pc.post(&format!("{}/cluster/unpin/{}", ua, "00".repeat(32)), "nope", 1 << 16).await.unwrap_err();
+    assert_eq!(e, "HTTP 401");
+    let inv: Value = serde_json::from_slice(&pc.get(&format!("{}/cluster/inventory", ua), CTOK, 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(inv["node_id"], a.cluster.cfg.node_id.as_str());
+    // non-peer endpoints are not served on the QUIC listener at all
+    let e = pc.get(&format!("{}/store/stats", ua), CTOK, 1 << 20).await.unwrap_err();
+    assert_eq!(e, "HTTP 404");
+    assert_eq!(pc.stats().requests("https"), 0);
+    // response size caps are enforced like on the HTTP path
+    let e = pc.get(&format!("{}/cluster/inventory", ua), CTOK, 16).await.unwrap_err();
+    assert!(e.contains("larger than 16 bytes"), "{}", e);
+}
+
+/// `quic://` peer whose UDP port is closed: the handshake times out, the request falls back to
+/// HTTPS on the same port number, and status / metrics record it. `quic-only` does not fall back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_falls_back_to_https_when_udp_port_closed() {
+    let pk = pki();
+    let pa = bind(true).await;
+    let ua = peer_url_of(&pa, true);
+    // A serves HTTPS only (no QUIC listener)
+    let a = start(pa, vec![], Opts { tls: Some(pk.leaf.clone()), tls_ca: Some(pk.ca.clone()), ..Default::default() }).await;
+    let data = text(300_000, 8);
+    let fid = put_ok(&a, &data).await;
+    let b = start(bind(false).await, vec![ua.clone()], Opts { tls_ca: Some(pk.ca.clone()), connect_timeout: Some(Duration::from_millis(1500)), ..Default::default() }).await;
+
+    b.cluster.gossip_round().await;
+    let st = b.cluster.status();
+    let p = &st["peers"][0];
+    assert_eq!(p["healthy"], true, "{}", p);
+    assert_eq!(p["transport"]["transport"], "https", "{}", p);
+    assert_eq!(p["transport"]["configured_transport"], "quic");
+    assert_eq!(p["transport"]["quic_fallbacks"], 1);
+    assert!(p["transport"]["quic_error"].as_str().unwrap().contains("QUIC"), "{}", p);
+    assert_eq!(st["transport"]["fallbacks"], 1);
+    assert!(st["transport"]["quic_client"]["handshake_failures"].as_u64().unwrap() >= 1);
+    // later requests go straight to HTTPS while the fallback is fresh (no second handshake wait)
+    let t = std::time::Instant::now();
+    assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap());
+    assert!(t.elapsed() < Duration::from_millis(1400), "no new QUIC attempt during the back-off");
+    assert!(b.cluster.transport.stats().requests("https") >= 3);
+    assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    let st = b.cluster.status();
+    assert_eq!(st["transport"]["fallbacks"], 1);
+    let m = core_reactor::metrics::render(&b.engine, None, Some(&b.cluster));
+    assert!(m.contains("reactor_cluster_peer_fallbacks_total"), "fallback metric exported");
+    assert!(m.contains("reactor_quic_handshake_failures_total{side=\"client\"}"));
+    assert!(m.contains("reactor_cluster_peer_requests_total{method=\"GET\",result=\"ok\",transport=\"https\"}"));
+
+    // quic-only: no fallback, the peer is unhealthy
+    let c = start(
+        bind(false).await,
+        vec![ua.clone()],
+        Opts { tls_ca: Some(pk.ca.clone()), connect_timeout: Some(Duration::from_millis(800)), peer_transport: Some(PeerTransport::QuicOnly), ..Default::default() },
+    )
+    .await;
+    c.cluster.gossip_round().await;
+    assert_eq!(c.cluster.status()["peers"][0]["healthy"], false);
+    assert_eq!(c.cluster.transport.stats().requests("https"), 0);
+}
+
+/// 0-RTT: after a reconnect with a session ticket, GETs go out in 0-RTT and the server sees them
+/// before the handshake completes; POSTs (hold leases) never do — asserted on the server, which
+/// classifies streams exactly at accept time. With the client-side guard disabled (test hook) the
+/// server does see early POSTs and holds them until the handshake completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_zero_rtt_only_for_idempotent_requests() {
+    let pa = bind(true).await;
+    let ua = peer_url_of(&pa, true);
+    let a = start(pa, vec![], quic_opts(Opts::default())).await;
+    let fid = put_ok(&a, &text(200_000, 6)).await;
+    let server = a.quic.as_ref().unwrap().stats.clone();
+    let hold_url = format!("{}/cluster/hold/{}?node=t", ua, id_hex(&fid));
+
+    for unsafe_hook in [false, true] {
+        let b = start(bind(true).await, vec![ua.clone()], quic_opts(Opts { unsafe_0rtt: unsafe_hook, ..Default::default() })).await;
+        b.cluster.gossip_round().await; // full handshake; the server issues tickets
+        assert_eq!(b.cluster.status()["peers"][0]["transport"]["transport"], "quic");
+        let early_unsafe_before = server.early_unsafe.load(Ordering::Relaxed);
+        let early_safe_before = server.early_safe.load(Ordering::Relaxed);
+        for _ in 0..30 {
+            b.cluster.transport.reset_quic();
+            // first requests on the fresh connection: a GET and a POST, back to back
+            let (g, h) = tokio::join!(b.cluster.gossip_round(), b.cluster.transport.post(&hold_url, CTOK, 1 << 16));
+            let () = g;
+            let h: Value = serde_json::from_slice(&h.unwrap_or_else(|e| panic!("hold over QUIC: {}", e))).unwrap();
+            assert_eq!(h["granted"], true, "{}", h);
+            let done = server.early_safe.load(Ordering::Relaxed) > early_safe_before
+                && (!unsafe_hook || server.early_unsafe.load(Ordering::Relaxed) > early_unsafe_before);
+            if done {
+                break;
+            }
+        }
+        let qc = b.cluster.transport.quic_stats().unwrap();
+        assert!(qc["zero_rtt_accepted"].as_u64().unwrap() >= 1, "0-RTT resumption used: {}", qc);
+        assert!(server.early_safe.load(Ordering::Relaxed) > early_safe_before, "GETs arrived in 0-RTT: {}", server.json());
+        if !unsafe_hook {
+            assert_eq!(server.early_unsafe.load(Ordering::Relaxed), early_unsafe_before, "no POST ever arrived in 0-RTT: {}", server.json());
+            assert_eq!(qc["early_sent_unsafe"], 0);
+            assert!(qc["early_sent_safe"].as_u64().unwrap() >= 1);
+        } else {
+            let early_unsafe = server.early_unsafe.load(Ordering::Relaxed);
+            assert!(early_unsafe > early_unsafe_before, "server detects early POSTs: {}", server.json());
+            assert_eq!(server.early_unsafe_deferred.load(Ordering::Relaxed), early_unsafe, "every early POST was held until the handshake completed");
+            assert_eq!(server.early_unsafe_refused.load(Ordering::Relaxed), 0);
+        }
+    }
+}
+
+/// Object pulls run concurrently on one QUIC connection (one stream per object).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_pull_uses_one_connection_with_parallel_streams() {
+    let nodes = cluster_t(Transport::Quic, 2, &[Opts::default(), Opts { pull_concurrency: Some(16), pack_threshold: Some(0), ..Default::default() }]).await;
+    let (a, b) = (&nodes[0], &nodes[1]);
+    let data = random_bytes(6_000_000, 31);
+    let fid = put_ok(a, &data).await;
+    assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap());
+    assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    let qc = b.cluster.transport.quic_stats().unwrap();
+    assert_eq!(qc["connections"], 1, "one connection per peer: {}", qc);
+    let served = a.quic.as_ref().unwrap().stats.json();
+    assert_eq!(served["connections"], 1);
+    assert!(served["requests"].as_u64().unwrap() as usize >= a.store.chunk_refs(&fid).unwrap().unwrap().1.len());
+    assert_transport(Transport::Quic, &[a, b]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lossy UDP proxy + benchmark
+// ---------------------------------------------------------------------------------------------
+
+/// In-process UDP proxy in front of `upstream` dropping each datagram with probability `loss`
+/// (both directions, deterministic RNG). Returns the address clients should use.
+async fn lossy_proxy(upstream: std::net::SocketAddr, loss: f64, seed: u64) -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicU64>) {
+    let front = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let back = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    back.connect(upstream).await.unwrap();
+    let addr = front.local_addr().unwrap();
+    let client = Arc::new(std::sync::Mutex::new(None::<std::net::SocketAddr>));
+    let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // `Lcg::next` yields 31 bits
+    let threshold = (loss * (1u64 << 31) as f64) as u64;
+    {
+        let (front, back, client, dropped) = (front.clone(), back.clone(), client.clone(), dropped.clone());
+        tokio::spawn(async move {
+            let mut rng = Lcg(seed);
+            let mut buf = vec![0u8; 65536];
+            while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                *client.lock().unwrap() = Some(from);
+                if rng.next() < threshold {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let _ = back.send(&buf[..n]).await;
+            }
+        });
+    }
+    {
+        let dropped = dropped.clone();
+        tokio::spawn(async move {
+            let mut rng = Lcg(seed ^ 0x5eed);
+            let mut buf = vec![0u8; 65536];
+            loop {
+                let n = match back.recv(&mut buf).await {
+                    Ok(n) => n,
+                    Err(_) => continue, // ICMP errors surface as recv errors on some platforms
+                };
+                if rng.next() < threshold {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let to = *client.lock().unwrap();
+                if let Some(to) = to {
+                    let _ = front.send_to(&buf[..n], to).await;
+                }
+            }
+        });
+    }
+    (addr, dropped)
+}
+
+/// Correctness under loss: a replica pull over QUIC through a proxy dropping 2 % of datagrams.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quic_pull_survives_packet_loss() {
+    let pa = bind(true).await;
+    let a = start(pa, vec![], quic_opts(Opts::default())).await;
+    let data = random_bytes(3_000_000, 41);
+    let fid = put_ok(&a, &data).await;
+    let (proxy, dropped) = lossy_proxy(a.quic.as_ref().unwrap().local_addr(), 0.02, 7).await;
+    let b = start(bind(true).await, vec![format!("quic://{}", proxy)], quic_opts(Opts { peer_transport: Some(PeerTransport::QuicOnly), ..Default::default() })).await;
+    b.cluster.gossip_round().await;
+    assert!(b.cluster.pull(&fid, PullReason::Manual).await.unwrap());
+    assert_eq!(b.store.read_to_vec(&fid, None).unwrap(), data);
+    assert!(dropped.load(Ordering::Relaxed) > 0, "the proxy dropped datagrams");
+}
+
+/// Benchmark (run explicitly, release build recommended):
+/// `cargo test --release --test cluster quic_bench -- --ignored --nocapture`
+///
+/// Pull of a replica with many objects from one origin over HTTPS (HTTP/1.1, reqwest pool) and
+/// over QUIC (one connection, parallel streams); then QUIC through the lossy proxy at 0 / 1 /
+/// 2 % loss with 1 vs 8 concurrent object fetches. `DATRAN_BENCH_MIB` (default 500) sets the
+/// size. Every puller is a fresh node (no dedup between runs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn quic_bench() {
+    let mib: usize = std::env::var("DATRAN_BENCH_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+    let pk = pki();
+    let pa = bind(true).await;
+    let https_url = pa.url.clone();
+    let quic_url = peer_url_of(&pa, true);
+    let a = start(pa, vec![], quic_opts(Opts::default())).await;
+    // mixed, partly compressible content: text and random runs
+    let mut data = Vec::with_capacity(mib << 20);
+    let mut seed = 1u64;
+    while data.len() < mib << 20 {
+        data.extend_from_slice(&text(1 << 20, seed));
+        data.extend_from_slice(&random_bytes(1 << 20, seed + 1));
+        seed += 2;
+    }
+    data.truncate(mib << 20);
+    let t = std::time::Instant::now();
+    let s = a.store.clone();
+    let d = data.clone();
+    let out = tokio::task::spawn_blocking(move || s.put_bytes(&d, &core_reactor::store::PutOptions { content_type: None, sample: false })).await.unwrap().unwrap();
+    let fid = out.file_id;
+    let objects = a.store.chunk_refs(&fid).unwrap().unwrap().1.iter().map(|r| r.object_id).collect::<std::collections::HashSet<_>>().len();
+    let stored = a.store.stats().unwrap()["live_physical_bytes"].as_u64().unwrap();
+    println!(
+        "origin: {} MiB file, {} objects, {:.1} MiB stored (transfer volume), ingest {:.1}s",
+        mib,
+        objects,
+        stored as f64 / 1048576.0,
+        t.elapsed().as_secs_f64()
+    );
+
+    async fn pull_once(label: &str, peer: String, o: Opts, fid: Id, stored: u64) -> f64 {
+        let n = start(bind(true).await, vec![peer], o).await;
+        n.cluster.gossip_round().await;
+        let t = std::time::Instant::now();
+        let r = n.cluster.pull(&fid, PullReason::Manual).await;
+        let secs = t.elapsed().as_secs_f64();
+        assert!(r.as_ref().is_ok_and(|v| *v), "{}: {:?}", label, r);
+        let tr = n.cluster.transport.stats_json();
+        println!(
+            "{:<40} {:>7.2} s  {:>7.1} MiB/s  (quic req {}, https req {})",
+            label,
+            secs,
+            stored as f64 / 1048576.0 / secs,
+            tr["quic"]["requests"],
+            tr["https"]["requests"]
+        );
+        secs
+    }
+    let base = |conc: usize| Opts { tls_ca: Some(pk.ca.clone()), pull_concurrency: Some(conc), ..Default::default() };
+    for conc in [1usize, 8] {
+        pull_once(&format!("HTTPS (HTTP/1.1), concurrency {}", conc), https_url.clone(), base(conc), fid, stored).await;
+        pull_once(&format!("QUIC (HTTP/3), concurrency {}", conc), quic_url.clone(), Opts { peer_transport: Some(PeerTransport::QuicOnly), ..base(conc) }, fid, stored).await;
+    }
+    // the sender (origin) runs the congestion controller: a second listener on A with BBR
+    let mut qs = QuicServerSettings::new(&pk.leaf);
+    qs.tuning.congestion = core_reactor::cluster::quic::Congestion::Bbr;
+    let bbr = QuicServer::start("127.0.0.1:0".parse().unwrap(), a.peer_app.clone(), &qs).unwrap();
+    for conc in [1usize, 8] {
+        pull_once(&format!("QUIC (HTTP/3) BBR, concurrency {}", conc), format!("quic://{}", bbr.local_addr()), Opts { peer_transport: Some(PeerTransport::QuicOnly), ..base(conc) }, fid, stored).await;
+    }
+    for loss in [0.0, 0.01, 0.02] {
+        for conc in [1usize, 8] {
+            let (proxy, dropped) = lossy_proxy(a.quic.as_ref().unwrap().local_addr(), loss, 99).await;
+            let label = format!("QUIC via proxy, loss {:.0}%, concurrency {}", loss * 100.0, conc);
+            pull_once(&label, format!("quic://{}", proxy), Opts { peer_transport: Some(PeerTransport::QuicOnly), ..base(conc) }, fid, stored).await;
+            println!("{:<40} dropped {} datagrams", "", dropped.load(Ordering::Relaxed));
+        }
+    }
 }

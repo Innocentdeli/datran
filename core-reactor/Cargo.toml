@@ -31,6 +31,16 @@ zeroize = "1"
 prometheus = { version = "0.13", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# Native QUIC / HTTP/3 transport for node-to-node cluster traffic (NETWORK_SPEC §4 "QUIC transport").
+# One crypto provider for the whole process: aws-lc-rs (same as reqwest / axum-server).
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+socket2 = "0.6"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 opt-level = 3

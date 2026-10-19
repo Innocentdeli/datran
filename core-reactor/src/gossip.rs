@@ -2,6 +2,7 @@
 //! only), and optionally share zstd dictionaries with SHA-256 verification.
 
 use crate::classify;
+use crate::cluster::transport::PeerClient;
 use crate::codec::{sha256, DictId};
 use crate::dicts::MAX_DICT_BYTES;
 use crate::evolution::Engine;
@@ -50,11 +51,13 @@ impl GossipConfig {
     }
 }
 
-/// Comma-separated base URLs; only http(s) URLs are kept, trailing slashes removed.
+/// Comma-separated base URLs; only `http://`, `https://` and `quic://` URLs are kept, trailing
+/// slashes removed (`quic://host:port` = QUIC at UDP host:port, HTTPS fallback at TCP
+/// host:port, see `cluster::transport`).
 pub fn parse_peers(s: &str) -> Vec<String> {
     s.split(',')
         .map(|p| p.trim().trim_end_matches('/').to_string())
-        .filter(|p| p.starts_with("http://") || p.starts_with("https://"))
+        .filter(|p| p.starts_with("http://") || p.starts_with("https://") || p.starts_with("quic://"))
         .collect()
 }
 
@@ -70,7 +73,7 @@ pub struct PeerStatus {
 
 pub struct Gossip {
     pub cfg: GossipConfig,
-    client: reqwest::Client,
+    client: PeerClient,
     status: Mutex<Vec<PeerStatus>>,
 }
 
@@ -82,13 +85,14 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl Gossip {
+    /// Gossip with its own HTTP(S)-only peer client (timeout `cfg.timeout`).
     pub fn new(cfg: GossipConfig) -> Gossip {
-        let client = reqwest::Client::builder()
-            .timeout(cfg.timeout)
-            .connect_timeout(cfg.timeout.min(Duration::from_secs(5)))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("failed to build HTTP client");
+        let client = PeerClient::http_only(cfg.timeout);
+        Gossip::with_client(cfg, client)
+    }
+
+    /// Gossip over a shared peer client (QUIC / HTTP(S), the cluster's caps and timeouts).
+    pub fn with_client(cfg: GossipConfig, client: PeerClient) -> Gossip {
         let status = cfg.peers.iter().map(|u| PeerStatus { url: u.clone(), ..Default::default() }).collect();
         Gossip { cfg, client, status: Mutex::new(status) }
     }
@@ -122,27 +126,7 @@ impl Gossip {
 
     async fn get_capped(&self, url: &str, cap: usize) -> Result<Vec<u8>, String> {
         let token = self.cfg.cluster_token.as_deref().ok_or("no cluster token")?;
-        let mut resp = self
-            .client
-            .get(url)
-            .header("x-cluster-token", token)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {}", e))?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status().as_u16()));
-        }
-        if resp.content_length().is_some_and(|l| l > cap as u64) {
-            return Err(format!("response larger than {} bytes", cap));
-        }
-        let mut buf = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read failed: {}", e))? {
-            if buf.len() + chunk.len() > cap {
-                return Err(format!("response larger than {} bytes", cap));
-            }
-            buf.extend_from_slice(&chunk);
-        }
-        Ok(buf)
+        self.client.get(url, token, cap).await
     }
 
     /// Fetches a dictionary from one peer, verifies its SHA-256 and stores it.

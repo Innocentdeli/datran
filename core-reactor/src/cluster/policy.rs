@@ -8,7 +8,7 @@
 //! the file while it is being dropped. No confirmation, no eviction: a file is never evicted
 //! below its replica guarantee (the store then answers 507).
 
-use super::{build_client, lock, Cluster};
+use super::{lock, Cluster};
 use crate::state::now_ms;
 use crate::store::{EvictionPolicy, FileMeta, Id, Store};
 use std::sync::atomic::Ordering;
@@ -69,7 +69,6 @@ impl Cluster {
         let need = self.min_replicas_effective();
         files.retain(|m| self.holders(&m.file_id).len() >= need);
         files.sort_by(|a, b| self.demand(&a.file_id).total_cmp(&self.demand(&b.file_id)).then(b.size.cmp(&a.size)));
-        let Ok(client) = build_client(&self.cfg, false) else { return Vec::new() };
         let ttl = self.cfg.lease_ttl.as_millis() as u64;
         let run = || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
@@ -80,7 +79,9 @@ impl Cluster {
                     if freed >= need_bytes.saturating_mul(2) {
                         break;
                     }
-                    let (granted, _) = self.acquire_leases(&client, &m.file_id, need, None).await;
+                    // unpooled HTTP (this runtime is dropped afterwards); QUIC requests run on
+                    // the main runtime inside the peer client
+                    let (granted, _) = self.acquire_leases(false, &m.file_id, need, None).await;
                     if granted >= need {
                         lock(&self.confirmed).insert(m.file_id, now + ttl);
                         self.metrics.evictions_confirmed.fetch_add(1, Ordering::Relaxed);

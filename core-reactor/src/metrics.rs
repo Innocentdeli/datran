@@ -14,7 +14,7 @@
 
 use crate::evolution::Engine;
 use prometheus::{
-    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder,
+    Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -29,6 +29,16 @@ struct Hot {
     group_batch: Histogram,
     ingest_inflight: IntGauge,
     backups: IntCounterVec,
+    peer_requests: IntCounterVec,
+    peer_duration: HistogramVec,
+    peer_bytes: IntCounterVec,
+    peer_fallbacks: IntCounter,
+    quic_handshake_failures: IntCounterVec,
+    quic_0rtt: IntCounterVec,
+    quic_early_requests: IntCounterVec,
+    quic_server_requests: IntCounterVec,
+    quic_server_bytes: IntCounter,
+    quic_connections: IntGaugeVec,
 }
 
 const LATENCY_BUCKETS: &[f64] = &[0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
@@ -62,7 +72,48 @@ fn hot() -> &'static Hot {
         let ingest_inflight = IntGauge::new("reactor_store_ingest_inflight_bytes", "Plaintext bytes handed to compression workers and not yet staged (all uploads)").expect("gauge");
         registry.register(Box::new(ingest_inflight.clone())).expect("register");
         let backups = cv("reactor_store_backups_total", "Online backups by result", &["result"]);
-        Hot { registry, http_requests, http_duration, codec_bytes, codec_duration, fsync_duration, group_batch, ingest_inflight, backups }
+        let peer_requests = cv(
+            "reactor_cluster_peer_requests_total",
+            "Outgoing node-to-node requests by transport (quic, https, http), method and result (ok, http_error, error)",
+            &["transport", "method", "result"],
+        );
+        let peer_duration = hv("reactor_cluster_peer_request_duration_seconds", "Outgoing node-to-node request latency incl. body", &["transport"], LATENCY_BUCKETS);
+        let peer_bytes = cv("reactor_cluster_peer_response_bytes_total", "Response body bytes received from peers by transport", &["transport"]);
+        let peer_fallbacks = IntCounter::new("reactor_cluster_peer_fallbacks_total", "Requests sent over HTTP(S) because the QUIC handshake to the peer failed").expect("counter");
+        registry.register(Box::new(peer_fallbacks.clone())).expect("register");
+        let quic_handshake_failures = cv("reactor_quic_handshake_failures_total", "QUIC handshakes that failed (TLS, mTLS, timeout) by side (client, server)", &["side"]);
+        let quic_0rtt = cv("reactor_quic_0rtt_total", "Client 0-RTT attempts by result (accepted, rejected)", &["result"]);
+        let quic_early_requests = cv(
+            "reactor_quic_early_requests_total",
+            "Requests the QUIC server received before the handshake was confirmed (0-RTT), by class (safe = GET/HEAD, unsafe = anything else)",
+            &["class"],
+        );
+        let quic_server_requests = cv("reactor_quic_server_requests_total", "HTTP/3 requests served on the QUIC listener by method and status", &["method", "status"]);
+        let quic_server_bytes = IntCounter::new("reactor_quic_server_response_bytes_total", "Response body bytes sent on the QUIC listener").expect("counter");
+        registry.register(Box::new(quic_server_bytes.clone())).expect("register");
+        let quic_connections = IntGaugeVec::new(Opts::new("reactor_quic_connections", "Open QUIC connections by side (client, server)"), &["side"]).expect("gauge");
+        registry.register(Box::new(quic_connections.clone())).expect("register");
+        Hot {
+            registry,
+            http_requests,
+            http_duration,
+            codec_bytes,
+            codec_duration,
+            fsync_duration,
+            group_batch,
+            ingest_inflight,
+            backups,
+            peer_requests,
+            peer_duration,
+            peer_bytes,
+            peer_fallbacks,
+            quic_handshake_failures,
+            quic_0rtt,
+            quic_early_requests,
+            quic_server_requests,
+            quic_server_bytes,
+            quic_connections,
+        }
     })
 }
 
@@ -95,6 +146,43 @@ pub fn ingest_inflight_add(delta: i64) {
 
 pub fn backup_done(ok: bool) {
     hot().backups.with_label_values(&[if ok { "ok" } else { "error" }]).inc();
+}
+
+/// One outgoing node-to-node request (`transport` = quic / https / http, `result` = ok /
+/// http_error / error).
+pub fn peer_request(transport: &str, method: &str, result: &str, elapsed: Duration, bytes: u64) {
+    let h = hot();
+    h.peer_requests.with_label_values(&[transport, method, result]).inc();
+    h.peer_duration.with_label_values(&[transport]).observe(elapsed.as_secs_f64());
+    if bytes > 0 {
+        h.peer_bytes.with_label_values(&[transport]).inc_by(bytes);
+    }
+}
+
+pub fn peer_fallback() {
+    hot().peer_fallbacks.inc();
+}
+
+pub fn quic_handshake_failure(side: &str) {
+    hot().quic_handshake_failures.with_label_values(&[side]).inc();
+}
+
+pub fn quic_0rtt(accepted: bool) {
+    hot().quic_0rtt.with_label_values(&[if accepted { "accepted" } else { "rejected" }]).inc();
+}
+
+pub fn quic_early_request(safe: bool) {
+    hot().quic_early_requests.with_label_values(&[if safe { "safe" } else { "unsafe" }]).inc();
+}
+
+pub fn quic_server_request(method: &str, status: u16, bytes: u64) {
+    let h = hot();
+    h.quic_server_requests.with_label_values(&[method, &status.to_string()]).inc();
+    h.quic_server_bytes.inc_by(bytes);
+}
+
+pub fn quic_connections_add(side: &str, delta: i64) {
+    hot().quic_connections.with_label_values(&[side]).add(delta);
 }
 
 /// Codec name of a blob for the decompress metrics (`legacy` for flags 0x00–0x03).

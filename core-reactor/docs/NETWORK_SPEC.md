@@ -213,7 +213,7 @@ Background task that rewrites the store layout based on evidence:
 
 Nodes: each reactor has a stable `node_id` (random, persisted) and optional `REACTOR_REGION`. Peers from
 `REACTOR_PEERS`, authenticated with `x-cluster-token`. Optional TLS: `REACTOR_TLS_CERT`/`REACTOR_TLS_KEY` (server)
-and `REACTOR_TLS_CA` (trust for peers).
+and `REACTOR_TLS_CA` (trust for peers). Optional QUIC / HTTP/3 transport between nodes: see "QUIC transport" below.
 
 - **Inventory gossip** (every `REACTOR_GOSSIP_INTERVAL_MS`): `GET /cluster/inventory?since=<version>` returns
   `{ node_id, region, version, capacity, used, added:[file_id], removed:[file_id], tombstones:[{file_id,deleted_ms}],
@@ -272,6 +272,85 @@ Implementation notes (reactor `src/cluster/`, refinements of the above):
   decrypted and verified (AEAD + decode + SHA-256) but still compressed — never the local envelope. Receivers
   verify it as before and re-seal it under their own active key (replica import, peer repair), so nodes may
   use different master keys. Protect cluster traffic with `REACTOR_TLS_*` when it crosses untrusted networks.
+- Replica pulls fetch the missing objects `REACTOR_PULL_CONCURRENCY` (default 8) at a time, in manifest order, while
+  a blocking thread imports them (memory ≈ concurrency × object size). Applies to every transport.
+
+### QUIC transport (reactor `src/cluster/quic.rs`, `transport.rs`)
+
+Node-to-node traffic can run over QUIC instead of HTTP(S): **HTTP/3** (`h3` + `h3-quinn` over `quinn`, rustls with
+the process-wide aws-lc-rs provider). Every HTTP/3 request is routed into the axum *peer router*
+(`server::peer_router`), so QUIC serves exactly the same handlers, `x-cluster-token` check, bodies, status codes and
+error strings as the TCP listener. Chosen over a custom length-prefixed RPC because one handler set cannot drift; the
+cost is two `0.0.x` crates (`h3` 0.0.8, `h3-quinn` 0.0.10, maintained by the hyper project, used by reqwest's HTTP/3)
+and a ~60-line adapter (request head → `http::Request<Body>` → router → response head + streamed DATA frames).
+
+- **Listener**: `REACTOR_QUIC_PORT` (UDP, default off) on `REACTOR_BIND`. It serves `/cluster/*` (except
+  `/cluster/status`), `/evolution/champions`, `/evolution/dict/:sha256` and `/health`; anything else is 404; request
+  bodies ≤ 64 KiB. TLS 1.3 only (QUIC requires it), ALPN `h3`, identity `REACTOR_TLS_CERT`/`REACTOR_TLS_KEY`;
+  without them the reactor refuses to start. `REACTOR_QUIC_MTLS=true` requires a client certificate chaining to
+  `REACTOR_TLS_CA` (refuses to start without the CA); the token check still applies (defence in depth).
+- **Peers**: `REACTOR_PEERS` accepts `quic://host:port`: QUIC at UDP `host:port`, fallback `https://host:port` (TCP,
+  same number — run the QUIC listener on the same port number as HTTPS). `REACTOR_PEER_TRANSPORT=quic` treats every
+  `https://` peer the same way, `quic-only` disables the fallback, `http` (default) uses QUIC only for `quic://` peers;
+  `http://` peers never use QUIC. Clients verify peers against `REACTOR_TLS_CA` (platform roots without it) and present
+  `REACTOR_TLS_CERT`/`KEY` as client certificate.
+- **Fallback**: a QUIC handshake that fails, times out (`connect_timeout`, 5 s) or is refused by a TLS alert (e.g.
+  mTLS) makes that request — and every request to that peer for the next 60 s — go over HTTPS. Recorded per peer in
+  `/cluster/status` (`peers[].transport`: `transport` last used, `configured_transport`, `quic_fallbacks`,
+  `quic_error`, `quic_retry_in_ms`) and in `reactor_cluster_peer_fallbacks_total`. Errors after the handshake
+  (status codes, caps, timeouts) are returned as on HTTP, never retried over another transport.
+- **Connections**: one QUIC connection per peer (`host:port`), one bidirectional stream per request, at most
+  `REACTOR_QUIC_MAX_STREAMS` (64) concurrent requests per peer (client semaphore + server stream limit). Keep-alive
+  every `REACTOR_QUIC_IDLE_TIMEOUT_MS`/3 (idle timeout 30 s). A dead pooled connection is replaced and a safe request
+  retried once. Flow control: 16 MiB per stream (one maximal object), 64 MiB per connection, UDP socket buffers 4 MiB
+  requested. Congestion control `REACTOR_QUIC_CONGESTION` = `cubic` (default) | `bbr` | `newreno` (the *sender* —
+  the node serving objects — decides). QUIC requests run on the runtime that built the client, so callers on private
+  runtimes (eviction lease requests) work. Caps (`MAX_*_BYTES`, content-length checked first) and the request timeout
+  (whole exchange, 30 s) are the same as HTTP.
+- **0-RTT** (`REACTOR_QUIC_0RTT`, default on) is used only for safe, idempotent requests: GET inventory, manifests,
+  objects, chunks, champions, dictionaries. Replay reasoning: a 0-RTT flight can be captured and replayed by an
+  attacker; a replayed GET only re-reads data the attacker cannot decrypt, while a replayed `POST /cluster/hold`
+  would extend a lease and a replayed `POST /cluster/unpin` would delete a file. Hence: (1) the client never sends a
+  non-GET/HEAD before its handshake is confirmed; (2) the server classifies each request stream *at accept time* with
+  an exact TLS-state probe (rustls exports keying material only after the handshake completed), counts early
+  requests by class, and holds an unsafe early request until the handshake completes (RFC 8470 §3) — a replay never
+  completes its handshake, so after 10 s it gets `425 Too Early`; (3) rustls' stateful ticket store makes 0-RTT
+  tickets single-use per server process. Tickets are kept per peer `host:port` (rustls keys them by server name only,
+  so peers sharing an IP would otherwise reject each other's 0-RTT). A rejected 0-RTT attempt is retried with a full
+  handshake. With mTLS, a resumed session carries the client identity verified on the original handshake.
+- **Status / metrics**: `/cluster/status` → `transport` (per-transport requests / errors / bytes, fallbacks,
+  `quic_client`: connections, handshake failures, `zero_rtt_accepted`/`rejected`, `early_sent_safe`/`unsafe`) and
+  `quic_server` (connections, handshake failures, requests, bytes, `early_safe`, `early_unsafe`,
+  `early_unsafe_deferred`, `early_unsafe_refused`). Prometheus series in §8.
+- **Tests** (`tests/cluster.rs`): every multi-node scenario runs over HTTP and over QUIC (test CA from rcgen,
+  `quic://` peers; asserts zero HTTP(S) requests and zero fallbacks in QUIC mode); mTLS rejects a client certificate
+  from another CA and a missing one (both sides count the handshake failure; no request reaches the router) and
+  accepts the right one; wrong/missing token → 401 over QUIC; closed UDP port → HTTPS fallback recorded (and none
+  with `quic-only`); 0-RTT: GETs arrive early, POSTs never do (server-side counter), and with the client guard
+  disabled the server sees early POSTs and holds every one until the handshake completes; one connection with
+  parallel streams per pull; a pull through an in-process UDP proxy dropping 2 % of datagrams completes and verifies.
+
+**Measured** (`cargo test --release --test cluster quic_bench -- --ignored --nocapture`, one Windows 11 machine,
+all nodes in one process on loopback, single run each): pull of a 500 MiB file (6 589 objects, 297.6 MiB on the
+wire) into a fresh node.
+
+| Path | concurrency 1 | concurrency 8 |
+| :--- | ---: | ---: |
+| HTTPS (HTTP/1.1, reqwest pool) | 15.0 s (19.8 MiB/s) | 16.1 s (18.4 MiB/s) |
+| QUIC, Cubic | 16.2 s (18.4 MiB/s) | 12.5 s (23.7 MiB/s) |
+| QUIC, BBR (sender) | 18.4 s (16.1 MiB/s) | 13.0 s (22.9 MiB/s) |
+| QUIC via in-process UDP proxy, 0 % loss | 29.1 s (10.2 MiB/s) | 14.1 s (21.2 MiB/s) |
+| proxy, 1 % loss each way (≈2 850 datagrams dropped) | 29.6 s (10.0 MiB/s) | 14.9 s (20.0 MiB/s) |
+| proxy, 2 % loss each way (≈5 670 dropped) | 35.5 s (8.4 MiB/s) | 20.8 s (14.3 MiB/s) |
+
+What this shows: on loopback the pull is limited by the receiver's import (decode, verify, re-seal, index) at about
+20 MiB/s, not by the transport, so HTTPS and QUIC are within noise of each other; the best run was QUIC with 8
+parallel streams (12.5 s vs 16.1 s for HTTPS at the same concurrency, one run). With loss, 8 concurrent streams on
+one connection lose much less than a single stream (2 %: 20.8 s vs 35.5 s): a lost datagram stalls only the stream
+it belongs to. HTTP/1.1 over TCP could not be measured under loss in-process (TCP loss needs a kernel-level shaper),
+and with 8 TCP connections it would not have cross-request head-of-line blocking either. So the advantage measured
+here is one connection carrying parallel, independently-recovering streams, not raw speed. BBR did not beat Cubic on
+loopback. Not measured: real WAN RTT, and 0-RTT latency savings (tested for correctness only).
 
 ---
 
@@ -404,6 +483,14 @@ configured and not public it answers `401`; it is never open by accident. Series
 | `reactor_store_encrypted_objects` | `key_id` (configured ids, ≤ 63; `plaintext`) | §7 |
 | `reactor_store_backups_total` | `result` | backup |
 | `reactor_cluster_peers`, `_peers_healthy`, `_leases_active`, `_{pulls,pull_bytes,drops,repairs,remote_reads,remote_read_bytes,leases_granted,…}_total` | — | §4 |
+| `reactor_cluster_peer_requests_total` | `transport` (`quic` / `https` / `http`), `method`, `result` (`ok` / `http_error` / `error`) | peer client |
+| `reactor_cluster_peer_request_duration_seconds`, `reactor_cluster_peer_response_bytes_total` | `transport` | peer client |
+| `reactor_cluster_peer_fallbacks_total` | — | QUIC → HTTPS fallback |
+| `reactor_quic_handshake_failures_total` | `side` (`client` / `server`) | QUIC |
+| `reactor_quic_0rtt_total` | `result` (`accepted` / `rejected`) | QUIC client |
+| `reactor_quic_early_requests_total` | `class` (`safe` / `unsafe`) | QUIC listener (0-RTT) |
+| `reactor_quic_server_requests_total`, `reactor_quic_server_response_bytes_total` | `method`, `status` | QUIC listener |
+| `reactor_quic_connections` | `side` | open QUIC connections |
 
 Event series (HTTP, codec, fsync, batches, in-flight) are recorded on the hot path. State series are read at
 scrape time from the same counters as `/store/stats`, `/evolution/status` and `/cluster/status`, so the two
