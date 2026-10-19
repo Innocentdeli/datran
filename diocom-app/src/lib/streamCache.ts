@@ -5,6 +5,7 @@ import { decompressPayload } from '@/lib/reactorWorker';
 import { ByteLruCache, CacheSource } from '@/lib/predict/byteCache';
 import { parseReactorStoragePath } from '@/lib/storage/reactorStoreCore';
 import { readStoreFile } from '@/lib/storage/reactorStore';
+import { observeReactorCall } from '@/lib/observability/metrics';
 
 /**
  * Shared decompression cache for /api/stream and the prefetcher (NETWORK_SPEC §5).
@@ -104,7 +105,7 @@ export function decodeStoredFile(record: Pick<FileRecord, 'share_id' | 'storage_
     const p = (async (): Promise<DecodedFile> => {
         const storeId = parseReactorStoragePath(record.storage_path);
         if (storeId) {
-            const data = await readStoreFile(storeId, streamCacheMaxBytes());
+            const data = await observeReactorCall('store_read', () => readStoreFile(storeId, streamCacheMaxBytes()));
             if (!data) throw new StoredContentMissingError('file is not held by the reactor store');
             return { data, engine: 'reactor_store' };
         }

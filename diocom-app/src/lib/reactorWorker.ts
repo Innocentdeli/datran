@@ -1,6 +1,12 @@
 import { DiocomReactor, DictionaryUnavailableError } from '../../../src/core/DiocomReactor';
 
+import { createModuleLogger } from './observability/logger';
+import { observeReactorCall } from './observability/metrics';
+import { traceHeaders } from './observability/tracing';
+
 export { DictionaryUnavailableError };
+
+const log = createModuleLogger('reactor');
 
 /**
  * Reactor client (formerly a worker_threads entry point).
@@ -13,6 +19,8 @@ export { DictionaryUnavailableError };
  *  - REACTOR_URL      (default http://127.0.0.1:${REACTOR_PORT || 3005})
  *  - REACTOR_TOKEN    optional; sent as `x-reactor-token`
  *  - REACTOR_TIMEOUT_MS (default 30000)
+ * Calls are timed (diocom_reactor_request_duration_seconds / diocom_reactor_errors_total) and carry the W3C
+ * traceparent of the active span (reactorHeaders()).
  */
 
 export function getReactorUrl(): string {
@@ -24,7 +32,7 @@ export function getReactorUrl(): string {
 export function reactorHeaders(extra: Record<string, string> = {}): Record<string, string> {
     const h: Record<string, string> = { 'Content-Type': 'application/octet-stream', ...extra };
     if (process.env.REACTOR_TOKEN) h['x-reactor-token'] = process.env.REACTOR_TOKEN;
-    return h;
+    return traceHeaders(h);
 }
 
 export function reactorTimeoutMs(): number {
@@ -33,14 +41,16 @@ export function reactorTimeoutMs(): number {
 }
 
 async function callReactor(op: 'compress' | 'decompress', data: Buffer, extraHeaders: Record<string, string> = {}): Promise<Response> {
-    const res = await fetch(`${getReactorUrl()}/${op}`, {
-        method: 'POST',
-        headers: reactorHeaders(extraHeaders),
-        body: new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength),
-        signal: AbortSignal.timeout(reactorTimeoutMs()),
+    return observeReactorCall(op, async () => {
+        const res = await fetch(`${getReactorUrl()}/${op}`, {
+            method: 'POST',
+            headers: reactorHeaders(extraHeaders),
+            body: new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength),
+            signal: AbortSignal.timeout(reactorTimeoutMs()),
+        });
+        if (!res.ok) throw new Error(`Reactor /${op} returned ${res.status}`);
+        return res;
     });
-    if (!res.ok) throw new Error(`Reactor /${op} returned ${res.status}`);
-    return res;
 }
 
 export interface CompressOptions {
@@ -98,7 +108,7 @@ export async function compressPayload(input: Buffer, options: CompressOptions = 
             reactorRecipe: cleanRecipe(res.headers.get('x-reactor-recipe')),
         };
     } catch (e) {
-        console.log(`[REACTOR] Rust reactor unavailable (${e instanceof Error ? e.message : e}); using TypeScript reactor.`);
+        log.warn({ err: e, op: 'compress' }, 'Rust reactor unavailable; using TypeScript reactor');
         return { data: DiocomReactor.compress(input), engine: 'typescript' };
     }
 }
@@ -112,7 +122,7 @@ export async function decompressPayload(input: Buffer): Promise<{ data: Buffer; 
         const res = await callReactor('decompress', input);
         return { data: Buffer.from(await res.arrayBuffer()), engine: 'rust_core' };
     } catch (e) {
-        console.log(`[REACTOR] Rust reactor unavailable (${e instanceof Error ? e.message : e}); using TypeScript reactor.`);
+        log.warn({ err: e, op: 'decompress' }, 'Rust reactor unavailable; using TypeScript reactor');
         return { data: DiocomReactor.decompress(input), engine: 'typescript_fallback' };
     }
 }

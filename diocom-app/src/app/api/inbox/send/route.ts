@@ -4,12 +4,13 @@ import { authOptions } from '../../auth/[...nextauth]/route';
 import { InboxRepository } from '@/db/inbox';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { enforceRateLimit } from '@/lib/rateLimit';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const HANDLE_RE = /^@?[A-Za-z0-9_.-]{1,32}$/;
 const SHARE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 // POST /api/inbox/send — push a file to another user by @handle
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -47,13 +48,13 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ success: true, item, recipient: { name: recipient.name, username: recipient.username } });
   } catch (e) {
-    console.error('[inbox/send POST]', e);
+    getLogger().error({ err: e }, 'inbox/send POST');
     return NextResponse.json({ error: 'Failed to send' }, { status: 500 });
   }
 }
 
 // GET /api/inbox/send — search for handles (autocomplete)
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -66,7 +67,10 @@ export async function GET(request: Request) {
     const results = await InboxRepository.searchHandles(q);
     return NextResponse.json({ success: true, results });
   } catch (e) {
-    console.error('[inbox/send GET]', e);
+    getLogger().error({ err: e }, 'inbox/send GET');
     return NextResponse.json({ error: 'Search failed' }, { status: 500 });
   }
 }
+
+export const POST = withObservability(handlePOST, '/api/inbox/send');
+export const GET = withObservability(handleGET, '/api/inbox/send');

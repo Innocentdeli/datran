@@ -2,9 +2,10 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import { InboxRepository } from '@/db/inbox';
+import { withObservability, getLogger } from '@/lib/observability';
 
 // PATCH /api/inbox/[id] — accept or decline an inbox item
-export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
+async function handlePATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -18,7 +19,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   try {
     result = await InboxRepository.updateStatus(id, session.user.id, action === 'accept' ? 'accepted' : 'declined');
   } catch (e) {
-    console.error('[inbox PATCH]', e);
+    getLogger().error({ err: e }, 'inbox PATCH');
     return NextResponse.json({ error: 'Failed to update item' }, { status: 500 });
   }
   if (result.rowCount === 0) {
@@ -27,3 +28,5 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   return NextResponse.json({ success: true, status: action === 'accept' ? 'accepted' : 'declined' });
 }
+
+export const PATCH = withObservability(handlePATCH, '/api/inbox/[id]');

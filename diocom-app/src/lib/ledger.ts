@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('ledger');
 
 /**
  * Append-only, hash-chained upload log.
@@ -40,7 +43,7 @@ async function loadState() {
         }
     } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-            console.error('[LEDGER] Could not read existing log tail:', (e as Error).message);
+            log.error({ err: e }, 'could not read existing log tail');
             throw e;
         }
     }
@@ -63,7 +66,7 @@ async function append(fileHash: string, metadata: unknown): Promise<LedgerEntry>
     // Only advance in-memory state after a successful write.
     s.nextIndex = index + 1;
     s.prevHash = createHash('sha256').update(line).digest('hex');
-    console.log(`[LEDGER] Appended entry #${index}.`);
+    log.debug({ index }, 'ledger entry appended');
     return entry;
 }
 
@@ -75,7 +78,7 @@ export const LedgerService = {
     /** Same as record() for a file whose SHA-256 (lowercase hex) was computed while streaming it. */
     recordHash: async (fileHash: string, metadata: unknown): Promise<LedgerEntry | null> => {
         if (!/^[0-9a-f]{64}$/.test(fileHash)) {
-            console.error('[LEDGER] Failed to record: invalid file hash');
+            log.error('failed to record: invalid file hash');
             return null;
         }
         const run = queue.then(() => append(fileHash, metadata));
@@ -83,7 +86,7 @@ export const LedgerService = {
         try {
             return await run;
         } catch (e) {
-            console.error('[LEDGER] Failed to record:', e instanceof Error ? e.message : e);
+            log.error({ err: e }, 'failed to record');
             return null;
         }
     },

@@ -1,5 +1,8 @@
 import db from '@/db';
 import * as crypto from 'crypto';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('credits');
 
 /**
  * SovereignCredit
@@ -31,9 +34,9 @@ export class SovereignCredit {
                 VALUES ($1, $2, $3, 'earn', $4, $5)
             `, [crypto.randomUUID(), userId, amount, reason, timestamp]);
 
-            console.log(`[$DTN] User ${userId} earned ${amount} for ${reason}`);
+            log.info({ userId, amount, reason }, 'credits awarded');
         } catch (error) {
-            console.error('[$DTN] Failed to award credits:', error);
+            log.error({ err: error }, 'failed to award credits');
         }
     }
 
@@ -65,10 +68,10 @@ export class SovereignCredit {
                 VALUES ($1, $2, $3, 'spend', $4, $5)
             `, [crypto.randomUUID(), userId, amount, reason, timestamp]);
 
-            console.log(`[$DTN] User ${userId} spent ${amount} for ${reason}`);
+            log.info({ userId, amount, reason }, 'credits spent');
             return true;
         } catch (error) {
-            console.error('[$DTN] Failed to spend credits:', error);
+            log.error({ err: error }, 'failed to spend credits');
             return false;
         }
     }

@@ -30,6 +30,11 @@ browser ──h3 / h2──▶ Caddy :443 (tcp+udp) ──http/1.1──▶ app 
 - **Body limits**: `/api/ingest*` up to `INGEST_MAX_BODY` (default `201MiB`; keep it just above
   the app's `MAX_UPLOAD_BYTES` = 200 MiB plus multipart overhead; raise both together),
   everything else `DEFAULT_MAX_BODY` (16 MiB). Over the limit: `413`.
+- **Resumable uploads (tus 1.0, `/api/uploads`)**: same body limit as ingest (one chunk per
+  request). Partial uploads are staged in `UPLOAD_STAGING_DIR` (outside the upload storage) and
+  expire after `UPLOAD_EXPIRY_HOURS` (default 24, removed by the cleanup job). Upload metadata and
+  per-upload locks live in Redis; with several app instances the staging directory must be shared
+  storage, since consecutive chunks of one upload may reach different instances.
 - **Security headers**: HSTS (`max-age=31536000`; add `includeSubDomains`/`preload` only if
   every subdomain is HTTPS), `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`
   plus `Content-Security-Policy: frame-ancestors 'self'` (the PDF viewer frames same-origin
@@ -132,6 +137,68 @@ The decoded-file stream cache stays per instance on purpose (each serve re-check
   `REQUIRE_REDIS=true` turns a missing `REDIS_URL` into a startup failure. Redis >= 6.2 required.
 - If Redis becomes unreachable, rate-limited routes answer 503 (fail closed), passkey tokens
   cannot be redeemed, and signaling/progress return errors; nothing falls back to per-process state.
+
+## Observability
+
+Code: `diocom-app/src/lib/observability` (server only).
+
+**Logs.** Structured pino logs: JSON on stdout in production, pretty-printed in development
+(`LOG_LEVEL`, `LOG_FORMAT=json|pretty`). Every line carries `service`, `instance`, and inside a
+route also `requestId`, `route` (the route template, never the raw URL), `method` and, once a
+session is resolved, `userId`. With tracing on, lines also get `trace_id`/`span_id`. One summary
+line per request (`status`, `durationMs`). `X-Request-Id` is accepted from the client/proxy when
+it is a safe token (8-128 chars of `[A-Za-z0-9._:-]`), otherwise generated, and is always sent
+back on the response. Passwords, tokens, keys, cookies, Authorization headers, URL credentials,
+URL fragments and client IPs are redacted (field paths plus a scrub of message/error text).
+
+**Metrics.** `GET /api/metrics` returns Prometheus text for **that instance only**. It needs
+`Authorization: Bearer $METRICS_TOKEN` and returns 404 when `METRICS_TOKEN` is unset. Caddy
+answers 404 for `/api/metrics` from the internet. Series:
+
+| Metric | Labels |
+| --- | --- |
+| `http_requests_total`, `http_request_duration_seconds`, `http_requests_in_flight` | `route` (template), `method`, `status` |
+| `diocom_uploads_total`, `diocom_upload_bytes_total` | `outcome`, `backend` |
+| `diocom_downloads_total`, `diocom_download_bytes_total` | `source` (`disk`, `decoded`, `memory_cache`, `reactor_store`, `external`) |
+| `diocom_reactor_request_duration_seconds`, `diocom_reactor_errors_total` | `op`, `outcome` / `reason` |
+| `diocom_stream_cache_requests_total` | `result` (`hit`/`miss`) |
+| `diocom_prefetch_warms_total` | `outcome` |
+| `diocom_rate_limit_rejections_total` | `scope`, `reason` (`limited`/`unavailable`) |
+| `diocom_auth_attempts_total` | `method` (`password`, `signup`, `passkey`, `webauthn`, `file_password`, `google`, ...), `result` |
+| `diocom_kv_errors_total` | `op` |
+| `diocom_db_query_duration_seconds` | `backend`, `op` (SQL verb), `outcome` |
+| `diocom_cleanup_runs_total`, `diocom_cleanup_duration_seconds` | `outcome` |
+| default Node/process metrics | none |
+
+Every label value is bounded: route templates are validated, methods and status codes are
+normalised, and free-form labels are capped (anything new beyond the cap becomes `other`).
+
+**Multiple instances.** Counters are per process, so with `--scale app=N` each replica exposes its
+own numbers. Prometheus discovers every replica through Docker DNS (`dns_sd_configs` on `app`,
+see `prometheus/prometheus.yml`) and scrapes each one; dashboards aggregate with `sum()`. Don't
+scrape through Caddy or a load balancer, because you'd get a different instance on every scrape.
+
+**Tracing.** If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, `src/instrumentation.ts` registers
+OpenTelemetry (`@vercel/otel`, OTLP export, Next.js route spans). If it is unset, tracing is
+off and does nothing. W3C `traceparent` is sent on calls to the reactor.
+
+**Health.** `GET /api/health/live` returns 200 while the process serves requests.
+`GET /api/health/ready` returns 200 or 503 with per-check JSON: the database must be reachable
+and fully migrated, Redis must answer if `REDIS_URL` is set, and the reactor's `/health` must
+answer if `STORAGE_BACKEND=reactor`. Each check times out after `HEALTH_TIMEOUT_MS` (default
+2000). The compose `app` healthcheck uses readiness.
+
+**Prometheus + Grafana (optional).**
+
+```sh
+# deploy/.env: METRICS_TOKEN=..., GRAFANA_ADMIN_PASSWORD=...
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile observability up -d
+ssh -L 3001:127.0.0.1:3001 your-host   # Grafana -> http://localhost:3001 (dashboard "Datran app")
+```
+
+Prometheus reads the token from a compose secret, so it never appears in its config. Grafana is
+bound to 127.0.0.1 and gets a provisioned datasource and dashboard (`grafana/`). The reactor
+panel is a TODO until the reactor exposes Prometheus metrics (it has JSON `/store/stats` today).
 
 ## Verifying HTTP/3
 

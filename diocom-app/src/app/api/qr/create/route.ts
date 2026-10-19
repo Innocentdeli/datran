@@ -4,13 +4,14 @@ import { authOptions } from '../../auth/[...nextauth]/route';
 import db from '@/db';
 import { randomUUID } from 'crypto';
 import { enforceRateLimit } from '@/lib/rateLimit';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const SHARE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_FILES = 20;
 
 // POST /api/qr/create — create a QR pairing session.
 // The (random UUID) session id is the pairing secret embedded in the QR code.
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const limited = await enforceRateLimit(request, 'qr-create', { maxRequests: 20, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -38,7 +39,9 @@ export async function POST(request: Request) {
       expiresAt: expires
     });
   } catch (e) {
-    console.error('[qr/create]', e);
+    getLogger().error({ err: e }, 'qr/create');
     return NextResponse.json({ error: 'Failed to create session' }, { status: 500 });
   }
 }
+
+export const POST = withObservability(handlePOST, '/api/qr/create');

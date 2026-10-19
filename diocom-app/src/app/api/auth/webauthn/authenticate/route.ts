@@ -3,6 +3,7 @@ import { generateAuthenticationOptions, verifyAuthenticationResponse } from '@si
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getWebAuthnConfig, storeChallenge, takeChallenge, issuePasskeyLoginToken } from '../_shared';
+import { withObservability, getLogger, recordAuth } from '@/lib/observability';
 
 const LIMIT = { maxRequests: 10, windowMs: 60_000 };
 const GENERIC_UNAVAILABLE = 'Passkey sign-in is not available for this account';
@@ -13,7 +14,7 @@ function normEmail(v: unknown): string | null {
     return e && e.length <= 320 ? e : null;
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
     const { searchParams } = new URL(request.url);
     const email = normEmail(searchParams.get('email'));
     if (!email) return NextResponse.json({ error: 'Email required' }, { status: 400 });
@@ -42,12 +43,12 @@ export async function GET(request: Request) {
         await storeChallenge('auth', user.id, options.challenge);
         return NextResponse.json(options);
     } catch (e) {
-        console.error('[webauthn/authenticate GET]', e);
+        getLogger().error({ err: e }, 'webauthn/authenticate GET');
         return NextResponse.json({ error: 'Could not start passkey authentication' }, { status: 500 });
     }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     let body: Record<string, unknown>;
     try {
         body = await request.json();
@@ -79,6 +80,7 @@ export async function POST(request: Request) {
             [rawId, user.id]
         );
         const credential = credentialRes.rows[0];
+        if (!credential) recordAuth('webauthn', 'failure');
         if (!credential) return NextResponse.json({ error: 'Passkey authentication failed' }, { status: 401 });
 
         const verification = await verifyAuthenticationResponse({
@@ -99,6 +101,7 @@ export async function POST(request: Request) {
         });
 
         if (!verification.verified) {
+            recordAuth('webauthn', 'failure');
             return NextResponse.json({ error: 'Passkey authentication failed' }, { status: 401 });
         }
 
@@ -109,9 +112,14 @@ export async function POST(request: Request) {
         ]);
 
         const loginToken = await issuePasskeyLoginToken(user.id);
+        recordAuth('webauthn', 'success');
         return NextResponse.json({ verified: true, loginToken });
     } catch (e) {
-        console.error('[webauthn/authenticate POST]', e);
+        recordAuth('webauthn', 'error');
+        getLogger().error({ err: e }, 'webauthn/authenticate POST');
         return NextResponse.json({ error: 'Passkey authentication failed' }, { status: 400 });
     }
 }
+
+export const GET = withObservability(handleGET, '/api/auth/webauthn/authenticate');
+export const POST = withObservability(handlePOST, '/api/auth/webauthn/authenticate');

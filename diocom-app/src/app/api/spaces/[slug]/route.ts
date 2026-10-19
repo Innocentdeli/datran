@@ -3,9 +3,10 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import db from '@/db';
 import { toPublicFile } from '@/db/files';
+import { withObservability } from '@/lib/observability';
 
 // GET /api/spaces/[slug] — get space details + members + files
-export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleGET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const session = await getServerSession(authOptions);
   
@@ -52,7 +53,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
 }
 
 // DELETE /api/spaces/[slug] — delete space (owner only)
-export async function DELETE(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleDELETE(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -67,3 +68,6 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ slug
 
   return NextResponse.json({ success: true });
 }
+
+export const GET = withObservability(handleGET, '/api/spaces/[slug]');
+export const DELETE = withObservability(handleDELETE, '/api/spaces/[slug]');

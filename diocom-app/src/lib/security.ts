@@ -1,5 +1,8 @@
 import { createHmac, randomBytes, timingSafeEqual, pbkdf2, scrypt, createHash } from 'crypto';
 import { promisify } from 'util';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('security');
 
 const pbkdf2Async = promisify(pbkdf2);
 const scryptAsync = promisify(scrypt) as (pw: string, salt: string | Buffer, keylen: number) => Promise<Buffer>;
@@ -20,7 +23,7 @@ export function getAppSecret(): string {
     }
     if (!secretHolder.__diocomDevSecret) {
         secretHolder.__diocomDevSecret = randomBytes(32).toString('base64url');
-        console.warn('[security] No DIOCOM_SECRET/NEXTAUTH_SECRET set; using a random per-process dev secret.');
+        log.warn('No DIOCOM_SECRET/NEXTAUTH_SECRET set; using a random per-process dev secret.');
     }
     return secretHolder.__diocomDevSecret;
 }

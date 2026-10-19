@@ -1,3 +1,7 @@
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('classifier');
+
 /**
  * Rule-based MIME-type classifier with a simple byte-diversity check on the first 1 KiB.
  * No machine learning is involved; results are informational only.
@@ -38,7 +42,7 @@ export const AIService = {
             }
         }
 
-        console.log(`[CLASSIFIER] MIME-type classification: ${JSON.stringify(result)}`);
+        log.debug({ result }, 'MIME-type classification');
         return result;
     }
 }

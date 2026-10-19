@@ -1,4 +1,7 @@
 import { createHmac } from 'crypto';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('webhook');
 
 /**
  * WebhookService
@@ -20,17 +23,17 @@ function getEndpoints(): WebhookEndpoint[] {
     const secret = process.env.WEBHOOK_SECRET;
     if (!url) return [];
     if (!secret) {
-        console.warn('[WEBHOOK] WEBHOOK_URL is set but WEBHOOK_SECRET is missing; webhooks disabled.');
+        log.warn('WEBHOOK_URL is set but WEBHOOK_SECRET is missing; webhooks disabled.');
         return [];
     }
     try {
         const parsed = new URL(url);
         if (parsed.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
-            console.warn('[WEBHOOK] WEBHOOK_URL must use https in production; webhooks disabled.');
+            log.warn('WEBHOOK_URL must use https in production; webhooks disabled.');
             return [];
         }
     } catch {
-        console.warn('[WEBHOOK] WEBHOOK_URL is invalid; webhooks disabled.');
+        log.warn('WEBHOOK_URL is invalid; webhooks disabled.');
         return [];
     }
     return [{ url, secret }];
@@ -61,9 +64,9 @@ export class WebhookService {
                     body,
                     signal: AbortSignal.timeout(5000),
                 });
-                if (!res.ok) console.error(`[WEBHOOK] Delivery for ${event} returned HTTP ${res.status}`);
+                if (!res.ok) log.error({ event, status: res.status }, 'webhook delivery failed');
             } catch (err) {
-                console.error(`[WEBHOOK] Delivery failed for ${event}:`, (err as Error).message);
+                log.error({ event, err }, 'webhook delivery failed');
             }
         }
     }

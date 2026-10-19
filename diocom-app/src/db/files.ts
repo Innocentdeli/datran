@@ -2,6 +2,9 @@ import db from './index';
 import { randomUUID } from 'crypto';
 import { DCE2_DB_MARKER } from '../lib/crypto/dce2';
 import type { Variant } from '../../../src/core/types';
+import { createModuleLogger } from '../lib/observability/logger';
+
+const log = createModuleLogger('db');
 
 export interface FileRecord {
     id: string;
@@ -124,8 +127,7 @@ export const FileRepository = {
         } catch (e) {
             if (!reactorMetaWarned) {
                 reactorMetaWarned = true;
-                console.warn('[DB] Could not store reactor metadata (run `npm run db:migrate`):',
-                    e instanceof Error ? e.message : e);
+                log.warn({ err: e }, 'could not store reactor metadata (run `npm run db:migrate`)');
             }
         }
     },

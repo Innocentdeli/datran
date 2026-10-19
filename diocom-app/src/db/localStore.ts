@@ -12,6 +12,9 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createModuleLogger } from '../lib/observability/logger';
+
+const log = createModuleLogger('db-local');
 
 export type Row = Record<string, unknown>;
 export type QueryResult = { rows: Row[]; rowCount: number };
@@ -307,10 +310,10 @@ function migrateLegacyLocalDb(target: string) {
             fs.mkdirSync(path.dirname(target), { recursive: true });
             fs.copyFileSync(legacy, target);
             fs.unlinkSync(legacy); // do not leave user data inside the upload dir
-            console.info(`[DB-Local] Migrated legacy local DB from ${legacy} to ${target}`);
+            log.info({ from: legacy, to: target }, 'migrated legacy local DB');
         }
     } catch (err) {
-        console.warn('[DB-Local] Legacy local DB migration skipped:', (err as Error).message);
+        log.warn({ err }, 'legacy local DB migration skipped');
     }
 }
 
@@ -333,7 +336,7 @@ export class LocalPersistentStore {
                 for (const t of TABLE_NAMES) if (Array.isArray(parsed[t])) fresh[t] = parsed[t];
             }
         } catch (err) {
-            console.warn('[DB-Local] Starting with fresh local state:', (err as Error).message);
+            log.warn({ err }, 'starting with fresh local state');
         }
         this.tables = fresh;
     }
@@ -351,7 +354,7 @@ export class LocalPersistentStore {
             fs.writeFileSync(tmp, serialized, 'utf8');
             fs.renameSync(tmp, this.dbFilePath);
         } catch (err) {
-            console.error('[DB-Local] Failed to persist local DB:', (err as Error).message);
+            log.error({ err }, 'failed to persist local DB');
         }
     }
 

@@ -1,6 +1,10 @@
 import { Pool, type PoolClient } from 'pg';
 import { LocalPersistentStore, resolveLocalDbPath, type QueryResult } from './localStore';
 import { runMigrations, migrationStatus } from './migrate';
+import { createModuleLogger } from '../lib/observability/logger';
+import { recordDbQuery } from '../lib/observability/metrics';
+
+const log = createModuleLogger('db');
 
 type LocalClient = { query: (text: string, params?: unknown[]) => Promise<QueryResult>; release: () => void };
 type Backend = 'postgres' | 'local';
@@ -28,6 +32,7 @@ class HybridDatabasePool {
     private localStore: LocalPersistentStore | null = null;
     private backendPromise: Promise<Backend> | null = null;
     private readonly connectionString = process.env.DATABASE_URL;
+    private migrationCache: { at: number; pending: number; errors: number } | null = null;
 
     constructor() {
         if (this.connectionString) {
@@ -40,7 +45,7 @@ class HybridDatabasePool {
             });
             // Prevent idle-client errors from crashing the process
             this.pgPool.on('error', (err) => {
-                console.error('[DB] PostgreSQL idle client error:', err.message);
+                log.error({ err }, 'PostgreSQL idle client error');
             });
         }
     }
@@ -63,19 +68,19 @@ class HybridDatabasePool {
             const msg = `${s.pending.length} pending database migration(s) (${s.pending.map((p) => p.filename).join(', ')}). ` +
                 'Run `npm run db:migrate` (or set DB_AUTO_MIGRATE=true).';
             if (isProduction()) throw new DatabaseUnavailableError(msg);
-            console.warn(`[DB] WARNING: ${msg}`);
+            log.warn(msg);
         }
     }
 
     private async selectBackend(): Promise<Backend> {
         if (isProduction() && process.env.DB_ALLOW_LOCAL_FALLBACK) {
-            console.error('[DB] DB_ALLOW_LOCAL_FALLBACK is no longer supported and is ignored: production always requires PostgreSQL.');
+            log.error('DB_ALLOW_LOCAL_FALLBACK is no longer supported and is ignored: production always requires PostgreSQL.');
         }
         if (!this.pgPool) {
             if (isProduction()) {
                 throw new DatabaseUnavailableError('DATABASE_URL is not set. PostgreSQL is required in production (the JSON store is dev-only).');
             }
-            console.info(`[DB] Active backend: LOCAL JSON store (${resolveLocalDbPath()}) — DATABASE_URL not set. Development only.`);
+            log.info({ backend: 'local', path: resolveLocalDbPath() }, 'Active backend: LOCAL JSON store (DATABASE_URL not set). Development only.');
             return 'local';
         }
         try {
@@ -84,23 +89,23 @@ class HybridDatabasePool {
             if (isProduction()) {
                 throw new DatabaseUnavailableError(`PostgreSQL is unreachable: ${(err as Error).message}`);
             }
-            console.error(
-                `[DB] PostgreSQL unreachable (${(err as Error).message}). ` +
-                `Active backend: LOCAL JSON store (${resolveLocalDbPath()}). Development only.`
+            log.error(
+                { err, backend: 'local', path: resolveLocalDbPath() },
+                'PostgreSQL unreachable. Active backend: LOCAL JSON store. Development only.'
             );
             await this.pgPool.end().catch(() => { });
             this.pgPool = null;
             return 'local';
         }
         await this.prepareSchema();
-        console.info('[DB] Active backend: PostgreSQL.');
+        log.info({ backend: 'postgres' }, 'Active backend: PostgreSQL.');
         return 'postgres';
     }
 
     resolveBackend(): Promise<Backend> {
         if (!this.backendPromise) {
             this.backendPromise = this.selectBackend().catch((err) => {
-                console.error('[DB] FATAL:', (err as Error).message);
+                log.fatal({ err }, 'database unavailable');
                 // Allow a retry on the next request rather than caching the failure forever
                 this.backendPromise = null;
                 throw err instanceof DatabaseUnavailableError ? err : new DatabaseUnavailableError((err as Error).message);
@@ -111,12 +116,39 @@ class HybridDatabasePool {
 
     public async query(text: string, params?: unknown[]): Promise<QueryResult> {
         const backend = await this.resolveBackend();
-        if (backend === 'postgres' && this.pgPool) {
-            // Errors (constraint violations, syntax, transient network) propagate to the caller
-            const r = await this.pgPool.query(text, params);
-            return { rows: r.rows, rowCount: r.rowCount ?? 0 };
+        // Duration per SQL operation (diocom_db_query_duration_seconds); the SQL text itself is never a label.
+        const t0 = performance.now();
+        let ok = false;
+        try {
+            let result: QueryResult;
+            if (backend === 'postgres' && this.pgPool) {
+                // Errors (constraint violations, syntax, transient network) propagate to the caller
+                const r = await this.pgPool.query(text, params);
+                result = { rows: r.rows, rowCount: r.rowCount ?? 0 };
+            } else {
+                result = await this.getLocalStore().query(text, params);
+            }
+            ok = true;
+            return result;
+        } finally {
+            recordDbQuery(backend, text, (performance.now() - t0) / 1000, ok);
         }
-        return this.getLocalStore().query(text, params);
+    }
+
+    /**
+     * Readiness probe (GET /api/health/ready): resolves the backend, runs SELECT 1 on PostgreSQL every call and checks
+     * the migration state (cached for 30 s, it opens its own connection). The dev JSON store reports as migrated.
+     */
+    public async checkHealth(): Promise<{ backend: Backend; pendingMigrations: number; migrationErrors: number }> {
+        const backend = await this.resolveBackend();
+        if (backend !== 'postgres' || !this.pgPool) return { backend, pendingMigrations: 0, migrationErrors: 0 };
+        await this.pgPool.query('SELECT 1');
+        const now = Date.now();
+        if (!this.migrationCache || now - this.migrationCache.at > 30_000) {
+            const s = await migrationStatus({ connectionString: this.connectionString });
+            this.migrationCache = { at: now, pending: s.pending.length, errors: s.errors.length };
+        }
+        return { backend, pendingMigrations: this.migrationCache.pending, migrationErrors: this.migrationCache.errors };
     }
 
     public async connect(): Promise<PoolClient | LocalClient> {
@@ -145,6 +177,11 @@ const pool = global.diocomHybridPool;
  */
 export async function ensureDatabaseReady(): Promise<'postgres' | 'local'> {
     return (pool as unknown as HybridDatabasePool).resolveBackend();
+}
+
+/** Database part of the readiness check (src/lib/observability/readiness.ts). */
+export function checkDatabaseHealth() {
+    return (pool as unknown as HybridDatabasePool).checkHealth();
 }
 
 export default pool as Pool;

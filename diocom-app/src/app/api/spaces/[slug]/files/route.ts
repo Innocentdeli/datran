@@ -3,9 +3,10 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '../../../auth/[...nextauth]/route';
 import db from '@/db';
 import { toPublicFile } from '@/db/files';
+import { withObservability } from '@/lib/observability';
 
 // GET /api/spaces/[slug]/files — list files in a space (private spaces: members only)
-export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleGET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const spaceRes = await db.query('SELECT * FROM spaces WHERE slug = $1', [slug]);
   const space = spaceRes.rows[0];
@@ -41,7 +42,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
 }
 
 // POST /api/spaces/[slug]/files — add one of the caller's own files to a space
-export async function POST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handlePOST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -84,7 +85,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ slu
 }
 
 // DELETE /api/spaces/[slug]/files — remove a file
-export async function DELETE(request: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleDELETE(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -105,3 +106,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ s
   await db.query('DELETE FROM space_files WHERE space_id = $1 AND file_id = $2 AND uploaded_by = $3', [space.id, shareId, session.user.id]);
   return NextResponse.json({ success: true });
 }
+
+export const GET = withObservability(handleGET, '/api/spaces/[slug]/files');
+export const POST = withObservability(handlePOST, '/api/spaces/[slug]/files');
+export const DELETE = withObservability(handleDELETE, '/api/spaces/[slug]/files');

@@ -8,6 +8,7 @@ import { AuditLogger } from "@/lib/AuditLogger";
 import { getAppSecret, getClientIp, hashPassword, verifyPassword, needsRehash } from "@/lib/security";
 import { consumeRateLimit } from "@/lib/rateLimit";
 import { consumePasskeyLoginToken } from "../webauthn/_shared";
+import { getLogger, recordAuth, setRequestUser, withObservability } from "@/lib/observability";
 
 const SIGNIN_LIMIT = { maxRequests: 10, windowMs: 5 * 60 * 1000 };
 const SIGNUP_LIMIT = { maxRequests: 5, windowMs: 60 * 60 * 1000 };
@@ -66,6 +67,79 @@ const PostgresAdapter = {
     },
 };
 
+// Credentials / passkey / sign-up authorization (wrapped by authorize() below for metrics).
+type AuthorizeCredentials = Record<"email" | "password" | "isSignUp" | "passkeyToken", string> | undefined;
+async function authorizeCredentials(credentials: AuthorizeCredentials, req: unknown) {
+    const ip = ipFromAuthorizeReq(req);
+    if (!(await consumeRateLimit(`signin:ip:${ip}`, SIGNIN_LIMIT))) {
+        throw new Error('Too many attempts. Please try again later.');
+    }
+
+    // Passkey login: only a server-issued, single-use token bound to a user is accepted
+    if (credentials?.passkeyToken) {
+        const userId = await consumePasskeyLoginToken(credentials.passkeyToken);
+        if (!userId) throw new Error('Passkey session expired. Please try again.');
+        const user = await PostgresAdapter.getUser(userId);
+        if (!user) throw new Error('Passkey session expired. Please try again.');
+        return { id: user.id, name: user.name, email: user.email, image: user.image, role: user.role };
+    }
+
+    const email = typeof credentials?.email === 'string' ? credentials.email.trim() : '';
+    if (!email || !EMAIL_RE.test(email)) return null;
+    if (!(await consumeRateLimit(`signin:email:${email.toLowerCase()}`, SIGNIN_LIMIT))) {
+        throw new Error('Too many attempts. Please try again later.');
+    }
+
+    const user = await PostgresAdapter.getUserByEmail(email);
+
+    if (credentials?.isSignUp === 'true') {
+        if (!(await consumeRateLimit(`signup:ip:${ip}`, SIGNUP_LIMIT))) {
+            throw new Error('Too many attempts. Please try again later.');
+        }
+        if (!credentials.password || credentials.password.length < MIN_PASSWORD_LENGTH) {
+            throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+        }
+        if (user) throw new Error('User already exists');
+        const newUser = await PostgresAdapter.createUser({ email }, 'credentials', credentials.password);
+
+        AuditLogger.record({
+            userId: newUser.id,
+            action: 'USER_SIGNUP',
+            resource: 'AUTH',
+            details: `Created new account with email ${email}`
+        });
+
+        return { ...newUser, role: 'user' };
+    }
+
+    if (!credentials?.password || !user || !user.password_hash) {
+        // Burn equivalent time so responses don't reveal whether the account exists
+        await verifyPassword(credentials?.password || '', await getDummyHash());
+        throw new Error('Invalid email or password');
+    }
+
+    const isValid = await verifyPassword(credentials.password, user.password_hash);
+    if (!isValid) throw new Error('Invalid email or password');
+
+    // Transparently upgrade legacy (1000-iteration PBKDF2) hashes
+    if (needsRehash(user.password_hash)) {
+        try {
+            const upgraded = await hashPassword(credentials.password);
+            await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [upgraded, user.id]);
+        } catch (e) {
+            getLogger().error({ err: e }, 'password rehash failed');
+        }
+    }
+
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        image: user.image,
+        role: user.role
+    };
+}
+
 export const authOptions: NextAuthOptions = {
     providers: [
         GoogleProvider({
@@ -86,74 +160,17 @@ export const authOptions: NextAuthOptions = {
                 passkeyToken: { label: "Passkey", type: "text" }
             },
             async authorize(credentials, req) {
-                const ip = ipFromAuthorizeReq(req);
-                if (!(await consumeRateLimit(`signin:ip:${ip}`, SIGNIN_LIMIT))) {
-                    throw new Error('Too many attempts. Please try again later.');
+                // diocom_auth_attempts_total{method=password|passkey|signup, result}
+                const method = credentials?.passkeyToken ? 'passkey' : credentials?.isSignUp === 'true' ? 'signup' : 'password';
+                try {
+                    const user = await authorizeCredentials(credentials, req);
+                    recordAuth(method, user ? 'success' : 'failure');
+                    if (user) setRequestUser(user.id);
+                    return user;
+                } catch (e) {
+                    recordAuth(method, e instanceof Error && e.message.startsWith('Too many attempts') ? 'rate_limited' : 'failure');
+                    throw e;
                 }
-
-                // Passkey login: only a server-issued, single-use token bound to a user is accepted
-                if (credentials?.passkeyToken) {
-                    const userId = await consumePasskeyLoginToken(credentials.passkeyToken);
-                    if (!userId) throw new Error('Passkey session expired. Please try again.');
-                    const user = await PostgresAdapter.getUser(userId);
-                    if (!user) throw new Error('Passkey session expired. Please try again.');
-                    return { id: user.id, name: user.name, email: user.email, image: user.image, role: user.role };
-                }
-
-                const email = typeof credentials?.email === 'string' ? credentials.email.trim() : '';
-                if (!email || !EMAIL_RE.test(email)) return null;
-                if (!(await consumeRateLimit(`signin:email:${email.toLowerCase()}`, SIGNIN_LIMIT))) {
-                    throw new Error('Too many attempts. Please try again later.');
-                }
-
-                const user = await PostgresAdapter.getUserByEmail(email);
-
-                if (credentials?.isSignUp === 'true') {
-                    if (!(await consumeRateLimit(`signup:ip:${ip}`, SIGNUP_LIMIT))) {
-                        throw new Error('Too many attempts. Please try again later.');
-                    }
-                    if (!credentials.password || credentials.password.length < MIN_PASSWORD_LENGTH) {
-                        throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
-                    }
-                    if (user) throw new Error('User already exists');
-                    const newUser = await PostgresAdapter.createUser({ email }, 'credentials', credentials.password);
-
-                    AuditLogger.record({
-                        userId: newUser.id,
-                        action: 'USER_SIGNUP',
-                        resource: 'AUTH',
-                        details: `Created new account with email ${email}`
-                    });
-
-                    return { ...newUser, role: 'user' };
-                }
-
-                if (!credentials?.password || !user || !user.password_hash) {
-                    // Burn equivalent time so responses don't reveal whether the account exists
-                    await verifyPassword(credentials?.password || '', await getDummyHash());
-                    throw new Error('Invalid email or password');
-                }
-
-                const isValid = await verifyPassword(credentials.password, user.password_hash);
-                if (!isValid) throw new Error('Invalid email or password');
-
-                // Transparently upgrade legacy (1000-iteration PBKDF2) hashes
-                if (needsRehash(user.password_hash)) {
-                    try {
-                        const upgraded = await hashPassword(credentials.password);
-                        await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [upgraded, user.id]);
-                    } catch (e) {
-                        console.error('[auth] Password rehash failed:', e);
-                    }
-                }
-
-                return {
-                    id: user.id,
-                    name: user.name,
-                    email: user.email,
-                    image: user.image,
-                    role: user.role
-                };
             }
         })
     ],
@@ -167,6 +184,7 @@ export const authOptions: NextAuthOptions = {
 
             // For social providers, auto-link or create
             if (provider !== 'credentials') {
+                recordAuth(provider === 'google' || provider === 'facebook' ? provider : 'oauth', 'success');
                 const existingUser = await PostgresAdapter.getUserByEmail(user.email);
                 if (!existingUser) {
                     const newUser = await PostgresAdapter.createUser({ email: user.email, name: user.name, image: user.image }, provider);
@@ -207,6 +225,8 @@ export const authOptions: NextAuthOptions = {
             return token;
         },
         async session({ session, token }) {
+            // Every getServerSession() inside a withObservability() route binds userId to the request logger.
+            setRequestUser(token.id);
             if (session.user) {
                 session.user.id = token.id ?? '';
                 session.user.role = token.role ?? 'user';
@@ -220,5 +240,5 @@ export const authOptions: NextAuthOptions = {
     secret: getAppSecret(),
 };
 
-const handler = NextAuth(authOptions);
+const handler = withObservability(NextAuth(authOptions), '/api/auth/[...nextauth]');
 export { handler as GET, handler as POST };

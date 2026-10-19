@@ -5,6 +5,7 @@ import { authOptions } from '../../[...nextauth]/route';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getWebAuthnConfig, storeChallenge, takeChallenge } from '../_shared';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const LIMIT = { maxRequests: 10, windowMs: 60_000 };
 
@@ -18,7 +19,7 @@ async function getSessionUser() {
     return userRes.rows[0] || null;
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
     try {
         const user = await getSessionUser();
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -46,12 +47,12 @@ export async function GET(request: Request) {
         await storeChallenge('reg', user.id, options.challenge);
         return NextResponse.json(options);
     } catch (e) {
-        console.error('[webauthn/register GET]', e);
+        getLogger().error({ err: e }, 'webauthn/register GET');
         return NextResponse.json({ error: 'Could not start passkey registration' }, { status: 500 });
     }
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     try {
         const user = await getSessionUser();
         if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -96,7 +97,10 @@ export async function POST(request: Request) {
         }
         return NextResponse.json({ verified: false }, { status: 400 });
     } catch (e) {
-        console.error('[webauthn/register POST]', e);
+        getLogger().error({ err: e }, 'webauthn/register POST');
         return NextResponse.json({ error: 'Passkey registration failed' }, { status: 400 });
     }
 }
+
+export const GET = withObservability(handleGET, '/api/auth/webauthn/register');
+export const POST = withObservability(handlePOST, '/api/auth/webauthn/register');

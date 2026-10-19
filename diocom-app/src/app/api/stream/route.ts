@@ -10,6 +10,11 @@ import { recordStreamAccess } from '@/lib/prefetcher';
 import { getStoreFile, ReactorStoreUnavailableError } from '@/lib/storage/reactorStore';
 import { parseReactorStoragePath, forwardableRange, mapReactorResponse, isCountedAccess } from '@/lib/storage/reactorStoreCore';
 import type { CacheOutcome } from '@/lib/predict';
+import { createModuleLogger } from '@/lib/observability/logger';
+import { observeReactorCall, recordDownload, recordStreamCache } from '@/lib/observability/metrics';
+import { withObservability } from '@/lib/observability/withObservability';
+
+const log = createModuleLogger('stream');
 
 // The decompression cache lives in src/lib/streamCache.ts (shared with the prefetcher, NETWORK_SPEC §5).
 
@@ -86,7 +91,9 @@ function unsatisfiable(size: number, headers: Record<string, string>) {
     });
 }
 
-export async function GET(request: Request) {
+export const GET = withObservability(handleGET, '/api/stream');
+
+async function handleGET(request: Request) {
     const t0 = performance.now();
     const { searchParams } = new URL(request.url);
     const fileId = searchParams.get('file');
@@ -137,6 +144,7 @@ export async function GET(request: Request) {
         if (r.kind === 'unsatisfiable') return unsatisfiable(size, headers);
         await countDownload(r);
         noteAccess(r, outcome);
+        recordDownload({ source: outcome === 'hit' ? 'memory_cache' : 'decoded', bytes: r.kind === 'range' ? r.end - r.start + 1 : size, counted: isAccess(r) });
 
         if (r.kind === 'range') {
             const chunk = data.subarray(r.start, r.end + 1);
@@ -162,14 +170,19 @@ export async function GET(request: Request) {
     const storeId = parseReactorStoragePath(fileRecord.storage_path);
     if (storeId) {
         const cached = getStreamCache().get(fileRecord.share_id, Date.now());
+        recordStreamCache(cached ? 'hit' : 'miss');
         if (cached) return serveDecoded(cached.value, `${cached.engine}_cached`, 'hit');
 
         let upstream: Response;
         try {
-            upstream = await getStoreFile(storeId, { range: forwardableRange(rangeHeader), signal: request.signal });
+            upstream = await observeReactorCall(
+                'store_get',
+                () => getStoreFile(storeId, { range: forwardableRange(rangeHeader), signal: request.signal }),
+                (r) => r.status < 500,
+            );
         } catch (err) {
             if (!(err instanceof ReactorStoreUnavailableError)) throw err;
-            console.error(`[STREAM] ${fileRecord.share_id}: ${err.message}`);
+            log.error({ err, fileId: fileRecord.share_id }, 'reactor store unavailable');
             return new NextResponse('Storage temporarily unavailable', {
                 status: 503,
                 headers: { 'Accept-Ranges': 'bytes', 'Retry-After': '30', 'Cache-Control': 'no-store' },
@@ -180,11 +193,11 @@ export async function GET(request: Request) {
             await upstream.body?.cancel().catch(() => { });
         }
         if (mapped.kind === 'missing') {
-            console.error(`[STREAM] ${fileRecord.share_id}: reactor store does not hold ${storeId}`);
+            log.error({ fileId: fileRecord.share_id, storeId }, 'reactor store does not hold the file');
             return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
         }
         if (mapped.kind === 'error') {
-            console.error(`[STREAM] ${fileRecord.share_id}: reactor store GET returned ${mapped.upstreamStatus}`);
+            log.error({ fileId: fileRecord.share_id, upstreamStatus: mapped.upstreamStatus }, 'reactor store GET failed');
             return new NextResponse('Storage temporarily unavailable', {
                 status: mapped.upstreamStatus === 503 ? 503 : 502,
                 headers: { 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store' },
@@ -192,10 +205,12 @@ export async function GET(request: Request) {
         }
         if (mapped.status === 416) return new NextResponse(null, { status: 416, headers: mapped.headers });
 
-        if (isCountedAccess(mapped.status, upstream.headers.get('content-range'))) {
+        const counted = isCountedAccess(mapped.status, upstream.headers.get('content-range'));
+        if (counted) {
             await FileRepository.incrementDownloads(fileRecord.share_id);
             recordStreamAccess({ request, fileId: fileRecord.share_id, ts: Date.now(), outcome: 'miss', ttfbMs: performance.now() - t0 });
         }
+        recordDownload({ source: 'reactor_store', bytes: Number(upstream.headers.get('content-length')) || 0, counted });
         return new NextResponse(upstream.body, { status: mapped.status, headers: mapped.headers });
     }
 
@@ -204,12 +219,13 @@ export async function GET(request: Request) {
         const r = parseRange(rangeHeader, Number(fileRecord.file_size) || 0);
         await countDownload(r);
         noteAccess(r, null);
+        recordDownload({ source: 'external', counted: isAccess(r) });
         return NextResponse.redirect(fileRecord.storage_path, { headers: { 'Accept-Ranges': 'bytes' } });
     }
 
     const filePath = resolveStoredPath(fileRecord.storage_path);
     if (!filePath) {
-        console.error(`[STREAM] Stored path for ${fileRecord.share_id} is outside the storage root`);
+        log.error({ fileId: fileRecord.share_id }, 'stored path is outside the storage root');
         return new NextResponse('File content missing', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
     }
 
@@ -225,6 +241,7 @@ export async function GET(request: Request) {
         let engine: string;
         const cached = getStreamCache().get(fileRecord.share_id, Date.now());
         const outcome: CacheOutcome = cached ? 'hit' : 'miss';
+        recordStreamCache(cached ? 'hit' : 'miss');
         if (cached) {
             decompressed = cached.value;
             engine = `${cached.engine}_cached`;
@@ -241,14 +258,14 @@ export async function GET(request: Request) {
                 if (err instanceof DictionaryUnavailableError || (err instanceof Error && err.name === 'DictionaryUnavailableError')) {
                     // Rust reactor is down (or lacks it too) and the dictionary isn't in REACTOR_STATE_DIR/dicts:
                     // refuse rather than serve garbage. Recoverable once the reactor or the dictionary is back.
-                    console.error(`[STREAM] Cannot decode ${fileRecord.share_id}: ${err.message}. ` +
-                        'Start the Rust reactor or make its dictionary available under $REACTOR_STATE_DIR/dicts.');
+                    log.error({ err, fileId: fileRecord.share_id },
+                        'cannot decode: start the Rust reactor or make its dictionary available under $REACTOR_STATE_DIR/dicts');
                     return new NextResponse('Decoder temporarily unavailable', {
                         status: 503,
                         headers: { 'Accept-Ranges': 'bytes', 'Retry-After': '30', 'Cache-Control': 'no-store' },
                     });
                 }
-                console.error('[STREAM] Decompression failed:', err instanceof Error ? err.message : err);
+                log.error({ err, fileId: fileRecord.share_id }, 'decompression failed');
                 return new NextResponse('Unable to decode file', { status: 500, headers: { 'Accept-Ranges': 'bytes' } });
             }
         }
@@ -262,6 +279,7 @@ export async function GET(request: Request) {
     if (r.kind === 'unsatisfiable') return unsatisfiable(size, headers);
     await countDownload(r);
     noteAccess(r, 'disk');
+    recordDownload({ source: 'disk', bytes: r.kind === 'range' ? r.end - r.start + 1 : size, counted: isAccess(r) });
 
     if (r.kind === 'range') {
         const nodeStream = fs.createReadStream(filePath, { start: r.start, end: r.end });

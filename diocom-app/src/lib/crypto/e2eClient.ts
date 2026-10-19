@@ -384,7 +384,8 @@ export interface EncryptedUploadOptions {
 export interface UploadResult {
     status: number;
     data: unknown;
-    transport: 'stream' | 'blob';
+    /** 'tus': resumable upload via /api/uploads (src/lib/upload/resumableClient.ts). */
+    transport: 'stream' | 'blob' | 'tus';
 }
 
 let requestStreamsWork: boolean | null = null;

@@ -15,6 +15,11 @@ import {
 import { parseReactorStoragePath } from '@/lib/storage/reactorStoreCore';
 import { touchStoreFile } from '@/lib/storage/reactorStore';
 import { getKV, instanceId, type KV } from '@/lib/kv';
+import { createModuleLogger } from '@/lib/observability/logger';
+import { recordPrefetchWarm } from '@/lib/observability/metrics';
+
+const log = createModuleLogger('predict');
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
  * Access prediction & prefetch runtime (NETWORK_SPEC §5).
@@ -198,7 +203,7 @@ async function startClusterSync() {
             } catch { /* malformed */ }
         });
     } catch (e) {
-        console.warn('[PREDICT] Cluster sync unavailable:', e instanceof Error ? e.message : e);
+        log.warn({ error: errMsg(e) }, 'cluster sync unavailable');
         if (g.__diocomPrefetch) g.__diocomPrefetch.clusterSync = false; // retry on next access
     }
 }
@@ -207,7 +212,7 @@ function broadcast(channel: string, payload: object) {
     const kv = clusterKV();
     if (!kv) return;
     kv.publish(channel, JSON.stringify({ o: instanceId(), ...payload }))
-        .catch((e) => console.warn('[PREDICT] broadcast failed:', e instanceof Error ? e.message : e));
+        .catch((e) => log.warn({ error: errMsg(e) }, 'broadcast failed'));
 }
 
 function warmConcurrency(): number {
@@ -235,14 +240,14 @@ export function initPrediction(): Promise<void> {
                 r.stats.rebuiltEvents = rows.length;
             } catch (e) {
                 r.stats.rebuildError = e instanceof Error ? e.message : String(e);
-                console.warn('[PREDICT] Could not rebuild model from access events:', r.stats.rebuildError);
+                log.warn({ error: r.stats.rebuildError }, 'could not rebuild model from access events');
             }
             for (const p of r.pending) model.observe(p.fileId, p.ts, p.actor);
             r.pending = [];
             r.engine.model = model;
             r.ready = true;
             r.stats.rebuildMs = Date.now() - t0;
-            console.log(`[PREDICT] Model ready: ${model.trackedFiles} files from ${r.stats.rebuiltEvents} events in ${r.stats.rebuildMs} ms.`);
+            log.info({ trackedFiles: model.trackedFiles, events: r.stats.rebuiltEvents, rebuildMs: r.stats.rebuildMs }, 'prediction model ready');
         })();
     }
     return r.init;
@@ -312,9 +317,9 @@ export function recordStreamAccess(a: StreamAccess): void {
         const ip = getClientIp(a.request);
         void resolveActor(cookieHeader, ip, ua)
             .then((actor) => onObserved(a.fileId, a.ts, actor))
-            .catch((e) => console.warn('[PREDICT] access hook failed:', e instanceof Error ? e.message : e));
+            .catch((e) => log.warn({ error: errMsg(e) }, 'access hook failed'));
     } catch (e) {
-        console.warn('[PREDICT] access hook failed:', e instanceof Error ? e.message : e);
+        log.warn({ error: errMsg(e) }, 'access hook failed');
     }
 }
 
@@ -361,6 +366,7 @@ function forgetLocal(shareId: string) {
 function skip(reason: string) {
     const s = rt().stats.warmSkipped;
     s[reason] = (s[reason] || 0) + 1;
+    recordPrefetchWarm(`skipped_${reason}`);
 }
 
 function enqueueWarm(job: WarmJob): boolean {
@@ -390,6 +396,7 @@ function pumpWarm() {
         warmOne(job)
             .catch((e) => {
                 r.stats.warmFailed++;
+                recordPrefetchWarm('failed');
                 r.stats.lastWarmError = e instanceof Error ? e.message : String(e);
             })
             .finally(() => {
@@ -430,6 +437,7 @@ async function warmOne(job: WarmJob): Promise<void> {
     if (storeId) r.stats.reactorReads++;
     if (cacheDecoded(rec.share_id, decoded, job.source, job.ttlMs)) {
         r.stats.warmed[job.source] = (r.stats.warmed[job.source] || 0) + 1;
+        recordPrefetchWarm(`warmed_${job.source}`);
         r.stats.warmedBytes += decoded.data.length;
     } else {
         skip('over_budget');
@@ -516,7 +524,7 @@ export async function runPredictionRetention(): Promise<void> {
     try {
         await pruneAccessEvents();
     } catch (e) {
-        console.warn('[PREDICT] Access event retention failed:', e instanceof Error ? e.message : e);
+        log.warn({ error: errMsg(e) }, 'access event retention failed');
     }
 }
 
@@ -591,7 +599,7 @@ async function publishStatus(now: number) {
         await kv.set(statusKey(id), JSON.stringify(snap), ttl);
         await kv.zAddCapped(STATUS_INSTANCES_KEY, id, now, now - ttl, MAX_STATUS_INSTANCES, ttl);
     } catch (e) {
-        console.warn('[PREDICT] status publish failed:', e instanceof Error ? e.message : e);
+        log.warn({ error: errMsg(e) }, 'status publish failed');
     }
 }
 

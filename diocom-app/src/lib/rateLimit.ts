@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getClientIp } from '@/lib/security';
 import { getKV } from '@/lib/kv';
+import { createModuleLogger } from './observability/logger';
+import { recordKvError, recordRateLimitRejection } from './observability/metrics';
+
+const log = createModuleLogger('rateLimit');
 
 /**
  * Sliding-window rate limiting on the shared KV (src/lib/kv): with REDIS_URL the counts are global across all
@@ -27,11 +31,15 @@ export interface RateLimitResult {
 export async function checkRateLimit(identifier: string, config: RateLimitConfig): Promise<RateLimitResult> {
     try {
         const r = await getKV().slidingWindow(`rl:${identifier}`, config.maxRequests, config.windowMs);
+        if (!r.allowed) recordRateLimitRejection(identifier, 'limited');
         return r.allowed
             ? { allowed: true, remaining: r.remaining, resetAt: r.resetAt }
             : { allowed: false, remaining: 0, resetAt: r.resetAt, retryAfter: Math.max(1, Math.ceil(r.retryAfterMs / 1000)) };
     } catch (e) {
-        console.error('[rateLimit] shared store unavailable, refusing request:', e instanceof Error ? e.message : e);
+        recordKvError('slidingWindow');
+        recordRateLimitRejection(identifier, 'unavailable');
+        // Only the scope (first key segment) is logged: the rest of the key can contain a client IP or an email.
+        log.error({ err: e, scope: identifier.split(':')[0] }, 'shared store unavailable, refusing request');
         return { allowed: false, remaining: 0, resetAt: Date.now() + 5_000, retryAfter: 5, unavailable: true };
     }
 }

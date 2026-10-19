@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /**
  * QR pairing sessions.
@@ -29,7 +30,7 @@ async function loadSession(sessionId: string) {
 }
 
 // GET /api/qr/[sessionId] — poll QR session state
-export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
+async function handleGET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const limited = await enforceRateLimit(req, 'qr-get', LIMIT);
   if (limited) return limited;
 
@@ -53,13 +54,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
 
     return NextResponse.json({ status: row.status, fileIds, expiresAt: row.expires_at });
   } catch (e) {
-    console.error('[qr GET]', e);
+    getLogger().error({ err: e }, 'qr GET');
     return NextResponse.json({ error: 'Failed to load session' }, { status: 500 });
   }
 }
 
 // PATCH /api/qr/[sessionId] — update session state (waiting -> paired -> complete)
-export async function PATCH(request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
+async function handlePATCH(request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const limited = await enforceRateLimit(request, 'qr-patch', LIMIT);
   if (limited) return limited;
 
@@ -83,7 +84,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ se
     await db.query('UPDATE qr_sessions SET status = $1 WHERE id = $2', [status, sessionId]);
     return NextResponse.json({ success: true });
   } catch (e) {
-    console.error('[qr PATCH]', e);
+    getLogger().error({ err: e }, 'qr PATCH');
     return NextResponse.json({ error: 'Failed to update session' }, { status: 500 });
   }
 }
+
+export const GET = withObservability(handleGET, '/api/qr/[sessionId]');
+export const PATCH = withObservability(handlePATCH, '/api/qr/[sessionId]');

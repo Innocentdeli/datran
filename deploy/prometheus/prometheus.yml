@@ -1,0 +1,34 @@
+# Prometheus for the Datran stack (docker compose --profile observability).
+#
+# Every app instance exposes ONLY its own metrics at GET /api/metrics (Bearer METRICS_TOKEN). With
+# `--scale app=N`, Docker's DNS returns one A record per replica for `app`, so dns_sd_configs discovers and
+# scrapes each replica separately; aggregate in queries with sum()/rate() (the dashboard does).
+# The token is mounted as a compose secret (deploy/docker-compose.yml: secrets.metrics_token).
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: diocom-app
+    metrics_path: /api/metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/metrics_token
+    dns_sd_configs:
+      - names: [app]
+        type: A
+        port: 3000          # keep in sync with APP_PORT
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # TODO(reactor): the Rust reactor does not expose Prometheus metrics yet (only JSON at /store/stats).
+  # When it does, add a job here, e.g.:
+  # - job_name: reactor
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ['reactor:3005']

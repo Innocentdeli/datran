@@ -4,6 +4,7 @@ import { enforceRateLimit } from '@/lib/rateLimit';
 import {
     getPeer, authenticatePeer, joinSwarm, touchPeer, livePeersInSwarm, sendSignal, drainSignals,
 } from '@/lib/swarmSignaling';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /**
  * DATRAN SWARM DISCOVERY (SIGNALING)
@@ -36,7 +37,7 @@ async function presentedToken(peerId: string, bodyToken: unknown): Promise<strin
 
 const bad = (message: string, status = 400) => NextResponse.json({ success: false, message }, { status });
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     const limited = await enforceRateLimit(request, 'swarm-announce', { maxRequests: 120, windowMs: 60_000 });
     if (limited) return limited;
 
@@ -57,7 +58,7 @@ export async function POST(request: Request) {
     try {
         return await handle(peerId, shareId, action, data, peerToken);
     } catch (e) {
-        console.error('[swarm/announce]', e instanceof Error ? e.message : e);
+        getLogger().error({ err: e }, 'swarm/announce');
         return bad('Signaling unavailable', 503);
     }
 }
@@ -125,3 +126,5 @@ async function handle(peerId: string, shareId: string, action: unknown, data: un
 
     return bad('Invalid action');
 }
+
+export const POST = withObservability(handlePOST, '/api/swarm/announce');

@@ -5,6 +5,7 @@ import db from '@/db';
 import { randomUUID, randomInt } from 'crypto';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { setLobbyRoleCookie } from '../_shared';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 6;
@@ -16,7 +17,7 @@ function generateCode() {
 }
 
 // POST /api/lobby/create — create a lobby
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const limited = await enforceRateLimit(request, 'lobby-create', { maxRequests: 10, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -45,7 +46,9 @@ export async function POST(request: Request) {
     setLobbyRoleCookie(res, id, 'creator');
     return res;
   } catch (e) {
-    console.error('[lobby/create]', e);
+    getLogger().error({ err: e }, 'lobby/create');
     return NextResponse.json({ error: 'Failed to create lobby' }, { status: 500 });
   }
 }
+
+export const POST = withObservability(handlePOST, '/api/lobby/create');

@@ -1,5 +1,8 @@
 import db from '@/db';
 import { randomUUID } from 'crypto';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('analytics');
 
 export interface AnalyticsEvent {
     fileId: string;
@@ -27,7 +30,7 @@ export const AnalyticsService = {
             }
 
         } catch (e) {
-            console.error('[ANALYTICS] Failed to record event:', e);
+            log.error({ err: e }, 'failed to record event');
         }
     },
 

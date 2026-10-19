@@ -38,6 +38,7 @@ target/
 # Runtime data (databases, ledgers, uploads) — never commit
 diocom-app/data/
 diocom-app/.storage/
+diocom-app/.upload-staging/
 *.db
 *.db-wal
 *.db-shm

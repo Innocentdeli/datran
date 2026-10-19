@@ -4,13 +4,14 @@ import { authOptions } from '../../auth/[...nextauth]/route';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getLobbyRole, setLobbyRoleCookie } from '../_shared';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const CODE_RE = /^[A-Z0-9]{4,12}$/;
 // Codes are short, so lookups are rate limited to prevent enumeration
 const LOOKUP_LIMIT = { maxRequests: 60, windowMs: 60_000 };
 
 // GET /api/lobby/[code] — poll lobby state
-export async function GET(req: Request, { params }: { params: Promise<{ code: string }> }) {
+async function handleGET(req: Request, { params }: { params: Promise<{ code: string }> }) {
   const limited = await enforceRateLimit(req, 'lobby-get', LOOKUP_LIMIT);
   if (limited) return limited;
 
@@ -29,13 +30,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ code: st
       expiresAt: lobby.expires_at,
     });
   } catch (e) {
-    console.error('[lobby GET]', e);
+    getLogger().error({ err: e }, 'lobby GET');
     return NextResponse.json({ error: 'Failed to load lobby' }, { status: 500 });
   }
 }
 
 // PATCH /api/lobby/[code] — join or update lobby
-export async function PATCH(request: Request, { params }: { params: Promise<{ code: string }> }) {
+async function handlePATCH(request: Request, { params }: { params: Promise<{ code: string }> }) {
   const limited = await enforceRateLimit(request, 'lobby-patch', { maxRequests: 20, windowMs: 60_000 });
   if (limited) return limited;
 
@@ -80,7 +81,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ co
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (e) {
-    console.error('[lobby PATCH]', e);
+    getLogger().error({ err: e }, 'lobby PATCH');
     return NextResponse.json({ error: 'Failed to update lobby' }, { status: 500 });
   }
 }
+
+export const GET = withObservability(handleGET, '/api/lobby/[code]');
+export const PATCH = withObservability(handlePATCH, '/api/lobby/[code]');

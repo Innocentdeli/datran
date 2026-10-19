@@ -2,8 +2,9 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../../auth/[...nextauth]/route';
 import { SovereignCredit } from '@/lib/SovereignCredit';
+import { withObservability, getLogger } from '@/lib/observability';
 
-export async function GET() {
+async function handleGET() {
     const session = await getServerSession(authOptions);
     if (!session?.user?.id) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -17,7 +18,9 @@ export async function GET() {
             currency: '$DTN'
         });
     } catch (error) {
-        console.error('[v1/user/credits]', error);
+        getLogger().error({ err: error }, 'v1/user/credits');
         return NextResponse.json({ error: 'Failed to load balance' }, { status: 500 });
     }
 }
+
+export const GET = withObservability(handleGET, '/api/v1/user/credits');

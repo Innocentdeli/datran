@@ -2,6 +2,9 @@ import { randomBytes } from 'crypto';
 import type { KV } from './types';
 import { MemoryKV } from './memory';
 import { RedisKV } from './redis';
+import { createModuleLogger } from '../observability/logger';
+
+const kvLog = createModuleLogger('kv');
 
 export type { KV, RateWindowResult, Unsubscribe, MessageHandler } from './types';
 export { MemoryKV } from './memory';
@@ -29,7 +32,7 @@ export function checkKvConfig(log = true): void {
         throw new KvConfigError('REQUIRE_REDIS=true but REDIS_URL is not set: refusing to start with per-process state.');
     }
     if (!hasRedis && process.env.NODE_ENV === 'production' && log) {
-        console.warn(
+        kvLog.warn(
             '\n' +
             '*****************************************************************************************\n' +
             '* [kv] REDIS_URL is not set: rate limits, login tokens, swarm signaling, upload progress *\n' +
@@ -47,7 +50,7 @@ export function getKV(): KV {
     g.__diocomKV = url
         ? new RedisKV(url, { prefix: process.env.KV_PREFIX ?? 'diocom:' })
         : new MemoryKV();
-    if (url) console.log(`[kv] Shared state backend: redis (${redactUrl(url)})`);
+    if (url) kvLog.info({ backend: 'redis', url: redactUrl(url) }, 'shared state backend: redis');
     return g.__diocomKV;
 }
 

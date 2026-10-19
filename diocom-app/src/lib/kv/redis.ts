@@ -1,6 +1,10 @@
 import Redis, { type RedisOptions } from 'ioredis';
 import { randomBytes } from 'crypto';
 import type { KV, MessageHandler, RateWindowResult, Unsubscribe } from './types';
+import { createModuleLogger } from '../observability/logger';
+import { recordKvError } from '../observability/metrics';
+
+const log = createModuleLogger('kv');
 
 /**
  * Redis-backed KV (REDIS_URL). Requires Redis >= 6.2 (GETDEL; Lua scripts that call TIME before writing).
@@ -93,7 +97,10 @@ export class RedisKV implements KV {
             enableAutoPipelining: true,
         };
         this.client = new Redis(url, this.baseOptions) as Scripted;
-        this.client.on('error', (e) => console.error('[kv] redis error:', e.message));
+        this.client.on('error', (e) => {
+            recordKvError('connection');
+            log.error({ err: e }, 'redis error');
+        });
         this.client.defineCommand('kvSliding', { numberOfKeys: 1, lua: SLIDING_WINDOW });
         this.client.defineCommand('kvIncrCapped', { numberOfKeys: 1, lua: INCR_CAPPED });
         this.client.defineCommand('kvZAddCapped', { numberOfKeys: 1, lua: ZADD_CAPPED });
@@ -185,7 +192,10 @@ export class RedisKV implements KV {
         if (!this.sub) {
             // Subscriber connections cannot run normal commands; no command timeout (it would kill idle SUBSCRIBE).
             this.sub = new Redis(this.url, { ...this.baseOptions, commandTimeout: undefined, enableAutoPipelining: false });
-            this.sub.on('error', (e) => console.error('[kv] redis subscriber error:', e.message));
+            this.sub.on('error', (e) => {
+                recordKvError('subscriber_connection');
+                log.error({ err: e }, 'redis subscriber error');
+            });
             this.sub.on('message', (ch: string, msg: string) => {
                 const set = this.handlers.get(ch);
                 if (!set) return;
@@ -193,7 +203,7 @@ export class RedisKV implements KV {
                     try {
                         h(msg);
                     } catch (e) {
-                        console.error('[kv] subscriber error:', e);
+                        log.error({ err: e }, 'subscriber handler error');
                     }
                 }
             });

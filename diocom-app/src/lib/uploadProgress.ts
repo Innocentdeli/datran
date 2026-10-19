@@ -1,5 +1,8 @@
 import { Transform } from 'stream';
 import { getKV, type KV, type Unsubscribe } from './kv';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('progress');
 
 /**
  * Upload progress over the shared KV, so the upload POST (/api/ingest) and the SSE subscriber (/api/progress)
@@ -81,7 +84,7 @@ export function createProgressReporter(uploadId: string, total: number | null, k
         const ev: ProgressEvent = { uploadId, phase, received, total, percent: phase === 'done' ? 100 : percent(), message, at: Date.now() };
         chain = chain
             .then(() => publishProgress(ev, kv))
-            .catch((e) => console.warn('[progress] publish failed:', e instanceof Error ? e.message : e));
+            .catch((e) => log.warn({ err: e }, 'progress publish failed'));
         return chain;
     };
 

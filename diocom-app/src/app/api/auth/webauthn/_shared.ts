@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { randomToken } from '@/lib/security';
 import { getKV } from '@/lib/kv';
+import { getLogger, recordKvError } from '@/lib/observability';
 
 /**
  * Shared WebAuthn configuration and helpers (not a route).
@@ -70,7 +71,8 @@ export async function consumePasskeyLoginToken(token: unknown): Promise<string |
     try {
         return (await getKV().getdel(tokenKey(token))) || null;
     } catch (e) {
-        console.error('[webauthn] token store unavailable:', e instanceof Error ? e.message : e);
+        recordKvError('getdel');
+        getLogger().error({ err: e }, 'webauthn token store unavailable');
         return null;
     }
 }

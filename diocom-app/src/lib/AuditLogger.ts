@@ -1,5 +1,8 @@
 import * as crypto from 'crypto';
 import db from '@/db';
+import { createModuleLogger } from './observability/logger';
+
+const auditLog = createModuleLogger('audit');
 
 /**
  * AuditLogger
@@ -43,9 +46,9 @@ export class AuditLogger {
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             `, [id, userId || null, action, resource, details || null, ipAddress || null, timestamp, previousHash, hash]);
             
-            console.log(`[AUDIT] Recorded: ${action} on ${resource} (${id})`);
+            auditLog.info({ action, resource, auditId: id }, 'audit record written');
         } catch (error) {
-            console.error('[AUDIT] Failed to record audit log:', error);
+            auditLog.error({ err: error }, 'failed to record audit log');
         }
     }
 
@@ -60,7 +63,7 @@ export class AuditLogger {
         for (const log of logs) {
             // Verify previous hash link
             if (log.previous_hash !== expectedPrevHash) {
-                console.error(`[AUDIT] Chain broken at log ${log.id}: expected prev hash ${expectedPrevHash}, got ${log.previous_hash}`);
+                auditLog.error({ auditId: log.id, expectedPrevHash, previousHash: log.previous_hash }, 'audit chain broken');
                 return false;
             }
 
@@ -69,7 +72,7 @@ export class AuditLogger {
             const hash = crypto.createHash('sha256').update(hashPayload).digest('hex');
             
             if (log.hash !== hash) {
-                console.error(`[AUDIT] Integrity violation at log ${log.id}: hash mismatch`);
+                auditLog.error({ auditId: log.id }, 'audit integrity violation: hash mismatch');
                 return false;
             }
 

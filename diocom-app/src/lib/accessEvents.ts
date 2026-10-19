@@ -1,4 +1,7 @@
 import db from '@/db';
+import { createModuleLogger } from './observability/logger';
+
+const log = createModuleLogger('predict');
 
 /**
  * Persistent access events for the prediction model (NETWORK_SPEC §5): (file_id, ts, actor).
@@ -92,7 +95,7 @@ function logError(s: WriterState, msg: string) {
     const now = Date.now();
     if (now - s.lastErrorLogAt > 60_000) {
         s.lastErrorLogAt = now;
-        console.error(`[PREDICT] access event write failed: ${msg}`);
+        log.error({ error: msg }, 'access event write failed');
     }
 }
 
@@ -178,7 +181,7 @@ export async function pruneAccessEvents(now = Date.now()): Promise<number> {
     }
     s.stats.lastPruneAt = now;
     s.stats.lastPruneDeleted = deleted;
-    if (deleted > 0) console.log(`[PREDICT] Pruned ${deleted} access events.`);
+    if (deleted > 0) log.info({ deleted }, 'pruned access events');
     return deleted;
 }
 

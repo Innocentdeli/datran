@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { isValidUploadId, lastProgress, subscribeProgress, type ProgressEvent } from '@/lib/uploadProgress';
 import type { Unsubscribe } from '@/lib/kv';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /**
  * SSE upload progress: GET /api/progress?uploadId=<id>  (alias: fileId)
@@ -16,7 +17,7 @@ export const dynamic = 'force-dynamic';
 const KEEPALIVE_MS = 10_000;
 const MAX_STREAM_MS = 30 * 60_000;
 
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const uploadId = searchParams.get('uploadId') ?? searchParams.get('fileId');
     if (!isValidUploadId(uploadId)) {
@@ -70,7 +71,7 @@ export async function GET(request: NextRequest) {
                 const last = await lastProgress(uploadId);
                 if (last) emit(last);
             } catch (e) {
-                console.error('[progress] subscribe failed:', e instanceof Error ? e.message : e);
+                getLogger().error({ err: e }, 'progress subscribe failed');
                 controller.enqueue(encoder.encode(`event: error\ndata: {"message":"progress unavailable"}\n\n`));
                 close();
                 return;
@@ -101,3 +102,5 @@ export async function GET(request: NextRequest) {
         },
     });
 }
+
+export const GET = withObservability(handleGET, '/api/progress');

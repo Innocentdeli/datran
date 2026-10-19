@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import { getReactorJson } from '@/lib/storage/reactorStore';
 import { getStorageBackend } from '@/lib/storage';
+import { withObservability, getLogger } from '@/lib/observability';
 
 const NO_STORE = { 'Cache-Control': 'no-store' };
 
@@ -28,7 +29,7 @@ async function fetchPart(path: string): Promise<Part> {
  * Admin-only proxy for the reactor object store's GET /store/stats and (when the reactor has it) GET /cluster/status
  * (NETWORK_SPEC §2/§4). 503 only when the reactor is unreachable; a missing /cluster/status is reported, not fatal.
  */
-export async function GET() {
+async function handleGET() {
     const session = await getServerSession(authOptions);
     if (!session?.user) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -40,8 +41,10 @@ export async function GET() {
     const [store, cluster] = await Promise.all([fetchPart('/store/stats'), fetchPart('/cluster/status')]);
     const backend = getStorageBackend();
     if (store.status === 'error' && cluster.status === 'error') {
-        console.warn('[admin/store] Reactor unreachable:', store.error);
+        getLogger().warn({ err: store.error }, 'admin/store Reactor unreachable');
         return NextResponse.json({ error: 'Reactor offline', backend }, { status: 503, headers: NO_STORE });
     }
     return NextResponse.json({ backend, store, cluster }, { headers: NO_STORE });
 }
+
+export const GET = withObservability(handleGET, '/api/admin/store');

@@ -6,9 +6,18 @@
  *    Scheduled on every instance; a distributed lock makes sure only one runs it at a time.
  *  - Access prediction & prefetch (NETWORK_SPEC §5): rebuilds the model from persisted events, then warms predicted
  *    files every PREFETCH_INTERVAL_MS (default 60 s; 0 disables periodic prefetch, PREDICT_ENABLED=false disables all).
+ *  - Observability (src/lib/observability): OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set (no-op
+ *    otherwise); Prometheus registry + default Node metrics are created here so /api/metrics has data from boot.
  */
 export async function register() {
     if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+    const { registerTracing } = await import('./lib/observability/tracing');
+    const { getReactorUrl } = await import('./lib/reactorWorker');
+    await registerTracing(getReactorUrl());
+    const { getMetrics, createModuleLogger, recordCleanupRun } = await import('./lib/observability');
+    getMetrics();
+    const log = createModuleLogger('instrumentation');
 
     // Database (src/db): production refuses to start without a reachable, fully migrated PostgreSQL (the JSON store
     // is dev-only); DB_AUTO_MIGRATE=true applies pending migrations here. Not during `next build`.
@@ -25,7 +34,7 @@ export async function register() {
         getKV();
     } catch (e) {
         // Thrown from register(): Next.js aborts server startup.
-        if (e instanceof KvConfigError) console.error('[kv] FATAL:', e.message);
+        if (e instanceof KvConfigError) log.fatal({ err: e }, 'shared state (kv) misconfigured');
         throw e;
     }
 
@@ -40,7 +49,15 @@ export async function register() {
         if (intervalMs !== 0) {
             const { runCleanupJob } = await import('./lib/cleanup');
             const run = () => {
-                runCleanupJob().catch((e) => console.error('[CLEANUP] Scheduled run failed:', e));
+                const t0 = performance.now();
+                const seconds = () => (performance.now() - t0) / 1000;
+                runCleanupJob().then(
+                    (acquired) => recordCleanupRun(acquired ? 'ok' : 'skipped', seconds()),
+                    (err) => {
+                        recordCleanupRun('error', seconds());
+                        log.error({ err }, 'scheduled cleanup run failed');
+                    },
+                );
             };
             g.__diocomCleanupTimer = setInterval(run, Math.max(intervalMs, 60_000));
             g.__diocomCleanupTimer.unref?.();
@@ -52,12 +69,12 @@ export async function register() {
     if (!g.__diocomPrefetchTimer && process.env.PREDICT_ENABLED !== 'false') {
         const { initPrediction, runPrefetchTick, prefetchIntervalMs } = await import('./lib/prefetcher');
         setTimeout(() => {
-            initPrediction().catch((e) => console.error('[PREDICT] Model rebuild failed:', e));
+            initPrediction().catch((err) => log.error({ err }, 'prediction model rebuild failed'));
         }, 5_000).unref?.();
         const intervalMs = prefetchIntervalMs();
         if (intervalMs > 0) {
             const tick = () => {
-                runPrefetchTick().catch((e) => console.error('[PREDICT] Prefetch tick failed:', e));
+                runPrefetchTick().catch((err) => log.error({ err }, 'prefetch tick failed'));
             };
             g.__diocomPrefetchTimer = setInterval(tick, Math.max(intervalMs, 5_000));
             g.__diocomPrefetchTimer.unref?.();

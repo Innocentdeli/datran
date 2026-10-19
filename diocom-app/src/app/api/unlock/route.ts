@@ -4,10 +4,11 @@ import { FileRepository } from '@/db/files';
 import { getClientIp, verifyPassword } from '@/lib/security';
 import { consumeRateLimit, enforceRateLimit } from '@/lib/rateLimit';
 import { ACCESS_TTL_MS, accessCookieName, createAccessToken } from '@/lib/crypto/AccessToken';
+import { withObservability, getLogger, recordAuth } from '@/lib/observability';
 
 const INVALID = () => NextResponse.json({ success: false, error: 'Invalid credentials' }, { status: 401 });
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     try {
         let body: unknown;
         try {
@@ -37,6 +38,7 @@ export async function POST(request: Request) {
         if (fileRecord.expires_at && Date.now() > Number(fileRecord.expires_at)) return INVALID();
 
         const ok = await verifyPassword(password, fileRecord.password_hash);
+        recordAuth('file_password', ok ? 'success' : 'failure');
         if (!ok) return INVALID();
 
         const now = Date.now();
@@ -54,7 +56,9 @@ export async function POST(request: Request) {
 
         return NextResponse.json({ success: true });
     } catch (e) {
-        console.error('[AUTH] Unlock error:', e instanceof Error ? e.message : e);
+        getLogger().error({ err: e }, 'AUTH Unlock error');
         return NextResponse.json({ success: false, error: 'Internal error' }, { status: 500 });
     }
 }
+
+export const POST = withObservability(handlePOST, '/api/unlock');

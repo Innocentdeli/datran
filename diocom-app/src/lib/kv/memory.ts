@@ -1,5 +1,8 @@
 import { EventEmitter } from 'events';
 import type { KV, MessageHandler, RateWindowResult, Unsubscribe } from './types';
+import { createModuleLogger } from '../observability/logger';
+
+const log = createModuleLogger('kv');
 
 /**
  * In-process KV (default when REDIS_URL is unset). Same semantics as RedisKV but only valid for ONE process:
@@ -187,7 +190,7 @@ export class MemoryKV implements KV {
             try {
                 handler(m);
             } catch (e) {
-                console.error('[kv] subscriber error:', e);
+                log.error({ err: e }, 'subscriber error');
             }
         };
         this.bus.on(channel, fn);

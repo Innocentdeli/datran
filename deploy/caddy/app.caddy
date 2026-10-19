@@ -7,14 +7,23 @@
 # MAX_UPLOAD_BYTES (multipart boundaries + form fields), e.g. MAX_UPLOAD_BYTES=209715200
 # (200 MiB) -> INGEST_MAX_BODY=201MiB. The app enforces the exact limit itself; this stops
 # oversized bodies at the edge. Bodies are streamed, never buffered (see reverse_proxy).
-@ingest path /api/ingest /api/ingest/*
+# Resumable tus uploads (/api/uploads) send at most one chunk per request (32 MiB from the web
+# client), so the same limit is ample there.
+@ingest path /api/ingest /api/ingest/* /api/uploads /api/uploads/*
 request_body @ingest {
 	max_size {$INGEST_MAX_BODY:201MiB}
 }
-@notIngest not path /api/ingest /api/ingest/*
+@notIngest not path /api/ingest /api/ingest/* /api/uploads /api/uploads/*
 request_body @notIngest {
 	max_size {$DEFAULT_MAX_BODY:16MiB}
 }
+
+# --- Internal endpoints -----------------------------------------------------------------
+# Prometheus scrapes each app instance directly on the internal network (deploy/prometheus);
+# the metrics endpoint is never served to the internet, even though it also requires a token.
+# Health endpoints stay reachable (uptime monitors); Docker's healthcheck calls the app directly.
+@metrics path /api/metrics /api/metrics/*
+respond @metrics 404
 
 # --- Security headers -------------------------------------------------------------------
 # No Content-Security-Policy beyond frame-ancestors: a script/style CSP for this Next.js app
@@ -39,7 +48,7 @@ header {
 # (e.g. gzip from `next start`) are passed through untouched.
 @compressible {
 	not header Range *
-	not path /api/stream /api/stream/* /api/thumbnail/* /api/ingest /api/ingest/* /api/progress /api/progress/*
+	not path /api/stream /api/stream/* /api/thumbnail/* /api/ingest /api/ingest/* /api/uploads /api/uploads/* /api/progress /api/progress/*
 }
 encode @compressible zstd gzip {
 	minimum_length 1024

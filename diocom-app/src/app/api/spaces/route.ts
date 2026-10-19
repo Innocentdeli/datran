@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '../auth/[...nextauth]/route';
 import db from '@/db';
 import { randomUUID } from 'crypto';
+import { withObservability } from '@/lib/observability';
 
 function slugify(name: string) {
   return name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 40)
@@ -10,7 +11,7 @@ function slugify(name: string) {
 }
 
 // GET /api/spaces — list user spaces
-export async function GET() {
+async function handleGET() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -26,7 +27,7 @@ export async function GET() {
 }
 
 // POST /api/spaces — create a space
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -47,3 +48,6 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ success: true, id, slug });
 }
+
+export const GET = withObservability(handleGET, '/api/spaces');
+export const POST = withObservability(handlePOST, '/api/spaces');

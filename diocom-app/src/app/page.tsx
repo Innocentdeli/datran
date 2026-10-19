@@ -19,7 +19,7 @@ import { NeuralService } from '@/lib/NeuralService';
 import { Cpu, Terminal, Layers, Activity, ShieldCheck, Lock as SecurityLock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import * as Encryption from '@/lib/crypto/Encryption';
-import { uploadEncryptedFile } from '@/lib/crypto/e2eClient';
+import { uploadEncryptedResumable } from '@/lib/upload/resumableClient';
 import { CognitiveLens } from '@/lib/CognitiveLens';
 import { useEffect } from 'react';
 import { useSession } from 'next-auth/react';
@@ -109,24 +109,29 @@ export default function DiocomDashboard() {
           addLog('neural', `[${i + 1}/${selectedFiles.length}] Classifying file locally before encryption...`);
           const aiMeta = await CognitiveLens.analyze(file);
 
-          // Metadata fields go first and the file last, so the server knows the upload is encrypted /
-          // password-protected before the bytes arrive and can stream it without buffering. The file is encrypted
-          // chunk by chunk (DCE2) while it is read, so memory stays bounded for multi-GB files.
+          // The file is encrypted chunk by chunk (DCE2) while it is read, so memory stays bounded for multi-GB files.
+          // Resumable (tus, /api/uploads): network drops are retried and resumed automatically, and selecting the
+          // same file again after a reload continues where it stopped; tiny files use a single /api/ingest request.
           const fields: Array<[string, string]> = [];
           if (password) fields.push(['password', password]);
           fields.push(['tags', JSON.stringify([...aiMeta.tags, 'Zero-Knowledge'])]);
           fields.push(['summary', aiMeta.summary + (aiMeta.sensitivity === 'High' ? ' [HIGH SENSITIVITY]' : '')]);
           fields.push(['category', aiMeta.category]);
 
-          const result = await uploadEncryptedFile({
+          const result = await uploadEncryptedResumable({
             file,
             keyStr: batchKeyStr,
             fields,
             onProgress: (fraction) => reportProgress(fraction),
           });
+          if (result.resumedFrom) {
+            addLog('system', `[${i + 1}/${selectedFiles.length}] Resumed an interrupted upload (${Math.round(result.resumedFrom / (1024 * 1024))} MB were already on the server).`);
+          }
           const data = result.data as { success?: boolean; message?: string; link?: string; stats?: typeof compressionStats } | null;
           if (result.status < 200 || result.status >= 300) throw new Error(data?.message || `HTTP ${result.status}`);
           if (!data?.success || !data.link) throw new Error(data?.message || 'Engine Failed');
+          // A resumed upload keeps the link key it was started with.
+          const fileKeyStr = result.keyStr;
 
           addLog('reactor', `[${i + 1}/${selectedFiles.length}] Encrypted upload stored.`);
           addLog('swarm', `[${i + 1}/${selectedFiles.length}] Link Generated: ${data.link}`);
@@ -134,9 +139,9 @@ export default function DiocomDashboard() {
           // Append Key to link via hash (Ensures key stays in browser)
           const uploadedShareId = data.link.split('/').pop() || `${sanitizedName}.omni.acs`;
           try {
-            localStorage.setItem(`diocom_key_${uploadedShareId}`, batchKeyStr);
+            localStorage.setItem(`diocom_key_${uploadedShareId}`, fileKeyStr);
           } catch { }
-          lastLink = `${data.link}#key=${batchKeyStr}`;
+          lastLink = `${data.link}#key=${fileKeyStr}`;
           if (data.stats) setCompressionStats(data.stats);
           window.dispatchEvent(new Event('diocom-history-update'));
           success = true;

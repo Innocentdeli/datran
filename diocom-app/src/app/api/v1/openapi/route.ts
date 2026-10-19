@@ -3,6 +3,7 @@ import { FileRepository } from '@/db/files';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import { AuditLogger } from '@/lib/AuditLogger';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /**
  * Datran Core Developer API (v1)
@@ -22,7 +23,7 @@ function safeTags(raw: unknown): unknown[] {
     }
 }
 
-export async function GET(request: Request) {
+async function handleGET(request: Request) {
     const session = await getServerSession(authOptions);
 
     // Security Check: Restricted to authenticated developers/users
@@ -68,13 +69,16 @@ export async function GET(request: Request) {
                     }))
                 });
             } catch (e) {
-                console.error('[v1/openapi]', e);
+                getLogger().error({ err: e }, 'v1/openapi');
                 return NextResponse.json({ error: 'Failed to list files' }, { status: 500 });
             }
         }
     }
 }
 
-export async function POST() {
+async function handlePOST() {
     return NextResponse.json({ message: 'Headless ingestion via API is not implemented.' }, { status: 501 });
 }
+
+export const GET = withObservability(handleGET, '/api/v1/openapi');
+export const POST = withObservability(handlePOST, '/api/v1/openapi');

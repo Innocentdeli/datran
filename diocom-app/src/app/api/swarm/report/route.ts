@@ -5,6 +5,7 @@ import { SovereignCredit } from '@/lib/SovereignCredit';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getKV } from '@/lib/kv';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /**
  * Swarm Report API
@@ -28,7 +29,7 @@ function dailyCap(): number {
     return Number.isFinite(v) && v >= 0 ? v : 1;
 }
 
-export async function POST(request: Request) {
+async function handlePOST(request: Request) {
     const session = await getServerSession(authOptions);
     const userId = (session?.user as { id?: string } | undefined)?.id;
     if (!userId) {
@@ -79,7 +80,9 @@ export async function POST(request: Request) {
             newBalance: await SovereignCredit.getBalance(userId),
         });
     } catch (error) {
-        console.error('[swarm/report]', error);
+        getLogger().error({ err: error }, 'swarm/report');
         return NextResponse.json({ error: 'Failed to process report' }, { status: 500 });
     }
 }
+
+export const POST = withObservability(handlePOST, '/api/swarm/report');

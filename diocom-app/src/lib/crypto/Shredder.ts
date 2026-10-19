@@ -1,5 +1,8 @@
 import fs from 'fs';
 import crypto from 'crypto';
+import { createModuleLogger } from '../observability/logger';
+
+const log = createModuleLogger('shredder');
 
 const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 
@@ -45,5 +48,5 @@ export async function secureDelete(filePath: string, passes: number = 3): Promis
     }
 
     await fs.promises.rm(filePath, { force: true });
-    console.log(`[SHREDDER] Overwrote and deleted ${filePath} (best effort).`);
+    log.info({ file: filePath.split(/[\\/]/).pop() }, 'overwrote and deleted file (best effort)');
 }

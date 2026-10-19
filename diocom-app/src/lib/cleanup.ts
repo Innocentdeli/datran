@@ -10,7 +10,8 @@ export const CLEANUP_LOCK = 'cleanup';
 
 /**
  * Deletes expired files: stored object (local or S3), thumbnail, then the DB record.
- * Also enforces access-event retention for the prediction model (PREDICT_RETENTION_DAYS).
+ * Also enforces access-event retention for the prediction model (PREDICT_RETENTION_DAYS) and deletes expired
+ * partial tus uploads from UPLOAD_STAGING_DIR (UPLOAD_EXPIRY_HOURS, see src/lib/upload/tusApp.ts).
  * Scheduled from src/instrumentation.ts (CLEANUP_INTERVAL_MS) on EVERY instance; a distributed lock on the shared
  * KV (Redis SET NX PX, released by compare-and-delete) ensures only one instance runs it at a time — the others
  * skip that round. Without REDIS_URL the lock is per process, which is correct for single-instance deployments.
@@ -32,6 +33,13 @@ async function cleanupOnce(signal: AbortSignal) {
     console.log(`[CLEANUP] Lock acquired; running on instance ${instanceId()}.`);
     try {
         await runPredictionRetention();
+        // Abandoned partial tus uploads (UPLOAD_EXPIRY_HOURS) and orphaned staging files.
+        try {
+            const { sweepExpiredUploads } = await import('@/lib/upload/tusApp');
+            await sweepExpiredUploads();
+        } catch (e) {
+            console.error('[CLEANUP] Partial-upload sweep failed:', e instanceof Error ? e.message : e);
+        }
         const expiredFiles = await FileRepository.findExpired();
         if (expiredFiles.length === 0) return;
 

@@ -4,10 +4,11 @@ import { FileRepository } from '@/db/files';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import { resolveStoredPath } from '@/lib/storage';
+import { withObservability } from '@/lib/observability';
 
 const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024;
 
-export async function GET(
+async function handleGET(
     _request: Request,
     context: { params: Promise<{ id: string }> }
 ) {
@@ -58,3 +59,5 @@ export async function GET(
         },
     });
 }
+
+export const GET = withObservability(handleGET, '/api/thumbnail/[id]');

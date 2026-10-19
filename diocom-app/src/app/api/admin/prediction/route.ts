@@ -2,9 +2,10 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '../../auth/[...nextauth]/route';
 import { getClusterPredictionStatus } from '@/lib/prefetcher';
+import { withObservability, getLogger } from '@/lib/observability';
 
 /** Admin-only: access prediction & prefetch status and measured metrics (NETWORK_SPEC §5). */
-export async function GET() {
+async function handleGET() {
     const session = await getServerSession(authOptions);
     if (!session?.user) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -15,7 +16,9 @@ export async function GET() {
     try {
         return NextResponse.json(await getClusterPredictionStatus(), { headers: { 'Cache-Control': 'no-store' } });
     } catch (e) {
-        console.error('[admin/prediction]', e);
+        getLogger().error({ err: e }, 'admin/prediction');
         return NextResponse.json({ error: 'Failed to load prediction status' }, { status: 500 });
     }
 }
+
+export const GET = withObservability(handleGET, '/api/admin/prediction');
