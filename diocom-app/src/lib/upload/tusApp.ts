@@ -1,6 +1,7 @@
 import path from 'path';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/app/api/auth/[...nextauth]/route';
+import { getRequestUser, AuthTokenError } from '@/lib/auth/requestUser';
+import { checkUploadQuota } from '@/lib/billing/enforce';
+import { QuotaError } from '@/lib/billing/errors';
 import { config } from '@/config';
 import { getKV } from '@/lib/kv';
 import { getStorageRoot, isInsideRoot } from '@/lib/storage';
@@ -75,15 +76,25 @@ interface UploadContext {
 }
 
 function validationToTus(e: unknown): never {
+    if (e instanceof QuotaError) {
+        throw new TusError(e.status, e.message, e.toJSON());
+    }
     if (e instanceof ValidationError) {
         throw new TusError(e.statusCode, e.message, { success: false, message: e.message, code: e.code });
     }
     throw e;
 }
 
-async function sessionUserId(): Promise<string | null> {
-    const session = await getServerSession(authOptions);
-    return session?.user?.id ?? null;
+/** Session cookie (web) or mobile bearer token; an invalid bearer token is a 401, never anonymous. */
+async function requestUserId(req: Request): Promise<string | null> {
+    try {
+        return (await getRequestUser(req))?.id ?? null;
+    } catch (e) {
+        if (e instanceof AuthTokenError) {
+            throw new TusError(401, e.message, { success: false, message: e.message, code: 'INVALID_TOKEN' }, { 'WWW-Authenticate': 'Bearer error="invalid_token"' });
+        }
+        throw e;
+    }
 }
 
 const hooks: TusHooks = {
@@ -97,7 +108,7 @@ const hooks: TusHooks = {
                 retryAfter: rl.retryAfter,
             }, rateLimitHeaders(rl));
         }
-        const userId = await sessionUserId();
+        const userId = await requestUserId(req);
         if (!userId && !anonymousUploadsAllowed()) {
             throw new TusError(401, 'Authentication required', { success: false, message: 'Authentication required', code: 'UNAUTHORIZED' });
         }
@@ -110,6 +121,8 @@ const hooks: TusHooks = {
                 const v = validateFileSize(length, getMaxUploadBytes());
                 if (!v.valid) throw new ValidationError(v.error || 'Invalid file size', v.code || 'INVALID_SIZE', v.code === 'FILE_TOO_LARGE' ? 413 : 400);
             }
+            // Plan limits against the declared Upload-Length (file size, storage quota, monthly uploads, password links).
+            await checkUploadQuota({ userId, size: length, hasPassword: !!metadata.password?.trim() });
             meta = await parseUploadFields(metadata);
         } catch (e) {
             validationToTus(e);
@@ -124,7 +137,7 @@ const hooks: TusHooks = {
 
     async authorize(_req, info: TusUploadInfo) {
         // Upload URLs are unguessable capabilities; uploads started by a signed-in user additionally require that user.
-        if (info.ownerId && (await sessionUserId()) !== info.ownerId) {
+        if (info.ownerId && (await requestUserId(_req)) !== info.ownerId) {
             throw new TusError(403, 'Forbidden', { success: false, message: 'Forbidden', code: 'FORBIDDEN' });
         }
     },

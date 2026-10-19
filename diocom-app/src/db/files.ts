@@ -168,8 +168,18 @@ export const FileRepository = {
         return res.rows;
     },
 
+    /** Deletes the record and, in the same statement, releases its bytes from the owner's storage usage. */
     delete: async (id: string) => {
-        await db.query('DELETE FROM files WHERE id = $1', [id]);
+        await db.query(
+            'WITH d AS (DELETE FROM files WHERE id = $1 RETURNING user_id, file_size) UPDATE user_usage SET storage_bytes = GREATEST(user_usage.storage_bytes - d.file_size, 0), updated_at = $2 FROM d WHERE user_usage.user_id = d.user_id',
+            [id, Date.now()]
+        );
+    },
+
+    /** Public listing of a user's uploads (newest first) for API clients (GET /api/mobile/files). */
+    listPublicByUser: async (userId: string, limit = 100): Promise<PublicFile[]> => {
+        const res = await db.query('SELECT * FROM files WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+        return (res.rows as FileRecord[]).slice(0, Math.max(1, limit)).map(toPublicFile);
     },
 
     findByUserId: async (userId: string): Promise<FileRecord[]> => {

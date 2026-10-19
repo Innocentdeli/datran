@@ -48,6 +48,16 @@ export interface KV {
     /** Atomically adds min(amount, cap - current) to an integer counter; returns the amount actually added (>= 0). */
     incrCapped(key: string, amount: number, cap: number, ttlMs: number): Promise<number>;
 
+    /**
+     * Hash counters (usage batching, e.g. egress bytes per user): atomically adds `amount` (may be negative) to
+     * `field` of the hash and resets the hash TTL. Returns the field's new value.
+     */
+    hIncrBy(key: string, field: string, amount: number, ttlMs: number): Promise<number>;
+    /** Current integer value of a hash field (0 when absent). */
+    hGet(key: string, field: string): Promise<number>;
+    /** Atomically returns and deletes the whole hash (field -> integer value). */
+    hDrain(key: string): Promise<Record<string, number>>;
+
     /** Appends to a bounded list (oldest dropped beyond maxLen) and resets its TTL. Returns the new length. */
     listPush(key: string, value: string, maxLen: number, ttlMs: number): Promise<number>;
     /** Atomically returns and deletes the whole list. */

@@ -55,6 +55,20 @@ function contract(name: string, make: () => { a: KV; b: KV } | null, skipReason:
             assert.equal(await a.get(key), null);
         });
 
+        t('hash counters: concurrent hIncrBy across clients, negative adjust, atomic drain', async () => {
+            const key = k('h');
+            await Promise.all(Array.from({ length: 50 }, (_, i) => (i % 2 ? a : b).hIncrBy(key, 'u1|2026-10', 100, 5000)));
+            await a.hIncrBy(key, 'u2|2026-10', 7, 5000);
+            assert.equal(await b.hGet(key, 'u1|2026-10'), 5000);
+            assert.equal(await b.hIncrBy(key, 'u1|2026-10', -1000, 5000), 4000);
+            assert.equal(await a.hGet(key, 'missing'), 0);
+            const drains = await Promise.all([a.hDrain(key), b.hDrain(key)]);
+            const merged = drains.find((d) => Object.keys(d).length > 0) ?? {};
+            assert.deepEqual(merged, { 'u1|2026-10': 4000, 'u2|2026-10': 7 });
+            assert.ok(drains.some((d) => Object.keys(d).length === 0), 'only one drain sees the data');
+            assert.equal(await a.hGet(key, 'u1|2026-10'), 0);
+        });
+
         t('delIfEquals / pexpireIfEquals only act for the owner value', async () => {
             const key = k('own');
             await a.set(key, 'owner', 200);

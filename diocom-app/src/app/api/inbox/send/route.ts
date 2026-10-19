@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { requireRequestUser } from '@/lib/auth/requestUser';
 import { InboxRepository } from '@/db/inbox';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { enforceRateLimit } from '@/lib/rateLimit';
@@ -11,8 +10,9 @@ const SHARE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 // POST /api/inbox/send — push a file to another user by @handle
 async function handlePOST(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
+  const session = { user: { id: user.id } };
 
   const limited = await enforceRateLimit(request, 'inbox-send', { maxRequests: 20, windowMs: 60_000 }, session.user.id);
   if (limited) return limited;
@@ -55,8 +55,9 @@ async function handlePOST(request: Request) {
 
 // GET /api/inbox/send — search for handles (autocomplete)
 async function handleGET(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
+  const session = { user: { id: user.id } };
 
   const limited = await enforceRateLimit(request, 'inbox-search', { maxRequests: 60, windowMs: 60_000 }, session.user.id);
   if (limited) return limited;

@@ -41,6 +41,7 @@ export async function register() {
     const g = globalThis as typeof globalThis & {
         __diocomCleanupTimer?: ReturnType<typeof setInterval>;
         __diocomPrefetchTimer?: ReturnType<typeof setInterval>;
+        __diocomEgressTimer?: ReturnType<typeof setInterval>;
     };
 
     if (!g.__diocomCleanupTimer) {
@@ -63,6 +64,20 @@ export async function register() {
             g.__diocomCleanupTimer.unref?.();
             // First pass shortly after boot, without blocking startup.
             setTimeout(run, 30_000).unref?.();
+        }
+    }
+
+    // Billing: egress bytes are batched in the shared KV by /api/stream and applied to PostgreSQL by ONE instance at
+    // a time (KV lock) every BILLING_FLUSH_INTERVAL_MS (default 30 s; 0 disables).
+    if (!g.__diocomEgressTimer) {
+        const { flushEgress, egressFlushIntervalMs } = await import('./lib/billing/usage');
+        const intervalMs = egressFlushIntervalMs();
+        if (intervalMs > 0) {
+            const flush = () => {
+                flushEgress().catch((err) => log.error({ err }, 'egress flush failed'));
+            };
+            g.__diocomEgressTimer = setInterval(flush, Math.max(intervalMs, 1_000));
+            g.__diocomEgressTimer.unref?.();
         }
     }
 

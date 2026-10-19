@@ -1,13 +1,13 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '../auth/[...nextauth]/route';
+import { requireRequestUser } from '@/lib/auth/requestUser';
 import { InboxRepository } from '@/db/inbox';
 import { withObservability, getLogger } from '@/lib/observability';
 
 // GET /api/inbox — fetch all inbox items for current user
-async function handleGET() {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+async function handleGET(req: Request) {
+  const user = await requireRequestUser(req);
+  if (user instanceof NextResponse) return user;
+  const session = { user: { id: user.id } };
 
   try {
     const items = await InboxRepository.findByRecipient(session.user.id);

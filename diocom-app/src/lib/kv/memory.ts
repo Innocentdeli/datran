@@ -20,6 +20,7 @@ export class MemoryKV implements KV {
     private lists = new Map<string, Entry<string[]>>();
     private zsets = new Map<string, Entry<Map<string, number>>>();
     private windows = new Map<string, Entry<number[]>>();
+    private hashes = new Map<string, Entry<Map<string, number>>>();
     private bus = new EventEmitter();
     private timer: ReturnType<typeof setInterval>;
 
@@ -59,7 +60,7 @@ export class MemoryKV implements KV {
 
     sweep() {
         const now = this.now();
-        for (const map of [this.strings, this.lists, this.zsets, this.windows] as Map<string, Entry<unknown>>[]) {
+        for (const map of [this.strings, this.lists, this.zsets, this.windows, this.hashes] as Map<string, Entry<unknown>>[]) {
             for (const [k, e] of map) if (e.exp <= now) map.delete(k);
         }
     }
@@ -85,6 +86,7 @@ export class MemoryKV implements KV {
         this.lists.delete(key);
         this.zsets.delete(key);
         this.windows.delete(key);
+        this.hashes.delete(key);
     }
 
     async getdel(key: string) {
@@ -136,6 +138,26 @@ export class MemoryKV implements KV {
         if (grant <= 0) return 0;
         this.put(this.strings, key, String(cur + grant), ttlMs);
         return grant;
+    }
+
+    // ---- hash counters -------------------------------------------------------------------------------------
+
+    async hIncrBy(key: string, field: string, amount: number, ttlMs: number) {
+        const h = this.live(this.hashes, key)?.value ?? new Map<string, number>();
+        const next = (h.get(field) ?? 0) + Math.trunc(amount);
+        h.set(field, next);
+        this.put(this.hashes, key, h, ttlMs);
+        return next;
+    }
+
+    async hGet(key: string, field: string) {
+        return this.live(this.hashes, key)?.value.get(field) ?? 0;
+    }
+
+    async hDrain(key: string) {
+        const e = this.live(this.hashes, key);
+        this.hashes.delete(key);
+        return e ? Object.fromEntries(e.value) : {};
     }
 
     // ---- lists ---------------------------------------------------------------------------------------------

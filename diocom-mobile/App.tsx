@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { getAccessToken } from './src/auth/session';
+import { hasSession, onSessionChange } from './src/auth/session';
 import { InboxScreen } from './src/screens/InboxScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { UploadScreen } from './src/screens/UploadScreen';
@@ -38,14 +38,19 @@ function Main() {
 
     useEffect(() => {
         let alive = true;
-        void Promise.all([loadSettings(), loadHistory(), getAccessToken()]).then(([s, h, token]) => {
+        void Promise.all([loadSettings(), loadHistory(), hasSession()]).then(([s, h, session]) => {
             if (!alive) return;
             setSettings(s);
             setHistory(h);
-            setSignedIn(token !== null);
+            setSignedIn(session);
+        });
+        // Sign-in, sign-out and a rejected token refresh all flip this.
+        const unsubscribe = onSessionChange((value) => {
+            if (alive) setSignedIn(value);
         });
         return () => {
             alive = false;
+            unsubscribe();
         };
     }, []);
 
@@ -91,6 +96,8 @@ function Main() {
                         items={history}
                         onRemove={(id) => updateHistory((items) => items.filter((i) => i.id !== id))}
                         onClear={() => updateHistory(() => [])}
+                        signedIn={signedIn}
+                        serverUrl={settings.serverUrl}
                     />
                 ) : null}
                 {activeTab === 'settings' ? (

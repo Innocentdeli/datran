@@ -35,6 +35,8 @@ export const TABLE_NAMES = [
     'users', 'files', 'analytics', 'chunks', 'variants', 'swarm_nodes', 'webauthn_credentials', 'audit_logs',
     'user_credits', 'credit_ledger', 'inboxes', 'spaces', 'space_members', 'space_files', 'lobby_sessions',
     'qr_sessions', 'access_events',
+    // 0003
+    'subscriptions', 'processed_events', 'credit_purchases', 'user_usage', 'usage_monthly', 'refresh_tokens',
 ] as const;
 
 /** Column defaults from migrations/0001_initial.sql (applied to INSERTs that omit the column). */
@@ -48,6 +50,12 @@ const DEFAULTS: Record<string, Row> = {
     space_members: { role: 'member' },
     lobby_sessions: { status: 'waiting' },
     qr_sessions: { status: 'waiting' },
+    credit_ledger: { idempotency_key: null, balance_after: null },
+    subscriptions: { plan: 'pro', cancel_at_period_end: false, past_due_since: null, event_created: 0 },
+    credit_purchases: { clawed_back: 0, checkout_session: null },
+    user_usage: { storage_bytes: 0, uploads_count: 0 },
+    usage_monthly: { egress_bytes: 0, credited_egress_bytes: 0, uploads_count: 0 },
+    refresh_tokens: { rotated_at: null, replaced_by: null, revoked_at: null },
 };
 
 /** Primary keys (for duplicate detection on plain INSERT). */
@@ -56,6 +64,9 @@ const PRIMARY_KEYS: Record<string, string[]> = {
     space_members: ['space_id', 'user_id'],
     space_files: ['space_id', 'file_id'],
     access_events: [],
+    user_usage: ['user_id'],
+    usage_monthly: ['subject', 'period'],
+    credit_purchases: ['payment_intent'],
 };
 
 /** Whitespace/case-insensitive canonical form used for matching. */
@@ -242,6 +253,98 @@ const EXACT: [string, Handler][] = [
         const r = [...t.access_events].sort(byDesc('ts'))[num(p[0])];
         return rows(r ? [{ ts: r.ts }] : []);
     }],
+
+    // --- files: delete + storage release (src/db/files.ts) ---
+    ['WITH d AS (DELETE FROM files WHERE id = $1 RETURNING user_id, file_size) UPDATE user_usage SET storage_bytes = GREATEST(user_usage.storage_bytes - d.file_size, 0), updated_at = $2 FROM d WHERE user_usage.user_id = d.user_id',
+        (t, p) => {
+            const f = t.files.find((r) => r.id === p[0]);
+            remove(t, 'analytics', (r) => r.file_id === p[0]);
+            remove(t, 'files', (r) => r.id === p[0]);
+            if (!f || f.user_id == null) return { rows: [], rowCount: 0 };
+            return update(t.user_usage, (r) => r.user_id === f.user_id, (r) => {
+                r.storage_bytes = Math.max(num(r.storage_bytes) - num(f.file_size), 0);
+                r.updated_at = p[1];
+            });
+        }],
+
+    // --- credits (src/lib/billing/credits.ts) ---
+    ['SELECT id, amount, balance_after FROM credit_ledger WHERE idempotency_key = $1',
+        (t, p) => rows(t.credit_ledger.filter((r) => r.idempotency_key != null && r.idempotency_key === p[0]).map((r) => pick(r, ['id', 'amount', 'balance_after'])))],
+    ['UPDATE credit_ledger SET balance_after = $1 WHERE id = $2',
+        (t, p) => update(t.credit_ledger, (r) => r.id === p[1], (r) => { r.balance_after = p[0]; })],
+    ['UPDATE user_credits SET balance = balance - $1, total_spent = total_spent + $1, last_updated = $2 WHERE user_id = $3 AND balance >= $1 RETURNING balance',
+        (t, p) => {
+            const out: Row[] = [];
+            update(t.user_credits, (r) => r.user_id === p[2] && num(r.balance) >= num(p[0]) - 1e-9, (r) => {
+                r.balance = Math.round((num(r.balance) - num(p[0])) * 1e6) / 1e6;
+                r.total_spent = num(r.total_spent) + num(p[0]);
+                r.last_updated = p[1];
+                out.push({ balance: r.balance });
+            });
+            return rows(out);
+        }],
+    ['SELECT balance FROM user_credits WHERE user_id = $1 FOR UPDATE',
+        (t, p) => rows(t.user_credits.filter((r) => r.user_id === p[0]).map((r) => pick(r, ['balance'])))],
+    ['SELECT id, amount, type, reason, timestamp, balance_after FROM credit_ledger WHERE user_id = $1 ORDER BY timestamp DESC LIMIT $2',
+        (t, p) => rows(t.credit_ledger.filter((r) => r.user_id === p[0]).sort(byDesc('timestamp')).slice(0, num(p[1]))
+            .map((r) => pick(r, ['id', 'amount', 'type', 'reason', 'timestamp', 'balance_after'])))],
+
+    // --- usage (src/lib/billing/usage.ts) ---
+    ['SELECT storage_bytes, uploads_count FROM user_usage WHERE user_id = $1',
+        (t, p) => rows(t.user_usage.filter((r) => r.user_id === p[0]).map((r) => pick(r, ['storage_bytes', 'uploads_count'])))],
+    ['INSERT INTO user_usage (user_id, storage_bytes, uploads_count, updated_at) SELECT $1::text, $2::bigint, 1, $4::bigint WHERE $2::bigint <= $3::bigint ON CONFLICT (user_id) DO UPDATE SET storage_bytes = user_usage.storage_bytes + EXCLUDED.storage_bytes, uploads_count = user_usage.uploads_count + 1, updated_at = EXCLUDED.updated_at WHERE user_usage.storage_bytes + EXCLUDED.storage_bytes <= $3::bigint RETURNING storage_bytes',
+        (t, p) => {
+            const [userId, bytes, quota, now] = [p[0], num(p[1]), num(p[2]), p[3]];
+            const e = t.user_usage.find((r) => r.user_id === userId);
+            if (!e) {
+                if (bytes > quota) return { rows: [], rowCount: 0 };
+                const row = { user_id: userId, storage_bytes: bytes, uploads_count: 1, updated_at: now };
+                t.user_usage.push(row);
+                return rows([{ storage_bytes: bytes }]);
+            }
+            if (num(e.storage_bytes) + bytes > quota) return { rows: [], rowCount: 0 };
+            e.storage_bytes = num(e.storage_bytes) + bytes;
+            e.uploads_count = num(e.uploads_count) + 1;
+            e.updated_at = now;
+            return rows([{ storage_bytes: e.storage_bytes }]);
+        }],
+    ['UPDATE user_usage SET storage_bytes = GREATEST(storage_bytes - $1, 0), updated_at = $2 WHERE user_id = $3',
+        (t, p) => update(t.user_usage, (r) => r.user_id === p[2], (r) => { r.storage_bytes = Math.max(num(r.storage_bytes) - num(p[0]), 0); r.updated_at = p[1]; })],
+    ['SELECT egress_bytes, credited_egress_bytes, uploads_count FROM usage_monthly WHERE subject = $1 AND period = $2',
+        (t, p) => rows(t.usage_monthly.filter((r) => r.subject === p[0] && r.period === p[1]).map((r) => pick(r, ['egress_bytes', 'credited_egress_bytes', 'uploads_count'])))],
+
+    // --- subscriptions / Stripe (src/lib/billing/entitlement.ts, stripe.ts, webhook.ts) ---
+    ['SELECT * FROM subscriptions WHERE user_id = $1 ORDER BY updated_at DESC',
+        (t, p) => rows(t.subscriptions.filter((r) => r.user_id === p[0]).sort(byDesc('updated_at')))],
+    ['UPDATE users SET stripe_customer_id = $1 WHERE id = $2 AND stripe_customer_id IS NULL',
+        (t, p) => update(t.users, (r) => r.id === p[1] && r.stripe_customer_id == null, (r) => { r.stripe_customer_id = p[0]; })],
+    ['SELECT id FROM users WHERE stripe_customer_id = $1',
+        (t, p) => rows(t.users.filter((r) => r.stripe_customer_id != null && r.stripe_customer_id === p[0]).map((r) => pick(r, ['id'])))],
+    ['SELECT id FROM processed_events WHERE id = $1', (t, p) => rows(t.processed_events.filter((r) => r.id === p[0]).map((r) => pick(r, ['id'])))],
+    ["UPDATE subscriptions SET status = CASE WHEN status = 'past_due' THEN 'active' ELSE status END, past_due_since = NULL, current_period_end = GREATEST(COALESCE(current_period_end, 0), $1), updated_at = $2 WHERE id = $3",
+        (t, p) => update(t.subscriptions, (r) => r.id === p[2], (r) => {
+            if (r.status === 'past_due') r.status = 'active';
+            r.past_due_since = null;
+            r.current_period_end = Math.max(num(r.current_period_end), num(p[0]));
+            r.updated_at = p[1];
+        })],
+    ["UPDATE subscriptions SET status = CASE WHEN status IN ('active', 'trialing') THEN 'past_due' ELSE status END, past_due_since = COALESCE(past_due_since, $1), updated_at = $1 WHERE id = $2",
+        (t, p) => update(t.subscriptions, (r) => r.id === p[1], (r) => {
+            if (r.status === 'active' || r.status === 'trialing') r.status = 'past_due';
+            r.past_due_since = r.past_due_since ?? p[0];
+            r.updated_at = p[0];
+        })],
+    ['SELECT * FROM credit_purchases WHERE payment_intent = $1', (t, p) => rows(t.credit_purchases.filter((r) => r.payment_intent === p[0]))],
+    ['UPDATE credit_purchases SET clawed_back = clawed_back + $1 WHERE payment_intent = $2',
+        (t, p) => update(t.credit_purchases, (r) => r.payment_intent === p[1], (r) => { r.clawed_back = num(r.clawed_back) + num(p[0]); })],
+
+    // --- mobile refresh tokens (src/lib/auth/mobileTokens.ts) ---
+    ['SELECT * FROM refresh_tokens WHERE token_hash = $1', (t, p) => rows(t.refresh_tokens.filter((r) => r.token_hash === p[0]))],
+    ['UPDATE refresh_tokens SET revoked_at = $1 WHERE family_id = $2 AND revoked_at IS NULL',
+        (t, p) => update(t.refresh_tokens, (r) => r.family_id === p[1] && r.revoked_at == null, (r) => { r.revoked_at = p[0]; })],
+    ['UPDATE refresh_tokens SET rotated_at = $1, replaced_by = $2 WHERE id = $3 AND rotated_at IS NULL AND revoked_at IS NULL',
+        (t, p) => update(t.refresh_tokens, (r) => r.id === p[2] && r.rotated_at == null && r.revoked_at == null, (r) => { r.rotated_at = p[0]; r.replaced_by = p[1]; })],
+    ['DELETE FROM refresh_tokens WHERE expires_at < $1', (t, p) => remove(t, 'refresh_tokens', (r) => num(r.expires_at) < num(p[0]))],
 ];
 
 const EXACT_MAP = new Map<string, Handler>(EXACT.map(([sql, h]) => [normalizeSql(sql), h]));
@@ -260,6 +363,41 @@ const CONFLICTS: Record<string, { clause: string; key: string[]; onConflict: (ex
             e.balance = num(e.balance) + num(n.balance);
             e.total_earned = num(e.total_earned) + num(n.total_earned);
             e.last_updated = n.last_updated;
+            return [e];
+        },
+    }, {
+        clause: 'ON CONFLICT (user_id) DO UPDATE SET balance = user_credits.balance + EXCLUDED.balance, total_earned = user_credits.total_earned + EXCLUDED.total_earned, last_updated = EXCLUDED.last_updated RETURNING balance',
+        key: ['user_id'],
+        onConflict: (e, n) => {
+            e.balance = Math.round((num(e.balance) + num(n.balance)) * 1e6) / 1e6;
+            e.total_earned = num(e.total_earned) + num(n.total_earned);
+            e.last_updated = n.last_updated;
+            return [e];
+        },
+    }],
+    credit_ledger: [{ clause: 'ON CONFLICT (idempotency_key) DO NOTHING RETURNING id', key: ['idempotency_key'], onConflict: () => [] }],
+    processed_events: [{ clause: 'ON CONFLICT (id) DO NOTHING', key: ['id'], onConflict: () => [] }],
+    credit_purchases: [{ clause: 'ON CONFLICT (payment_intent) DO NOTHING', key: ['payment_intent'], onConflict: () => [] }],
+    usage_monthly: [{
+        clause: 'ON CONFLICT (subject, period) DO UPDATE SET uploads_count = usage_monthly.uploads_count + 1, updated_at = EXCLUDED.updated_at',
+        key: ['subject', 'period'],
+        onConflict: (e, n) => { e.uploads_count = num(e.uploads_count) + 1; e.updated_at = n.updated_at; return [e]; },
+    }, {
+        clause: 'ON CONFLICT (subject, period) DO UPDATE SET credited_egress_bytes = usage_monthly.credited_egress_bytes + EXCLUDED.credited_egress_bytes, updated_at = EXCLUDED.updated_at',
+        key: ['subject', 'period'],
+        onConflict: (e, n) => { e.credited_egress_bytes = num(e.credited_egress_bytes) + num(n.credited_egress_bytes); e.updated_at = n.updated_at; return [e]; },
+    }, {
+        clause: 'ON CONFLICT (subject, period) DO UPDATE SET egress_bytes = GREATEST(usage_monthly.egress_bytes + EXCLUDED.egress_bytes, 0), updated_at = EXCLUDED.updated_at',
+        key: ['subject', 'period'],
+        onConflict: (e, n) => { e.egress_bytes = Math.max(num(e.egress_bytes) + num(n.egress_bytes), 0); e.updated_at = n.updated_at; return [e]; },
+    }],
+    subscriptions: [{
+        clause: "ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, stripe_customer_id = EXCLUDED.stripe_customer_id, status = EXCLUDED.status, plan = EXCLUDED.plan, billing_interval = EXCLUDED.billing_interval, price_id = EXCLUDED.price_id, current_period_end = EXCLUDED.current_period_end, cancel_at_period_end = EXCLUDED.cancel_at_period_end, past_due_since = CASE WHEN EXCLUDED.status = 'past_due' THEN COALESCE(subscriptions.past_due_since, EXCLUDED.past_due_since) ELSE NULL END, event_created = EXCLUDED.event_created, updated_at = EXCLUDED.updated_at WHERE subscriptions.event_created <= EXCLUDED.event_created",
+        key: ['id'],
+        onConflict: (e, n) => {
+            if (num(e.event_created) > num(n.event_created)) return [];
+            const pastDue = n.status === 'past_due' ? (e.past_due_since ?? n.past_due_since) : null;
+            Object.assign(e, { ...n, past_due_since: pastDue });
             return [e];
         },
     }],

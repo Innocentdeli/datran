@@ -4,19 +4,20 @@ import { checkRateLimit, getClientIdentifier } from '@/lib/rateLimit';
 import { hashPassword } from '@/lib/security';
 import { FHELight } from '@/lib/FHELight';
 import { DCE2_DB_MARKER, DCE2_FORMAT_FIELD } from '@/lib/crypto/dce2';
+import { largestPlanFileBytes } from '@/lib/billing/plans';
 
 /**
  * Upload policy shared by every upload path (multipart POST /api/ingest and resumable tus /api/uploads): size limit,
  * anonymous-upload gate, creation rate limit, name/MIME checks and the parsing of the metadata fields.
  */
 
-const DEFAULT_MAX_UPLOAD_BYTES = 200 * 1024 * 1024; // 200 MB
-
-/** Effective upload limit: MAX_UPLOAD_BYTES (default 200MB), never above config.storage.maxFileSize. */
+/**
+ * Protocol-level ceiling: the largest upload ANY plan accepts (never above config.storage.maxFileSize). The
+ * per-user limit (plan file size, remaining storage) is enforced by src/lib/billing/enforce.ts at creation and
+ * while receiving. MAX_UPLOAD_BYTES is kept as the legacy default of the Free plan's file size.
+ */
 export function getMaxUploadBytes(): number {
-    const env = parseInt(process.env.MAX_UPLOAD_BYTES || '', 10);
-    const limit = Number.isFinite(env) && env > 0 ? env : DEFAULT_MAX_UPLOAD_BYTES;
-    return Math.min(limit, config.storage.maxFileSize);
+    return largestPlanFileBytes();
 }
 
 /** ALLOW_ANONYMOUS_UPLOADS defaults to true for dev compatibility; set to 'false' to require login. */
@@ -96,6 +97,15 @@ export interface UploadMeta {
     /** DCE2 chunked E2E format (encryption_iv holds DCE2_DB_MARKER). */
     isDce2: boolean;
     encryptionIv: string | null;
+    /** Requested link lifetime in hours (`expires_in_hours`); clamped to the plan at finalize. null = plan default. */
+    expiresInHours: number | null;
+}
+
+function parseExpiryHours(raw: string | null): number | null {
+    if (raw === null || raw.trim() === '') return null;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) throw new ValidationError('Invalid expires_in_hours', 'INVALID_EXPIRY');
+    return v;
 }
 
 /**
@@ -125,5 +135,6 @@ export async function parseUploadFields(fields: Readonly<Record<string, string |
         if (password.length > 1024) throw new ValidationError('Password too long', 'INVALID_PASSWORD');
         passwordHash = await hashPassword(password);
     }
-    return { passwordHash, tagsRaw, similarityToken, summary, isEncrypted, isDce2, encryptionIv };
+    const expiresInHours = parseExpiryHours(str('expires_in_hours'));
+    return { passwordHash, tagsRaw, similarityToken, summary, isEncrypted, isDce2, encryptionIv, expiresInHours };
 }

@@ -156,6 +156,27 @@ export class RedisKV implements KV {
         return Number(await this.client.kvIncrCapped(this.k(key), Math.floor(amount), Math.floor(cap), ttl(ttlMs)));
     }
 
+    async hIncrBy(key: string, field: string, amount: number, ttlMs: number) {
+        const k = this.k(key);
+        const res = await this.client.multi().hincrby(k, field, Math.trunc(amount)).pexpire(k, ttl(ttlMs)).exec();
+        if (!res) throw new Error('kv hIncrBy aborted');
+        for (const [err] of res) if (err) throw err;
+        return Number(res[0][1]);
+    }
+
+    async hGet(key: string, field: string) {
+        return Number((await this.client.hget(this.k(key), field)) ?? 0) || 0;
+    }
+
+    async hDrain(key: string) {
+        const k = this.k(key);
+        const res = await this.client.multi().hgetall(k).del(k).exec();
+        if (!res) throw new Error('kv hDrain aborted');
+        for (const [err] of res) if (err) throw err;
+        const raw = (res[0][1] ?? {}) as Record<string, string>;
+        return Object.fromEntries(Object.entries(raw).map(([f, v]) => [f, Number(v) || 0]));
+    }
+
     async listPush(key: string, value: string, maxLen: number, ttlMs: number) {
         const k = this.k(key);
         const res = await this.client.multi().rpush(k, value).ltrim(k, -maxLen, -1).pexpire(k, ttl(ttlMs)).exec();

@@ -4,7 +4,7 @@ import { config } from '@/config';
 import AuthStatus from '@/components/features/AuthStatus';
 import Link from 'next/link';
 import InboxPanel from '@/components/features/InboxPanel';
-import { Zap, FolderOpen } from 'lucide-react';
+import { Zap, FolderOpen, CreditCard } from 'lucide-react';
 
 export default function Header() {
   return (
@@ -36,6 +36,13 @@ export default function Header() {
         >
           <FolderOpen size={12} />
           Spaces
+        </Link>
+        <Link
+          href="/billing"
+          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary/10 border border-primary/20 text-primary text-xs font-medium hover:bg-primary/15 transition-colors"
+        >
+          <CreditCard size={12} />
+          Billing
         </Link>
 
         {/* Inbox Panel */}

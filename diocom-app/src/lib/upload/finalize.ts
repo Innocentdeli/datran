@@ -17,6 +17,11 @@ import { AuditLogger } from '@/lib/AuditLogger';
 import { WebhookService } from '@/lib/WebhookService';
 import { randomToken } from '@/lib/security';
 import { compressPayload } from '@/lib/reactorWorker';
+import { QuotaError, quotaErrorResponse, formatBytes } from '@/lib/billing/errors';
+import { checkUploadQuota } from '@/lib/billing/enforce';
+import { resolveExpiryHours } from '@/lib/billing/plans';
+import { reserveStorage, releaseStorage, incrementMonthlyUploads, getStorageUsage } from '@/lib/billing/usage';
+import { recordQuotaRejection } from '@/lib/observability/metrics';
 
 /**
  * The one finalize path for every upload transport (multipart /api/ingest, resumable tus /api/uploads): store the
@@ -24,7 +29,6 @@ import { compressPayload } from '@/lib/reactorWorker';
  * ledger hash, thumbnail, DB record, audit + webhook. Anything written before a failure is rolled back.
  */
 
-const SHARE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Images above this size get no thumbnail (the image must be buffered for sharp). */
 export const THUMBNAIL_MAX_BYTES = 25 * 1024 * 1024;
 const HEAD_BYTES = 4096;
@@ -165,6 +169,7 @@ export function storeErrorResponse(err: unknown): NextResponse | null {
 export function uploadErrorResponse(e: unknown): NextResponse {
     const mapped = storeErrorResponse(e);
     if (mapped) return mapped;
+    if (e instanceof QuotaError) return quotaErrorResponse(e);
     if (e instanceof ValidationError) {
         return NextResponse.json({ success: false, message: e.message, code: e.code }, { status: e.statusCode });
     }
@@ -188,6 +193,7 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
     const storageProvider = getStorageProvider();
     const backend = getStorageBackend();
     const shareID = ctx.shareId ?? randomToken(16);
+    let reservedStorage = 0;
 
     try {
         // Validate file size (empty file etc.); over-limit uploads were already stopped while receiving.
@@ -200,6 +206,8 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
         }
 
         const { isEncrypted, isDce2, passwordHash } = meta;
+        // Plan limits with the real size and the now-known password flag (multipart fields may follow the file).
+        const { plan } = await checkUploadQuota({ userId: ctx.userId, size: file.size, hasPassword: passwordHash !== null });
         // Display-safe name (metadata only; never used for on-disk paths)
         const sanitizedName = sanitizeFilename(file.filename);
         const originalName = sanitizedName;
@@ -320,6 +328,18 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
         // Reactor-backed records are served by this app (proxy), never redirected.
         const isExternal = backend !== 'reactor' && storageProvider.isExternal() ? 1 : 0;
 
+        // Storage quota: atomic reservation (concurrent uploads cannot overshoot); released again on any failure below.
+        if (ctx.userId) {
+            if (!(await reserveStorage(ctx.userId, file.size, plan.storageQuotaBytes))) {
+                const { storageBytes } = await getStorageUsage(ctx.userId);
+                recordQuotaRejection('storage', plan.id);
+                throw new QuotaError('storage',
+                    `Storage quota exceeded: ${formatBytes(storageBytes)} of ${formatBytes(plan.storageQuotaBytes)} used; this file needs ${formatBytes(file.size)}.`,
+                    plan.id, { limitBytes: plan.storageQuotaBytes, usedBytes: storageBytes, requestedBytes: file.size });
+            }
+            reservedStorage = file.size;
+        }
+
         console.log(`[INGEST] Saving ${shareID} to database...`);
         await FileRepository.create({
             share_id: shareID,
@@ -332,7 +352,7 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
             is_external: isExternal,
             file_size: file.size,
             mime_type: mimeType,
-            expires_at: Date.now() + SHARE_TTL_MS,
+            expires_at: Date.now() + Math.round(resolveExpiryHours(plan, meta.expiresInHours) * 3_600_000),
             compression_ratio: ratio, // display label: compression and dedup reported separately (formatStoreRatio)
             compression_speed: speed,
             tags: meta.tagsRaw,
@@ -342,6 +362,10 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
             similarity_token: meta.similarityToken,
         });
         storedObjects.length = 0; // committed
+        reservedStorage = 0; // now owned by the file record (released when it is deleted / expires)
+        if (ctx.userId) {
+            await incrementMonthlyUploads(ctx.userId).catch((err) => console.error('[INGEST] monthly upload counter failed:', err instanceof Error ? err.message : err));
+        }
 
         if (reactorClass || reactorRecipe) {
             // Best effort: informational metadata only; older databases may lack these columns.
@@ -372,7 +396,10 @@ export async function finalizeUpload(file: ReceivedFile, meta: UploadMeta, ctx: 
             stats: { speed, ratio, engine, compression: compressionFactor, compressionEstimated, dedupPercent },
         };
     } catch (e) {
-        // Roll back any objects written before the failure
+        // Roll back any objects written (and storage reserved) before the failure
+        if (reservedStorage && ctx.userId) {
+            await releaseStorage(ctx.userId, reservedStorage).catch(() => undefined);
+        }
         for (const loc of storedObjects) {
             try { await removeStoredObject(loc, storageProvider.isExternal()); } catch { /* ignore */ }
         }

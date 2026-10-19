@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ActivityIndicator, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 import { checkServer } from '../api/client';
+import { AuthError, secureStoreAvailable, signIn, signOut } from '../auth/session';
 import { normalizeServerUrl, type Settings } from '../storage/settings';
 import { colors, shared } from '../theme';
 
@@ -116,11 +117,7 @@ export function SettingsScreen({ settings, signedIn, onSave }: SettingsScreenPro
                         accessibilityLabel="Anonymous uploads"
                     />
                 </View>
-                <Text style={styles.hint}>
-                    {signedIn
-                        ? 'Signed in.'
-                        : 'Sign-in from the app needs a token endpoint on the server, which is not available yet.'}
-                </Text>
+                <AccountSection serverUrl={settings.serverUrl} signedIn={signedIn} />
             </View>
 
             <TouchableOpacity
@@ -136,7 +133,105 @@ export function SettingsScreen({ settings, signedIn, onSave }: SettingsScreenPro
     );
 }
 
+/** Sign-in (POST /api/mobile/token) / sign-out (revokes the refresh token on the server). */
+function AccountSection({ serverUrl, signedIn }: { serverUrl: string; signedIn: boolean }) {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+    if (!secureStoreAvailable) {
+        return <Text style={styles.hint}>Sign-in is available in the iOS and Android app (tokens are kept in the device keychain).</Text>;
+    }
+
+    if (signedIn) {
+        return (
+            <View style={styles.accountBox}>
+                <Text style={[styles.status, { color: colors.success }]}>Signed in to {serverUrl}. Uploads are saved to your account.</Text>
+                <TouchableOpacity
+                    style={[shared.secondaryButton, styles.signOut, busy && shared.disabled]}
+                    disabled={busy}
+                    onPress={async () => {
+                        setBusy(true);
+                        await signOut();
+                        setBusy(false);
+                        setMessage(null);
+                    }}
+                    accessibilityRole="button"
+                >
+                    {busy ? <ActivityIndicator color={colors.text} /> : <Text style={[shared.secondaryButtonText, { color: colors.danger }]}>Sign out</Text>}
+                </TouchableOpacity>
+            </View>
+        );
+    }
+
+    const canSubmit = email.trim().length > 3 && password.length > 0 && !busy;
+    const submit = async () => {
+        if (!canSubmit) return;
+        setBusy(true);
+        setMessage(null);
+        try {
+            await signIn(serverUrl, email, password);
+            setPassword('');
+            setMessage({ kind: 'ok', text: 'Signed in.' });
+        } catch (err) {
+            setMessage({ kind: 'error', text: err instanceof AuthError || err instanceof Error ? err.message : String(err) });
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <View style={styles.accountBox}>
+            <Text style={styles.switchLabel}>Sign in</Text>
+            <TextInput
+                style={[shared.input, styles.field]}
+                value={email}
+                onChangeText={setEmail}
+                placeholder="you@example.com"
+                placeholderTextColor={colors.textFaint}
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="email"
+                keyboardType="email-address"
+                inputMode="email"
+                textContentType="username"
+                accessibilityLabel="Email"
+            />
+            <TextInput
+                style={[shared.input, styles.field]}
+                value={password}
+                onChangeText={setPassword}
+                placeholder="Password"
+                placeholderTextColor={colors.textFaint}
+                secureTextEntry
+                autoComplete="password"
+                textContentType="password"
+                onSubmitEditing={submit}
+                accessibilityLabel="Password"
+            />
+            <TouchableOpacity style={[shared.button, styles.field, !canSubmit && shared.disabled]} onPress={submit} disabled={!canSubmit} accessibilityRole="button">
+                {busy ? <ActivityIndicator color="#000" /> : <Text style={shared.buttonText}>SIGN IN</Text>}
+            </TouchableOpacity>
+            <Text style={styles.hint}>Use the email and password of your web account on {serverUrl}. Create accounts on the website.</Text>
+            {message ? <Text style={[styles.status, { color: message.kind === 'ok' ? colors.success : colors.danger }]}>{message.text}</Text> : null}
+        </View>
+    );
+}
+
 const styles = StyleSheet.create({
+    accountBox: {
+        marginTop: 16,
+        borderTopWidth: 1,
+        borderColor: colors.border,
+        paddingTop: 16,
+    },
+    field: {
+        marginTop: 10,
+    },
+    signOut: {
+        marginTop: 12,
+    },
     row: {
         flexDirection: 'row',
         gap: 8,

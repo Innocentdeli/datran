@@ -40,6 +40,14 @@ async function cleanupOnce(signal: AbortSignal) {
         } catch (e) {
             console.error('[CLEANUP] Partial-upload sweep failed:', e instanceof Error ? e.message : e);
         }
+        try {
+            const { pruneRefreshTokens } = await import('@/lib/auth/mobileTokens');
+            const pruned = await pruneRefreshTokens();
+            if (pruned) console.log(`[CLEANUP] Pruned ${pruned} expired mobile refresh token(s).`);
+        } catch (e) {
+            console.error('[CLEANUP] Refresh-token prune failed:', e instanceof Error ? e.message : e);
+        }
+        // Expired files: FileRepository.delete also releases the bytes from the owner's storage quota.
         const expiredFiles = await FileRepository.findExpired();
         if (expiredFiles.length === 0) return;
 

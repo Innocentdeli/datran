@@ -1,14 +1,14 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { requireRequestUser } from '@/lib/auth/requestUser';
 import { InboxRepository } from '@/db/inbox';
 import { withObservability, getLogger } from '@/lib/observability';
 
 // PATCH /api/inbox/[id] — accept or decline an inbox item
 async function handlePATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
+  const session = { user: { id: user.id } };
 
   const { action } = await request.json().catch(() => ({}));
   if (!action || !['accept', 'decline'].includes(action)) {

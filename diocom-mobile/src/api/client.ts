@@ -5,8 +5,8 @@ import type { DocumentPickerAsset } from 'expo-document-picker';
 import { getAccessToken } from '../auth/session';
 
 /**
- * Single place where the app talks to the Diocom server. Every request goes through `authHeaders()`, so
- * enabling bearer auth later only requires a sign-in flow that stores tokens (src/auth/session.ts).
+ * Single place where the app talks to the Diocom server. Every request goes through `authHeaders()`, which attaches
+ * the signed-in user's bearer token (refreshed as needed by src/auth/session.ts).
  */
 
 export const INGEST_PATH = '/api/ingest';
@@ -75,9 +75,8 @@ const METADATA_FIELDS: readonly (readonly [string, string])[] = [
 ];
 
 const STATUS_MESSAGES: Record<number, string> = {
-    401: 'This server requires sign-in for uploads (ALLOW_ANONYMOUS_UPLOADS=false). Mobile sign-in is not available yet.',
+    401: 'This server requires sign-in for uploads. Sign in under Settings (or sign in again if your session expired).',
     411: 'The upload was sent without a Content-Length header.',
-    413: 'The file is larger than the server allows.',
     429: 'Too many uploads. Wait a moment and try again.',
     503: 'Server storage is temporarily unavailable. Try again shortly.',
     507: 'Server storage is full.',
@@ -89,6 +88,7 @@ interface IngestResponseBody {
     stats?: unknown;
     message?: unknown;
     code?: unknown;
+    upgrade?: unknown;
 }
 
 /** Turns a raw HTTP response into a typed result or an ApiError with a message fit for the user. */
@@ -108,8 +108,14 @@ export function parseIngestResponse(status: number, body: string): UploadSuccess
 
     const code = typeof data?.code === 'string' ? data.code : status >= 200 && status < 300 ? 'BAD_RESPONSE' : `HTTP_${status}`;
     const serverMessage = typeof data?.message === 'string' ? data.message : undefined;
+    const upgrade = typeof data?.upgrade === 'string' ? data.upgrade : undefined;
+    // Plan limits (402 quota, 413 file size): the server explains which limit and how to raise it.
+    if ((status === 402 || status === 413) && serverMessage) {
+        throw new ApiError(upgrade ? `${serverMessage} ${upgrade}` : serverMessage, code, status);
+    }
     const message =
         STATUS_MESSAGES[status] ??
+        (status === 413 ? 'The file is larger than the server allows.' : undefined) ??
         serverMessage ??
         (data ? `Upload failed (HTTP ${status}).` : `Unexpected response from server (HTTP ${status}). Is the server URL correct?`);
     throw new ApiError(message, code, status);
@@ -230,6 +236,38 @@ export async function uploadDocument(req: UploadRequest): Promise<UploadSuccess>
     const url = apiUrl(req.serverUrl, INGEST_PATH);
     const headers = await authHeaders();
     return Platform.OS === 'web' ? uploadWeb(req, url, headers) : uploadNative(req, url, headers);
+}
+
+/** A file of the signed-in user, as listed by GET /api/mobile/files (public fields only). */
+export interface RemoteFile {
+    share_id: string;
+    original_name: string;
+    file_size: number;
+    mime_type: string;
+    created_at: number;
+    expires_at: number | null;
+    downloads: number;
+    compression_ratio: string | null;
+    is_encrypted: number;
+    has_password: boolean;
+    link: string;
+}
+
+/** The signed-in user's uploads on the server. Throws ApiError (401 when the session is gone). */
+export async function fetchMyFiles(serverUrl: string): Promise<RemoteFile[]> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    let res: Response;
+    try {
+        res = await fetch(apiUrl(serverUrl, '/api/mobile/files'), { headers: { Accept: 'application/json', ...headers } });
+    } catch (err) {
+        throw networkError(err);
+    }
+    const data: unknown = await res.json().catch(() => null);
+    if (res.status === 401) throw new ApiError('Your session expired. Please sign in again.', 'UNAUTHORIZED', 401);
+    const files = (data as { files?: unknown } | null)?.files;
+    if (!res.ok || !Array.isArray(files)) throw new ApiError(`Could not load your uploads (HTTP ${res.status}).`, `HTTP_${res.status}`, res.status);
+    return files as RemoteFile[];
 }
 
 /** Reachability check: any HTTP response (even 405 for GET on the ingest route) means the server answered. */

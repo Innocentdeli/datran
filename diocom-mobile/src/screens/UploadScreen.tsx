@@ -101,7 +101,7 @@ export function UploadScreen({ settings, signedIn, onUploaded, onOpenSettings }:
                 {!canUpload ? (
                     <TouchableOpacity onPress={onOpenSettings} accessibilityRole="button">
                         <Text style={styles.warning}>
-                            Anonymous uploads are turned off and mobile sign-in is not available yet. Open settings to
+                            Anonymous uploads are turned off and you are not signed in. Open settings to sign in or to
                             enable anonymous uploads.
                         </Text>
                     </TouchableOpacity>

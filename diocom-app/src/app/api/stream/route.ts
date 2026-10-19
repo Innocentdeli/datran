@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { cookies } from 'next/headers';
-import { FileRepository } from '@/db/files';
+import { FileRepository, type FileRecord } from '@/db/files';
+import { authorizeEgress, meterBody, settleEgress, type EgressGrant } from '@/lib/billing/enforce';
+import { quotaErrorResponse } from '@/lib/billing/errors';
 import { hasFileAccess } from '@/lib/crypto/AccessToken';
 import { resolveStoredPath } from '@/lib/storage';
 import { DictionaryUnavailableError } from '@/lib/reactorWorker';
@@ -120,6 +122,28 @@ async function handleGET(request: Request) {
     const rangeHeader = request.headers.get('range');
     const contentType = fileRecord.mime_type || 'application/octet-stream';
     const headers = baseHeaders(contentType, isProtected);
+
+    // Plan enforcement: the file OWNER's monthly egress quota pays for this response (credits beyond it, else 402).
+    const declared = parseRange(rangeHeader, Number(fileRecord.file_size) || 0);
+    const expectedBytes = declared.kind === 'range' ? declared.end - declared.start + 1 : declared.kind === 'none' ? Number(fileRecord.file_size) || 0 : 0;
+    const gate = await authorizeEgress({ ownerId: fileRecord.user_id ?? null, shareId: fileRecord.share_id, bytes: expectedBytes });
+    if (!gate.ok) return quotaErrorResponse(gate.error);
+    const response = await serveFile(request, fileRecord, rangeHeader, headers, t0);
+    return meterResponse(response, gate);
+}
+
+/** Counts the bytes actually delivered (corrects the egress reservation when the client stops early). */
+function meterResponse(res: Response, gate: EgressGrant): Response {
+    if ((res.status === 200 || res.status === 206) && res.body) {
+        const body = meterBody(res.body, (served) => { void settleEgress(gate, served); });
+        return new NextResponse(body, { status: res.status, headers: res.headers });
+    }
+    // Redirects (external objects) keep the reservation (bytes are served by the CDN on our behalf); errors release it.
+    void settleEgress(gate, res.status >= 300 && res.status < 400 ? gate.reserved : 0);
+    return res;
+}
+
+async function serveFile(request: Request, fileRecord: FileRecord, rangeHeader: string | null, headers: Record<string, string>, t0: number): Promise<Response> {
 
     // Count a download (and a prediction access event) only for full requests or ranges starting at byte 0,
     // so range continuations (video seeking, resumed downloads) are not double counted.

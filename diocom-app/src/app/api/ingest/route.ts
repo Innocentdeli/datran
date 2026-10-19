@@ -4,8 +4,9 @@ import fs from 'fs';
 import { Readable } from 'stream';
 import type { ReadableStream as NodeWebReadableStream } from 'stream/web';
 import { getClientIdentifier } from '@/lib/rateLimit';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '../auth/[...nextauth]/route';
+import { getRequestUser, AuthTokenError, authErrorResponse } from '@/lib/auth/requestUser';
+import { checkUploadQuota, oversizeError, type UploadAllowance } from '@/lib/billing/enforce';
+import { QuotaError, quotaErrorResponse } from '@/lib/billing/errors';
 import { getStorageBackend, getStorageRoot } from '@/lib/storage';
 import { openStorePutStream } from '@/lib/storage/reactorStore';
 import { StorePutResult } from '@/lib/storage/reactorStoreCore';
@@ -56,14 +57,6 @@ function countedBody(src: Readable, progress: ProgressReporter | null): Readable
 }
 
 type SinkResult = { kind: 'reactor'; put: StorePutResult } | { kind: 'temp'; path: string };
-
-function tooLarge(maxBytes: number) {
-    return NextResponse.json({
-        success: false,
-        message: `File exceeds maximum allowed size (${Math.floor(maxBytes / (1024 * 1024))}MB)`,
-        code: 'FILE_TOO_LARGE'
-    }, { status: 413 });
-}
 
 /** Local/S3 backends: stream the file to a temp file under the storage root (same volume, so it can be renamed). */
 function openTempFileSink(shareID: string, tempFiles: string[]): UploadSink<SinkResult> {
@@ -136,21 +129,34 @@ async function handleIngest(request: Request, progress: ProgressReporter | null)
             }, { status: 429, headers: rateLimitHeaders(rl) });
         }
 
-        // Session (needed before buffering for the anonymous-upload gate)
-        const session = await getServerSession(authOptions);
-        const userId = session?.user?.id;
+        // User from the session cookie (web) or a mobile bearer token (needed before buffering for the anonymous gate)
+        let userId: string | undefined;
+        try {
+            userId = (await getRequestUser(request))?.id;
+        } catch (e) {
+            if (e instanceof AuthTokenError) return authErrorResponse(e);
+            throw e;
+        }
         if (!userId && !anonymousUploadsAllowed()) {
             return NextResponse.json({ success: false, message: 'Authentication required', code: 'UNAUTHORIZED' }, { status: 401 });
         }
 
-        // Cheap pre-check; the limit is also enforced byte-by-byte while streaming.
-        const maxBytes = getMaxUploadBytes();
         const contentLength = Number(request.headers.get('content-length'));
         if (!request.headers.get('content-length') || !Number.isFinite(contentLength)) {
             return NextResponse.json({ success: false, message: 'Content-Length required', code: 'LENGTH_REQUIRED' }, { status: 411 });
         }
+        // Plan limits (file size, storage, monthly uploads) checked against the declared size before any byte is
+        // stored; the resulting byte limit is also enforced while streaming.
+        let allowance: UploadAllowance;
+        try {
+            allowance = await checkUploadQuota({ userId: userId ?? null, size: Math.max(0, contentLength - MULTIPART_OVERHEAD_BYTES) });
+        } catch (e) {
+            if (e instanceof QuotaError) return quotaErrorResponse(e);
+            throw e;
+        }
+        const maxBytes = Math.min(allowance.maxBytes, getMaxUploadBytes());
         if (contentLength > maxBytes + MULTIPART_OVERHEAD_BYTES) {
-            return tooLarge(maxBytes);
+            return quotaErrorResponse(oversizeError(allowance, contentLength - MULTIPART_OVERHEAD_BYTES));
         }
 
         if (!request.body) {
@@ -196,7 +202,7 @@ async function handleIngest(request: Request, progress: ProgressReporter | null)
                 },
             );
         } catch (err) {
-            if (err instanceof UploadTooLargeError) return tooLarge(maxBytes);
+            if (err instanceof UploadTooLargeError) return quotaErrorResponse(oversizeError(allowance, maxBytes + 1));
             if (err instanceof MultipartError) {
                 return NextResponse.json({ success: false, message: err.message, code: err.code }, { status: 400 });
             }

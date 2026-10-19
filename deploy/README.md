@@ -200,6 +200,48 @@ Prometheus reads the token from a compose secret, so it never appears in its con
 bound to 127.0.0.1 and gets a provisioned datasource and dashboard (`grafana/`). The reactor
 panel is a TODO until the reactor exposes Prometheus metrics (it has JSON `/store/stats` today).
 
+## Billing
+
+Code: `diocom-app/src/lib/billing` (plans, usage, credits, Stripe), migration `0003_billing_and_mobile_auth.sql`.
+
+**Plans.** Anonymous (if `ALLOW_ANONYMOUS_UPLOADS` is not `false`), Free, and Pro (Stripe subscription, monthly
+or yearly), plus pay-as-you-go credits. All limits come from `PLAN_<ANON|FREE|PRO>_*` env vars (see
+`.env.example`; defaults: Free 200 MB/file, 2 GB storage, 10 GB downloads/month, 7-day links; Pro 5 GB/file,
+500 GB, 1 TB/month, 30-day links; anonymous 100 MB/file, 2 GB/month per file, 24-hour links). `MAX_FILE_SIZE`
+stays the hard per-file ceiling (default 1 GB) — raise it if Pro should upload more.
+
+**Enforcement.** Uploads are checked at creation (multipart `Content-Length`, tus `Upload-Length`) and while
+receiving; storage is reserved atomically at finalize and released when a file is deleted or expires. Refusals
+are JSON `{ code, limit, message, upgrade, upgradeUrl: "/billing" }` with 413 (file too large for the plan) or
+402 (quota). Downloads count against the **file owner's** monthly quota; beyond it the owner's credits pay
+(`CREDITS_PER_GB`, debited atomically, never below zero), otherwise the downloader gets a friendly 402. Served
+bytes (ranges included, cancelled downloads corrected to what was actually sent) are batched in Redis and
+flushed to PostgreSQL by one instance every `BILLING_FLUSH_INTERVAL_MS`.
+
+**Stripe setup (test mode first).**
+1. Create products/prices: Pro monthly + Pro yearly (recurring) and one-time prices for credit packs; set
+   `STRIPE_PRICE_PRO_MONTHLY`, `STRIPE_PRICE_PRO_YEARLY`, `STRIPE_PRICE_CREDITS_<N>` (N = credits in the pack).
+2. Set `STRIPE_SECRET_KEY` (`sk_test_…`). Enable the Customer Portal (Dashboard → Settings → Billing → Portal).
+3. Add a webhook endpoint `https://<domain>/api/billing/webhook` with events `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`, `customer.subscription.created|updated|deleted`, `invoice.paid`,
+   `invoice.payment_failed`, `charge.refunded`; put its signing secret in `STRIPE_WEBHOOK_SECRET`.
+   Locally: `stripe listen --forward-to localhost:3000/api/billing/webhook` prints a `whsec_…` to use.
+
+Entitlement is derived only from the webhook-maintained `subscriptions` table: `active`/`trialing` → Pro,
+`past_due` → Pro for `BILLING_GRACE_DAYS` (default 7), anything else → Free. The checkout success redirect grants
+nothing. Webhooks are verified over the raw body and processed idempotently (`processed_events` + idempotency
+keys on every ledger entry). Refunded credit packs claw back only credits that were not spent yet. Without
+`STRIPE_SECRET_KEY` the `/billing` page shows "billing not configured" and every account is Free.
+
+**Mobile app auth.** `POST /api/mobile/token` (`{email,password}` or `{passkeyToken}`) returns a 15-minute
+access JWT (audience `mobile`, key derived from `DIOCOM_SECRET`) and a 30-day single-use refresh token
+(stored hashed). `POST /api/mobile/token/refresh` rotates it — reusing a spent token revokes the whole family —
+and `POST /api/mobile/token/revoke` signs out. Upload, inbox, billing-usage and `GET /api/mobile/files` accept
+`Authorization: Bearer <access token>` as well as the web session cookie.
+
+Metrics: `diocom_quota_rejections_total`, `diocom_credit_transactions_total`, `diocom_egress_bytes_total`,
+`diocom_egress_flushes_total`, `diocom_stripe_webhooks_total`, `diocom_mobile_token_requests_total`.
+
 ## Verifying HTTP/3
 
 - `curl --http3-only -sI https://datran.example.com/` → `HTTP/3 200`. Needs a curl built with

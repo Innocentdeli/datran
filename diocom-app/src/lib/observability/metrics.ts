@@ -81,7 +81,13 @@ export interface AppMetrics {
     cleanupRuns: client.Counter<'outcome'>;
     cleanupDuration: client.Histogram<'outcome'>;
     cleanupDeleted: client.Counter;
-    guards: Record<'route' | 'scope' | 'authMethod' | 'source' | 'op' | 'reason' | 'outcome' | 'backend', LabelGuard>;
+    quotaRejections: client.Counter<'limit' | 'plan'>;
+    creditTransactions: client.Counter<'type' | 'outcome'>;
+    egressBytes: client.Counter<'plan'>;
+    egressFlushes: client.Counter<'outcome'>;
+    stripeWebhooks: client.Counter<'type' | 'outcome'>;
+    mobileTokens: client.Counter<'op' | 'result'>;
+    guards: Record<'route' | 'scope' | 'authMethod' | 'source' | 'op' | 'reason' | 'outcome' | 'backend' | 'eventType', LabelGuard>;
 }
 
 export function createMetrics(opts: { registry?: Registry; defaultMetrics?: boolean } = {}): AppMetrics {
@@ -159,6 +165,30 @@ export function createMetrics(opts: { registry?: Registry; defaultMetrics?: bool
         cleanupDeleted: new client.Counter({
             name: 'diocom_cleanup_deleted_files_total', help: 'Expired files purged by the cleanup job.', registers,
         }),
+        quotaRejections: new client.Counter({
+            name: 'diocom_quota_rejections_total', help: 'Uploads/downloads refused by a plan limit (402/413), by limit and plan.',
+            labelNames: ['limit', 'plan'], registers,
+        }),
+        creditTransactions: new client.Counter({
+            name: 'diocom_credit_transactions_total', help: 'Credit ledger operations by type and outcome (ok|replay|insufficient|error).',
+            labelNames: ['type', 'outcome'], registers,
+        }),
+        egressBytes: new client.Counter({
+            name: 'diocom_egress_bytes_total', help: 'Bytes actually served by /api/stream and metered against owner quotas, by owner plan.',
+            labelNames: ['plan'], registers,
+        }),
+        egressFlushes: new client.Counter({
+            name: 'diocom_egress_flushes_total', help: 'Egress batch flushes from the shared KV to PostgreSQL (ok|skipped|error).',
+            labelNames: ['outcome'], registers,
+        }),
+        stripeWebhooks: new client.Counter({
+            name: 'diocom_stripe_webhooks_total', help: 'Stripe webhook deliveries by event type and outcome (processed|duplicate|ignored|invalid_signature|error).',
+            labelNames: ['type', 'outcome'], registers,
+        }),
+        mobileTokens: new client.Counter({
+            name: 'diocom_mobile_token_requests_total', help: 'Mobile token endpoint requests by operation (issue|refresh|revoke) and result.',
+            labelNames: ['op', 'result'], registers,
+        }),
         guards: {
             route: new LabelGuard(200),
             scope: new LabelGuard(),
@@ -168,6 +198,7 @@ export function createMetrics(opts: { registry?: Registry; defaultMetrics?: bool
             reason: new LabelGuard(32),
             outcome: new LabelGuard(48),
             backend: new LabelGuard(8),
+            eventType: new LabelGuard(32),
         },
     };
 }
@@ -281,6 +312,30 @@ export function recordKvError(op: string, m = getMetrics()): void {
 
 export function recordDbQuery(backend: string, sql: string, seconds: number, ok: boolean, m = getMetrics()): void {
     safe(() => m.dbDuration.observe({ backend: m.guards.backend.value(backend), op: sqlOperation(sql), outcome: ok ? 'ok' : 'error' }, seconds));
+}
+
+export function recordQuotaRejection(limit: string, plan: string, m = getMetrics()): void {
+    safe(() => m.quotaRejections.inc({ limit: m.guards.reason.value(limit), plan: m.guards.outcome.value(plan) }));
+}
+
+export function recordCreditTransaction(type: string, outcome: 'ok' | 'replay' | 'insufficient' | 'error', m = getMetrics()): void {
+    safe(() => m.creditTransactions.inc({ type: m.guards.op.value(type), outcome }));
+}
+
+export function recordEgress(plan: string, bytes: number, m = getMetrics()): void {
+    safe(() => { if (bytes > 0) m.egressBytes.inc({ plan: m.guards.outcome.value(plan) }, bytes); });
+}
+
+export function recordEgressFlush(outcome: 'ok' | 'skipped' | 'error', m = getMetrics()): void {
+    safe(() => m.egressFlushes.inc({ outcome }));
+}
+
+export function recordStripeWebhook(type: string, outcome: string, m = getMetrics()): void {
+    safe(() => m.stripeWebhooks.inc({ type: m.guards.eventType.value(type), outcome: m.guards.outcome.value(outcome) }));
+}
+
+export function recordMobileToken(op: 'issue' | 'refresh' | 'revoke', result: string, m = getMetrics()): void {
+    safe(() => m.mobileTokens.inc({ op, result: m.guards.reason.value(result) }));
 }
 
 export function recordCleanupRun(outcome: 'ok' | 'skipped' | 'error', seconds: number, deleted = 0, m = getMetrics()): void {
