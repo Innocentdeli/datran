@@ -1,133 +1,116 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { History, Trash2, ExternalLink, Clock, FileType } from 'lucide-react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { History, Trash2, X } from 'lucide-react';
 import { getUploadHistory, clearHistory, deleteHistoryItem, UploadHistoryItem } from '@/lib/history';
 import { cn, formatFileSize, formatTimestamp } from '@/lib/utils';
-import { getFileIcon } from '@/lib/fileUtils';
-import Button from '@/components/ui/Button';
+import FileTypeIcon from '@/components/ui/FileTypeIcon';
+import type { FileType } from '@/lib/fileUtils';
 
+const EVENT = 'diocom-history-update';
+const STORAGE_KEY = 'diocom_upload_history';
+let cache: { raw: string | null; items: UploadHistoryItem[] } = { raw: null, items: [] };
+
+function subscribe(cb: () => void) {
+    const onStorage = (e: StorageEvent) => { if (e.key === STORAGE_KEY) cb(); };
+    window.addEventListener('storage', onStorage);
+    window.addEventListener(EVENT, cb);
+    return () => {
+        window.removeEventListener('storage', onStorage);
+        window.removeEventListener(EVENT, cb);
+    };
+}
+
+function snapshot(): UploadHistoryItem[] {
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(STORAGE_KEY); } catch { /* storage disabled */ }
+    if (raw !== cache.raw) cache = { raw, items: getUploadHistory() };
+    return cache.items;
+}
+
+const EMPTY: UploadHistoryItem[] = [];
+
+/** Floating "Recent uploads" drawer (links this browser created; stored locally only). */
 export default function UploadHistory() {
+    const history = useSyncExternalStore(subscribe, snapshot, () => EMPTY);
     const [isOpen, setIsOpen] = useState(false);
-    const [history, setHistory] = useState<UploadHistoryItem[]>([]);
 
     useEffect(() => {
-        setHistory(getUploadHistory());
+        if (!isOpen) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setIsOpen(false); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [isOpen]);
 
-        // Listen for storage events (updates from other tabs)
-        const handleStorage = (e: StorageEvent) => {
-            if (e.key === 'diocom_upload_history') {
-                setHistory(getUploadHistory());
-            }
-        };
-
-        window.addEventListener('storage', handleStorage);
-        return () => window.removeEventListener('storage', handleStorage);
-    }, []);
-
-    // Custom event listener for local updates
-    useEffect(() => {
-        const handleLocalUpdate = () => setHistory(getUploadHistory());
-        window.addEventListener('diocom-history-update', handleLocalUpdate);
-        return () => window.removeEventListener('diocom-history-update', handleLocalUpdate);
-    }, []);
-
-    const handleDelete = (id: string, e: React.MouseEvent) => {
-        e.stopPropagation();
-        const newHistory = deleteHistoryItem(id);
-        setHistory(newHistory);
-    };
-
-    const handleClear = () => {
-        clearHistory();
-        setHistory([]);
-    };
+    const notify = () => window.dispatchEvent(new Event(EVENT));
 
     if (history.length === 0) return null;
 
     return (
-        <div className="fixed bottom-6 right-6 z-50">
-            <AnimatePresence>
-                {isOpen && (
-                    <motion.div
-                        initial={{ opacity: 0, y: 20, scale: 0.9 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 20, scale: 0.9 }}
-                        className="absolute bottom-16 right-0 w-80 sm:w-96 glass bg-black/90 border border-white/10 overflow-hidden shadow-2xl rounded-2xl"
-                    >
-                        <div className="flex items-center justify-between p-4 border-b border-white/10 bg-white/5">
-                            <div className="flex items-center gap-2">
-                                <History className="w-4 h-4 text-primary" />
-                                <h3 className="text-sm font-bold uppercase tracking-wider">Recent Uploads</h3>
-                            </div>
+        <aside aria-label="Recent uploads" className="fixed bottom-4 right-4 z-40 sm:bottom-6 sm:right-6">
+            {isOpen && (
+                <div
+                    id="upload-history-panel"
+                    className="absolute bottom-14 right-0 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-white/10 bg-surface shadow-2xl animate-scale-in"
+                >
+                    <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                        <h2 className="text-sm font-semibold text-white">Recent uploads</h2>
+                        <div className="flex items-center gap-1">
                             <button
-                                onClick={handleClear}
-                                className="text-[10px] text-red-400 hover:text-red-300 uppercase font-bold tracking-widest transition-colors"
+                                type="button"
+                                onClick={() => { clearHistory(); notify(); }}
+                                className="rounded-lg px-2 py-1 text-xs font-medium text-red-300 hover:bg-white/5"
                             >
-                                Clear All
+                                Clear all
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setIsOpen(false)}
+                                aria-label="Close recent uploads"
+                                className="grid h-8 w-8 place-items-center rounded-lg text-gray-400 hover:bg-white/5 hover:text-white"
+                            >
+                                <X className="h-4 w-4" aria-hidden="true" />
                             </button>
                         </div>
-
-                        <div className="max-h-[60vh] overflow-y-auto scrollbar-hidden">
-                            {history.map((item) => (
-                                <div
-                                    key={item.id}
-                                    onClick={() => window.open(`/v1/${item.shareId}`, '_blank')}
-                                    className="p-4 border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer group relative"
+                    </div>
+                    <ul className="max-h-[60vh] divide-y divide-white/5 overflow-y-auto">
+                        {history.map((item) => (
+                            <li key={item.id} className="group flex items-center gap-3 px-4 py-3 hover:bg-white/[0.03]">
+                                <FileTypeIcon type={(item.type as FileType) || 'unknown'} size="sm" />
+                                <a href={`/v1/${item.shareId}`} target="_blank" rel="noopener noreferrer" className="min-w-0 flex-1 rounded">
+                                    <span className="block truncate text-sm font-medium text-white">{item.filename}</span>
+                                    <span className="block text-xs text-gray-400">
+                                        {formatFileSize(item.size)} · {formatTimestamp(new Date(item.timestamp))}
+                                    </span>
+                                </a>
+                                <button
+                                    type="button"
+                                    onClick={() => { deleteHistoryItem(item.id); notify(); }}
+                                    aria-label={`Remove ${item.filename} from history`}
+                                    className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-gray-400 hover:bg-white/5 hover:text-red-300"
                                 >
-                                    <div className="flex items-start gap-3">
-                                        <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center text-xl flex-shrink-0">
-                                            {getFileIcon(item.type as any)}
-                                        </div>
+                                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                    <p className="border-t border-white/10 px-4 py-2 text-[11px] text-gray-400">Stored in this browser only, together with each file&apos;s decryption key.</p>
+                </div>
+            )}
 
-                                        <div className="flex-1 min-w-0">
-                                            <h4 className="text-sm font-bold text-white truncate pr-6">{item.filename}</h4>
-
-                                            <div className="flex items-center gap-3 mt-1 text-[10px] text-gray-400 font-mono">
-                                                <span className="flex items-center gap-1">
-                                                    <FileType className="w-3 h-3" />
-                                                    {formatFileSize(item.size)}
-                                                </span>
-                                                <span className="flex items-center gap-1">
-                                                    <Clock className="w-3 h-3" />
-                                                    {formatTimestamp(new Date(item.timestamp))}
-                                                </span>
-                                            </div>
-
-                                            <div className="flex items-center gap-2 mt-2">
-                                                {item.stats && (
-                                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 font-bold uppercase">
-                                                        {item.stats.ratio}
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        <button
-                                            onClick={(e) => handleDelete(item.id, e)}
-                                            className="absolute top-4 right-4 p-1.5 text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded-full hover:bg-white/10"
-                                        >
-                                            <Trash2 className="w-4 h-4" />
-                                        </button>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            <Button
-                onClick={() => setIsOpen(!isOpen)}
+            <button
+                type="button"
+                onClick={() => setIsOpen((v) => !v)}
+                aria-expanded={isOpen}
+                aria-controls="upload-history-panel"
+                aria-label={`Recent uploads (${history.length})`}
                 className={cn(
-                    "w-12 h-12 rounded-full shadow-lg border border-white/10",
-                    isOpen ? "bg-primary text-black" : "bg-black/80 text-white backdrop-blur-xl hover:bg-white/10"
+                    'grid h-12 w-12 place-items-center rounded-full border shadow-lg transition-colors',
+                    isOpen ? 'border-primary bg-primary text-on-primary' : 'border-white/10 bg-surface text-white hover:bg-surface-raised'
                 )}
-                style={{ padding: 0 }}
             >
-                <History className="w-5 h-5" />
-            </Button>
-        </div>
+                <History className="h-5 w-5" aria-hidden="true" />
+            </button>
+        </aside>
     );
 }

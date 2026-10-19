@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Inbox, Check, X, FileText, Image, Archive, Bell } from 'lucide-react';
+import NextImage from 'next/image';
+import { Inbox, Check, X, FileText, Image as ImageIcon, Archive, Bell } from 'lucide-react';
 
 interface InboxItem {
   id: string;
@@ -19,7 +20,7 @@ interface InboxItem {
 }
 
 function fileIcon(mime: string) {
-  if (mime?.startsWith('image/')) return <Image size={16} />;
+  if (mime?.startsWith('image/')) return <ImageIcon size={16} aria-hidden="true" />;
   if (mime?.includes('zip') || mime?.includes('tar')) return <Archive size={16} />;
   return <FileText size={16} />;
 }
@@ -46,9 +47,9 @@ export default function InboxPanel() {
   }, []);
 
   useEffect(() => {
-    fetchInbox();
+    const first = setTimeout(fetchInbox, 0);
     const interval = setInterval(fetchInbox, 15000);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(first); clearInterval(interval); };
   }, [fetchInbox]);
 
   const handleAction = async (id: string, action: 'accept' | 'decline') => {
@@ -67,10 +68,11 @@ export default function InboxPanel() {
       {/* Bell trigger */}
       <button
         onClick={() => setOpen(!open)}
-        className="relative p-3 rounded-2xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all hover:scale-105"
-        aria-label="Open Inbox"
+        className="relative grid h-10 w-10 place-items-center rounded-xl text-gray-300 transition-colors hover:bg-white/5 hover:text-white"
+        aria-label={pendingCount > 0 ? `Inbox, ${pendingCount} pending` : 'Inbox'}
+        aria-expanded={open}
       >
-        <Inbox size={20} className="text-slate-300" />
+        <Inbox size={18} aria-hidden="true" />
         {pendingCount > 0 && (
           <motion.span
             initial={{ scale: 0 }}
@@ -90,7 +92,7 @@ export default function InboxPanel() {
             animate={{ opacity: 1, x: 0, scale: 1 }}
             exit={{ opacity: 0, x: 20, scale: 0.96 }}
             transition={{ type: 'spring', stiffness: 300, damping: 28 }}
-            className="absolute bottom-14 right-0 w-96 bg-[#0d1424] border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50"
+            className="absolute top-12 right-0 w-[min(24rem,calc(100vw-2rem))] bg-[#0d1424] border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50"
           >
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/8">
@@ -98,13 +100,13 @@ export default function InboxPanel() {
                 <Bell size={16} className="text-violet-400" />
                 <span className="text-sm font-semibold text-white">File Inbox</span>
               </div>
-              <span className="text-xs text-slate-500">{pendingCount} pending</span>
+              <span className="text-xs text-slate-400">{pendingCount} pending</span>
             </div>
 
             {/* Items */}
             <div className="max-h-[400px] overflow-y-auto divide-y divide-white/5">
               {items.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-slate-600">
+                <div className="flex flex-col items-center justify-center py-12 text-slate-400">
                   <Inbox size={32} className="mb-3 opacity-40" />
                   <p className="text-sm">Your inbox is empty</p>
                 </div>
@@ -120,7 +122,7 @@ export default function InboxPanel() {
                     {/* Sender */}
                     <div className="flex items-center gap-2 mb-2">
                       {item.sender_image ? (
-                        <img src={item.sender_image} className="w-6 h-6 rounded-full" alt="" />
+                        <NextImage src={item.sender_image} width={24} height={24} unoptimized className="w-6 h-6 rounded-full" alt="" />
                       ) : (
                         <div className="w-6 h-6 rounded-full bg-violet-500/30 flex items-center justify-center text-violet-400 text-[10px] font-bold">
                           {item.sender_name?.[0]?.toUpperCase() || '?'}
@@ -128,7 +130,7 @@ export default function InboxPanel() {
                       )}
                       <span className="text-xs font-medium text-slate-300">{item.sender_name}</span>
                       {item.sender_username && (
-                        <span className="text-[10px] text-slate-600">@{item.sender_username}</span>
+                        <span className="text-[10px] text-slate-400">@{item.sender_username}</span>
                       )}
                     </div>
 
@@ -136,11 +138,11 @@ export default function InboxPanel() {
                     <div className="flex items-center gap-2 px-3 py-2 bg-white/4 rounded-xl mb-3">
                       <span className="text-slate-400">{fileIcon(item.mime_type)}</span>
                       <span className="text-xs text-white font-mono truncate flex-1">{item.original_name || item.share_id}</span>
-                      <span className="text-[10px] text-slate-600 whitespace-nowrap">{formatBytes(item.file_size)}</span>
+                      <span className="text-[10px] text-slate-400 whitespace-nowrap">{formatBytes(item.file_size)}</span>
                     </div>
 
                     {item.message && (
-                      <p className="text-xs text-slate-500 italic mb-3">"{item.message}"</p>
+                      <p className="text-xs text-slate-400 italic mb-3">&ldquo;{item.message}&rdquo;</p>
                     )}
 
                     {/* Actions */}
@@ -181,7 +183,7 @@ export default function InboxPanel() {
                       </a>
                     )}
                     {item.status === 'declined' && (
-                      <p className="text-center text-xs text-slate-600">Declined</p>
+                      <p className="text-center text-xs text-slate-400">Declined</p>
                     )}
                   </motion.div>
                 ))

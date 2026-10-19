@@ -1,14 +1,16 @@
-import { Activity } from 'lucide-react';
+import Link from 'next/link';
 import { PageProtocolBadge } from '@/components/features/ConnectionInfo';
 
 export default function Footer() {
   return (
-    <div className="mt-20 py-8 w-full border-t border-white/5 flex flex-col sm:flex-row items-center justify-between gap-6 text-gray-500">
-      <div className="flex items-center gap-2">
-        <Activity className="w-4 h-4 text-primary/50" />
-        <PageProtocolBadge className="text-[10px] uppercase tracking-widest font-medium" />
-      </div>
-      <p className="text-[10px] uppercase tracking-widest font-medium">© 2026 Datran</p>
-    </div>
+    <footer className="mx-auto mt-16 flex w-full max-w-6xl flex-col items-center justify-between gap-4 border-t border-white/10 py-8 text-sm text-gray-400 sm:flex-row">
+      <p>© {new Date().getFullYear()} Datran · Encrypted file sharing</p>
+      <nav aria-label="Footer" className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
+        <Link href="/" className="rounded hover:text-white">Send files</Link>
+        <Link href="/billing" className="rounded hover:text-white">Plans</Link>
+        <Link href="/dashboard" className="rounded hover:text-white">My transfers</Link>
+        <PageProtocolBadge className="text-xs text-gray-400" />
+      </nav>
+    </footer>
   );
 }

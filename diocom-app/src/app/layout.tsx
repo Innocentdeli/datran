@@ -1,13 +1,18 @@
 
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Datran | Premium Data Transfer",
-  description: "High-performance, secure file sharing with zero latency.",
+  title: "Datran — encrypted file sharing",
+  description: "Send large files with end-to-end encryption, resumable uploads and links that expire. Optional password protection.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#050505",
+  colorScheme: "dark",
 };
 
 import { NextAuthProvider } from "@/components/providers/NextAuthProvider";
@@ -19,7 +24,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={inter.className}>
+      <body className={`${inter.className} bg-background text-foreground`}>
         <NextAuthProvider>
           {children}
         </NextAuthProvider>

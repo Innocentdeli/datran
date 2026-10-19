@@ -1,27 +1,21 @@
 import Link from 'next/link';
 import { FileQuestion } from 'lucide-react';
-import Button from '@/components/ui/Button';
+import { buttonClasses } from '@/components/ui/Button';
 
 export default function NotFound() {
   return (
-    <div className="min-h-screen bg-mesh text-white flex items-center justify-center p-8">
-      <div className="max-w-md w-full glass p-8 text-center">
-        <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4 border border-primary/20">
-          <FileQuestion className="w-8 h-8 text-primary" />
-        </div>
-        
-        <h2 className="text-2xl font-black uppercase italic tracking-tighter mb-2">
-          404: Not Found
-        </h2>
-        
-        <p className="text-sm text-gray-400 mb-6">
-          This atom does not exist in the compression swarm.
+    <main className="bg-mesh flex min-h-dvh items-center justify-center p-4 sm:p-8">
+      <div className="panel w-full max-w-md p-8 text-center">
+        <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary" aria-hidden="true">
+          <FileQuestion className="h-7 w-7" />
+        </span>
+        <p className="text-sm font-medium text-primary">404</p>
+        <h1 className="mb-2 mt-1 text-xl font-semibold text-white">Page not found</h1>
+        <p className="mb-6 text-sm text-gray-300">
+          The page you&apos;re looking for doesn&apos;t exist or has moved. If you followed a share link, it may have expired.
         </p>
-        
-        <Link href="/">
-          <Button variant="primary">Return to Swarm</Button>
-        </Link>
+        <Link href="/" className={buttonClasses('primary', 'md')}>Back to Datran</Link>
       </div>
-    </div>
+    </main>
   );
 }

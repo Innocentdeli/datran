@@ -62,7 +62,7 @@ export default function ConnectionInfo({ title = 'Connection' }: { title?: strin
             <dl className="flex flex-col gap-2">
                 {rows.map(({ icon: Icon, label, value }) => (
                     <div key={label} className="flex items-center justify-between gap-3 text-xs">
-                        <dt className="flex items-center gap-2 text-gray-500">
+                        <dt className="flex items-center gap-2 text-gray-400">
                             <Icon className="w-3.5 h-3.5" />
                             {label}
                         </dt>
@@ -70,7 +70,7 @@ export default function ConnectionInfo({ title = 'Connection' }: { title?: strin
                     </div>
                 ))}
             </dl>
-            <p className="mt-3 text-[10px] text-gray-600 leading-relaxed">
+            <p className="mt-3 text-[11px] text-gray-400 leading-relaxed">
                 Reported by your browser for this connection. Browsers switch to HTTP/3 after
                 seeing the server&apos;s Alt-Svc header, so a first visit often shows HTTP/2.
             </p>

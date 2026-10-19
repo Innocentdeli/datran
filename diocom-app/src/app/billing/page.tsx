@@ -15,13 +15,12 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
     const [summary, ledger] = await Promise.all([getBillingSummary(session.user.id), getLedger(session.user.id, 50)]);
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center p-4 sm:p-8 font-sans selection:bg-primary/30">
-            <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900/40 via-black to-black -z-10" />
+        <div className="bg-mesh flex min-h-dvh flex-col px-4 pt-4 sm:px-8 sm:pt-6">
             <Header />
-            <main className="w-full max-w-5xl flex-1 flex flex-col gap-8">
+            <main id="main" className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-8">
                 <div>
-                    <h2 className="text-3xl font-bold tracking-tight text-white mb-1">Plan &amp; Billing</h2>
-                    <p className="text-xs text-gray-400 font-medium tracking-wide uppercase">Usage, credits and subscription</p>
+                    <h1 className="text-3xl font-bold tracking-tight text-white">Plan &amp; billing</h1>
+                    <p className="mt-1 text-sm text-gray-300">Your plan, usage this month, credits and subscription.</p>
                 </div>
                 <BillingClient summary={summary} ledger={ledger} checkout={params?.checkout ?? null} />
             </main>

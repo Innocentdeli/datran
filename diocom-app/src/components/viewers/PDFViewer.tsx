@@ -1,9 +1,10 @@
 'use client';
 
-import { Download, ExternalLink, FileText } from 'lucide-react';
-import Button from '@/components/ui/Button';
+import { useState } from 'react';
+import { ExternalLink } from 'lucide-react';
 import type { PublicFile } from '@/db/files';
 import { useE2ESource } from './useE2ESource';
+import { PreviewError, PreviewSkeleton } from './PreviewState';
 
 interface PDFViewerProps {
     fileId: string;
@@ -11,71 +12,39 @@ interface PDFViewerProps {
 }
 
 export default function PDFViewer({ fileId, metadata }: PDFViewerProps) {
-    const title = metadata?.original_name || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
-    const { src: resolvedUrl, error: decryptError, download } = useE2ESource(fileId, metadata);
+    const [retry, setRetry] = useState(0);
+    const [loaded, setLoaded] = useState<number | null>(null);
+    const { src, error } = useE2ESource(fileId, metadata, retry);
+    const title = metadata?.original_name || 'PDF document';
+
+    if (error) {
+        return <PreviewError className="min-h-64" message={error} onRetry={() => setRetry((r) => r + 1)} />;
+    }
 
     return (
-        <div className="flex flex-col h-[85vh] w-full bg-black/40 rounded-[28px] overflow-hidden border border-white/5 shadow-2xl backdrop-blur-xl">
-            {/* PDF Header / Controls */}
-            <div className="flex items-center justify-between px-6 py-4 bg-white/5 border-b border-white/10 shrink-0">
-                <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center">
-                        <FileText className="w-4 h-4 text-red-500" />
-                    </div>
-                    <span className="text-xs font-mono text-gray-400 uppercase tracking-widest truncate max-w-[200px]">
-                        {title}
-                    </span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                    <Button
-                        variant="secondary"
-                        size="sm"
-                        className="gap-2 h-9"
-                        onClick={() => {
-                            download().catch((err: unknown) => alert(err instanceof Error ? err.message : String(err)));
-                        }}
-                    >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">Download</span>
-                    </Button>
-                    {resolvedUrl && (
-                        <a href={resolvedUrl} target="_blank" rel="noopener">
-                            <Button variant="ghost" size="sm" className="h-9 w-9 p-0">
-                                <ExternalLink className="w-4 h-4" />
-                            </Button>
-                        </a>
-                    )}
-                </div>
-            </div>
-
-            {/* PDF Container */}
-            <div className="flex-1 bg-[#1a1a1a] relative group overflow-hidden">
-                {decryptError ? (
-                    <div className="absolute inset-0 flex items-center justify-center p-8">
-                        <p className="text-sm text-red-400 text-center max-w-md" role="alert">{decryptError}</p>
-                    </div>
-                ) : resolvedUrl ? (
+        <div className="flex flex-col gap-2">
+            <div className="relative h-[70vh] min-h-80 w-full overflow-hidden rounded-2xl border border-white/10 bg-[#1a1a1a]">
+                {loaded !== retry && <PreviewSkeleton label="Loading document…" className="absolute inset-0 rounded-none" />}
+                {src && (
                     <iframe
-                        src={`${resolvedUrl}#navpanes=0`}
-                        className="w-full h-full border-none"
-                        title="PDF Content"
+                        key={retry}
+                        src={`${src}#navpanes=0`}
+                        title={`Preview of ${title}`}
+                        onLoad={() => setLoaded(retry)}
+                        className="relative h-full w-full border-0"
                     />
-                ) : (
-                    <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin" />
-                    </div>
                 )}
-
-                {/* Overlay to catch clicks if needed or styling */}
-                <div className="absolute inset-0 pointer-events-none border border-white/5 rounded-b-[28px]" />
             </div>
-
-            <div className="px-6 py-3 bg-white/5 border-t border-white/10 flex justify-center">
-                <p className="text-[10px] font-mono text-gray-600 uppercase tracking-[0.2em]">
-                    PDF document viewer
-                </p>
-            </div>
+            {src && (
+                <a
+                    href={src}
+                    target="_blank"
+                    rel="noopener"
+                    className="inline-flex h-9 items-center gap-1.5 self-end rounded-lg px-2.5 text-xs font-medium text-gray-300 hover:bg-white/5 hover:text-white"
+                >
+                    <ExternalLink className="h-4 w-4" aria-hidden="true" /> Open in new tab
+                </a>
+            )}
         </div>
     );
 }

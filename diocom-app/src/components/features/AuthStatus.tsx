@@ -1,90 +1,78 @@
 'use client';
 
-import { signIn, signOut, useSession } from 'next-auth/react';
-import { LogIn, LogOut, User } from 'lucide-react';
-import Button from '@/components/ui/Button';
+import { signOut, useSession } from 'next-auth/react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import Image from 'next/image';
+import { LogIn, LogOut, User, LayoutGrid, Shield } from 'lucide-react';
+import { buttonClasses } from '@/components/ui/Button';
 
 export default function AuthStatus() {
     const { data: session, status } = useSession();
-    const router = useRouter();
 
     if (status === 'loading') {
-        return (
-            <div className="flex items-center gap-4 animate-pulse">
-                <div className="h-4 w-20 bg-white/5 rounded"></div>
-                <div className="h-4 w-20 bg-white/5 rounded"></div>
-            </div>
-        );
+        return <div className="skeleton h-10 w-24 rounded-xl" aria-hidden="true" />;
     }
 
     if (session) {
+        const isAdmin = (session.user as { role?: string } | undefined)?.role === 'admin';
+        const name = session.user?.name?.split(' ')[0] || session.user?.email || 'Account';
         return (
-            <div className="flex items-center gap-4">
-                <Link href="/" className="text-[11px] font-bold text-gray-400 hover:text-white transition uppercase tracking-widest px-2">
-                    New Upload
+            <div className="flex items-center gap-1 sm:gap-2">
+                <Link
+                    href="/dashboard"
+                    aria-label="My transfers"
+                    className="flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium text-gray-300 transition-colors hover:bg-white/5 hover:text-white sm:px-3"
+                >
+                    <LayoutGrid className="h-4 w-4" aria-hidden="true" />
+                    <span className="hidden lg:inline">My transfers</span>
                 </Link>
 
-                <div className="h-3 w-[1px] bg-white/10"></div>
-
-                <Link href="/dashboard" className="text-[11px] font-bold text-gray-400 hover:text-primary transition uppercase tracking-widest px-2">
-                    My Transfers
-                </Link>
-
-                {(session.user as any).role === 'admin' && (
-                    <>
-                        <div className="h-3 w-[1px] bg-white/10"></div>
-                        <Link href="/admin" className="text-[11px] font-bold text-red-500/60 hover:text-red-400 transition uppercase tracking-widest px-2">
-                            Admin
-                        </Link>
-                    </>
+                {isAdmin && (
+                    <Link
+                        href="/admin"
+                        aria-label="Admin"
+                        className="flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium text-red-300 transition-colors hover:bg-white/5 sm:px-3"
+                    >
+                        <Shield className="h-4 w-4" aria-hidden="true" />
+                        <span className="hidden lg:inline">Admin</span>
+                    </Link>
                 )}
 
-                <div className="h-8 w-[1px] bg-white/10 mx-1"></div>
-
-                <div className="flex items-center gap-3 pl-2">
-                    <div className="relative">
-                        {session.user?.image ? (
-                            <img
-                                src={session.user.image}
-                                alt={session.user.name || 'User'}
-                                className="w-8 h-8 rounded-xl border border-white/10 shadow-lg"
-                            />
-                        ) : (
-                            <div className="w-8 h-8 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
-                                <User className="w-4 h-4 text-white/30" />
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="hidden lg:flex flex-col items-start leading-none">
-                        <span className="text-xs font-bold text-white mb-0.5">
-                            {session.user?.name?.split(' ')[0]}
+                <span className="hidden items-center gap-2 pl-1 sm:flex" title={session.user?.email ?? undefined}>
+                    {session.user?.image ? (
+                        <Image
+                            src={session.user.image}
+                            alt=""
+                            width={32}
+                            height={32}
+                            unoptimized
+                            className="h-8 w-8 rounded-full border border-white/10"
+                        />
+                    ) : (
+                        <span className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/5">
+                            <User className="h-4 w-4 text-gray-300" aria-hidden="true" />
                         </span>
-                    </div>
-                </div>
+                    )}
+                    <span className="hidden max-w-[10rem] truncate text-sm font-medium text-white xl:inline">{name}</span>
+                </span>
 
                 <button
+                    type="button"
                     onClick={() => signOut()}
-                    className="p-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-white/20 text-gray-400 hover:text-white transition-all shadow-xl group"
-                    title="Sign Out"
+                    aria-label="Sign out"
+                    title="Sign out"
+                    className="grid h-10 w-10 place-items-center rounded-xl text-gray-300 transition-colors hover:bg-white/5 hover:text-white"
                 >
-                    <LogOut className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                    <LogOut className="h-4 w-4" aria-hidden="true" />
                 </button>
             </div>
         );
     }
 
     return (
-        <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => router.push('/auth/signin')}
-            className="gap-2 bg-white/5 hover:bg-white/10 border-white/10 text-[11px] font-black uppercase tracking-widest py-2 px-5 rounded-xl"
-        >
-            <LogIn className="w-3.5 h-3.5" />
-            <span>Sign In</span>
-        </Button>
+        <Link href="/auth/signin" className={buttonClasses('secondary', 'sm', 'h-10')}>
+            <LogIn className="h-4 w-4" aria-hidden="true" />
+            <span>Sign in</span>
+        </Link>
     );
 }

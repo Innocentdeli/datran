@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect } from 'react';
+import Link from 'next/link';
 import { AlertCircle } from 'lucide-react';
-import Button from '@/components/ui/Button';
+import Button, { buttonClasses } from '@/components/ui/Button';
 
 export default function Error({
   error,
@@ -14,32 +15,23 @@ export default function Error({
   useEffect(() => {
     console.error('[DIOCOM ERROR]', error);
   }, [error]);
-  
+
   return (
-    <div className="min-h-screen bg-mesh text-white flex items-center justify-center p-8">
-      <div className="max-w-md w-full glass p-8 text-center">
-        <div className="w-16 h-16 rounded-full bg-error/10 flex items-center justify-center mx-auto mb-4 border border-error/20">
-          <AlertCircle className="w-8 h-8 text-error" />
-        </div>
-        
-        <h2 className="text-2xl font-black uppercase italic tracking-tighter mb-2">
-          System Error
-        </h2>
-        
-        <p className="text-sm text-gray-400 mb-6">
-          {error.message || 'Something went wrong with the compression swarm.'}
+    <main className="bg-mesh flex min-h-dvh items-center justify-center p-4 sm:p-8">
+      <div role="alert" className="panel w-full max-w-md p-8 text-center">
+        <span className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl border border-red-400/25 bg-red-500/10 text-red-300" aria-hidden="true">
+          <AlertCircle className="h-7 w-7" />
+        </span>
+        <h1 className="mb-2 text-xl font-semibold text-white">Something went wrong</h1>
+        <p className="mb-6 text-sm text-gray-300">
+          {error.message || 'An unexpected error occurred while loading this page.'}
+          {error.digest ? <span className="mt-2 block font-mono text-xs text-gray-400">Reference: {error.digest}</span> : null}
         </p>
-        
-        <div className="flex gap-3 justify-center">
-          <Button onClick={reset} variant="primary">
-            Try Again
-          </Button>
-          
-          <Button onClick={() => (window.location.href = '/')} variant="secondary">
-            Go Home
-          </Button>
+        <div className="flex flex-col justify-center gap-2 sm:flex-row">
+          <Button onClick={reset}>Try again</Button>
+          <Link href="/" className={buttonClasses('secondary', 'md')}>Go home</Link>
         </div>
       </div>
-    </div>
+    </main>
   );
 }

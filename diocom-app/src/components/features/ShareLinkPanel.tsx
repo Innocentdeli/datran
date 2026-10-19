@@ -1,155 +1,144 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Copy, Check, ExternalLink, QrCode, X, AtSign, Zap } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { cn } from '@/lib/utils';
-import QRCodeLib from 'qrcode';
+import { useEffect, useId, useRef, useState } from 'react';
+import Image from 'next/image';
 import dynamic from 'next/dynamic';
+import { Copy, Check, ExternalLink, QrCode, AtSign, Smartphone } from 'lucide-react';
+import QRCodeLib from 'qrcode';
+import { cn, formatFileSize } from '@/lib/utils';
+import FileTypeIcon from '@/components/ui/FileTypeIcon';
+import { buttonClasses } from '@/components/ui/Button';
 
 const UserPushModal = dynamic(() => import('./UserPushModal'), { ssr: false });
 const QRSharePanel = dynamic(() => import('./QRSharePanel'), { ssr: false });
 
 export interface ShareLinkPanelProps {
   url: string;
-  onClose?: () => void;
+  fileName?: string;
+  fileSize?: number;
+  /** Show the QR code without a toggle (single-file results). */
+  qrOpen?: boolean;
+  /** Offer "Send to @user" / "QR session" (signed-in users). */
+  showSendOptions?: boolean;
 }
 
-export default function ShareLinkPanel({ url, onClose }: ShareLinkPanelProps) {
+export default function ShareLinkPanel({ url, fileName, fileSize, qrOpen = false, showSendOptions = false }: ShareLinkPanelProps) {
+  const inputId = useId();
   const [copied, setCopied] = useState(false);
-  const [showQR, setShowQR] = useState(false);
-  const [qrData, setQrData] = useState<string>('');
+  const [copyError, setCopyError] = useState(false);
+  const [showQR, setShowQR] = useState(qrOpen);
+  const [qrData, setQrData] = useState('');
   const [showPushModal, setShowPushModal] = useState(false);
   const [showQRPair, setShowQRPair] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Extract share ID from URL (strip hash key)
-  const shareId = url?.split('/').pop()?.split('#')[0] || '';
+  // Share id without the #key fragment.
+  const shareId = url.split('#')[0].split('/').pop() || '';
 
   useEffect(() => {
-    if (url) {
-      QRCodeLib.toDataURL(url, { margin: 1, color: { dark: '#00F2FF', light: '#00000000' } })
-        .then(setQrData)
-        .catch(console.error);
-    }
-  }, [url]);
+    if (!showQR || qrData) return;
+    let cancelled = false;
+    // Dark-on-light for reliable scanning.
+    QRCodeLib.toDataURL(url, { margin: 2, width: 320, color: { dark: '#04121A', light: '#FFFFFF' } })
+      .then((d) => { if (!cancelled) setQrData(d); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [showQR, qrData, url]);
+
+  useEffect(() => () => clearTimeout(timer.current), []);
 
   const handleCopy = async () => {
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy text: ', err);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked (insecure context / permissions): select the text so it can be copied manually.
+      inputRef.current?.select();
+      setCopyError(true);
     }
   };
 
   return (
-    <>
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-2xl mx-auto"
-      >
-        <div className="glass p-6 rounded-2xl border border-primary/20 bg-black/40 backdrop-blur-md relative overflow-hidden group">
-          <div className="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors duration-500" />
-
-          <div className="relative z-10 flex flex-col gap-6">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-bold text-primary tracking-[0.2em] uppercase">Transfer Link Ready</span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowQR(!showQR)}
-                  className="text-gray-400 hover:text-white transition p-2 hover:bg-white/5 rounded-lg border border-transparent hover:border-white/10"
-                  title="Toggle QR Code"
-                >
-                  <QrCode className="w-5 h-5" />
-                </button>
-                {onClose && (
-                  <button
-                    onClick={onClose}
-                    className="text-gray-400 hover:text-white transition p-2 hover:bg-white/5 rounded-lg border border-transparent hover:border-white/10"
-                    title="Close"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-4">
-              <div className="bg-black/40 rounded-2xl border border-white/5 flex items-center px-6 py-4 relative overflow-hidden">
-                <code className="text-gray-200 font-mono text-sm sm:text-base truncate flex-1">{url}</code>
-                <div className="absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-[#0A0F1A] to-transparent pointer-events-none" />
-              </div>
-
-              {/* Primary actions */}
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={handleCopy}
-                  className={cn(
-                    "py-4 rounded-2xl font-bold transition-all duration-300 flex items-center justify-center gap-2",
-                    copied
-                      ? "bg-success text-white"
-                      : "bg-primary text-white hover:bg-primary-dark"
-                  )}
-                >
-                  {copied ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
-                  <span className="text-sm">{copied ? 'Copied' : 'Copy Link'}</span>
-                </button>
-
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="py-4 rounded-2xl bg-white/5 text-white hover:bg-white/10 border border-white/10 transition-all font-bold flex items-center justify-center gap-2 text-sm"
-                >
-                  <ExternalLink className="w-5 h-5" />
-                  Open
-                </a>
-              </div>
-
-              {/* Alternative send methods */}
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setShowPushModal(true)}
-                  className="flex items-center justify-center gap-2 py-3 rounded-xl bg-violet-500/12 border border-violet-500/25 text-violet-300 text-xs font-medium hover:bg-violet-500/20 transition-colors"
-                >
-                  <AtSign size={14} />
-                  Push to @user
-                </button>
-                <button
-                  onClick={() => setShowQRPair(true)}
-                  className="flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-500/12 border border-blue-500/25 text-blue-300 text-xs font-medium hover:bg-blue-500/20 transition-colors"
-                >
-                  <Zap size={14} />
-                  QR Session
-                </button>
-              </div>
-            </div>
-
-            <AnimatePresence>
-              {showQR && qrData && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="overflow-hidden flex justify-center pt-4"
-                >
-                  <div className="bg-white/5 p-4 rounded-xl border border-white/10">
-                    <img src={qrData} alt="QR Code" className="w-48 h-48" />
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+    <div className="panel p-4 sm:p-5">
+      {fileName ? (
+        <div className="mb-3 flex items-center gap-3">
+          <FileTypeIcon name={fileName} size="sm" />
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-white" title={fileName}>{fileName}</p>
+            {fileSize !== undefined ? <p className="text-xs text-gray-400">{formatFileSize(fileSize)}</p> : null}
           </div>
         </div>
-      </motion.div>
+      ) : null}
 
-      {/* Modals */}
-      <AnimatePresence>
-        {showPushModal && <UserPushModal shareId={shareId} onClose={() => setShowPushModal(false)} />}
-        {showQRPair && <QRSharePanel shareId={shareId} onClose={() => setShowQRPair(false)} />}
-      </AnimatePresence>
-    </>
+      <label htmlFor={inputId} className="sr-only">Share link{fileName ? ` for ${fileName}` : ''}</label>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <input
+          id={inputId}
+          ref={inputRef}
+          readOnly
+          value={url}
+          onFocus={(e) => e.currentTarget.select()}
+          className="h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/40 px-3 font-mono text-sm text-gray-200 focus:border-primary/60 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={handleCopy}
+          className={cn(buttonClasses(copied ? 'success' : 'primary', 'md'), 'sm:w-32')}
+        >
+          {copied ? <Check className="h-4 w-4" aria-hidden="true" /> : <Copy className="h-4 w-4" aria-hidden="true" />}
+          {copied ? 'Copied' : 'Copy link'}
+        </button>
+      </div>
+      <p className="sr-only" aria-live="polite">{copied ? 'Link copied to clipboard' : ''}</p>
+      {copyError ? (
+        <p className="mt-2 text-xs text-amber-300" role="status">Couldn&apos;t access the clipboard. The link is selected — press Ctrl+C (⌘C) to copy.</p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <a href={url} target="_blank" rel="noopener noreferrer" className={buttonClasses('secondary', 'sm')}>
+          <ExternalLink className="h-4 w-4" aria-hidden="true" /> Open
+        </a>
+        {!qrOpen && (
+          <button type="button" onClick={() => setShowQR((v) => !v)} aria-expanded={showQR} className={buttonClasses('secondary', 'sm')}>
+            <QrCode className="h-4 w-4" aria-hidden="true" /> {showQR ? 'Hide QR code' : 'QR code'}
+          </button>
+        )}
+        {showSendOptions && (
+          <>
+            <button type="button" onClick={() => setShowPushModal(true)} className={buttonClasses('secondary', 'sm')}>
+              <AtSign className="h-4 w-4" aria-hidden="true" /> Send to @user
+            </button>
+            <button type="button" onClick={() => setShowQRPair(true)} className={buttonClasses('secondary', 'sm')}>
+              <Smartphone className="h-4 w-4" aria-hidden="true" /> QR session
+            </button>
+          </>
+        )}
+      </div>
+
+      {showQR && (
+        <div className="mt-4 flex flex-col items-center gap-2">
+          {qrData ? (
+            <Image
+              src={qrData}
+              alt="QR code of the share link"
+              width={176}
+              height={176}
+              unoptimized
+              className="h-44 w-44 rounded-xl bg-white p-1"
+            />
+          ) : (
+            <div className="skeleton h-44 w-44 rounded-xl" aria-hidden="true" />
+          )}
+          <p className="text-xs text-gray-400">Scan to open on another device</p>
+        </div>
+      )}
+
+      {showPushModal && <UserPushModal shareId={shareId} onClose={() => setShowPushModal(false)} />}
+      {showQRPair && <QRSharePanel shareId={shareId} onClose={() => setShowQRPair(false)} />}
+    </div>
   );
 }

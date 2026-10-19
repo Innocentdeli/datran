@@ -33,3 +33,34 @@ export function formatTimestamp(date: Date): string {
 
   return date.toLocaleTimeString();
 }
+
+/** Transfer rate, e.g. "4.2 MB/s". */
+export function formatSpeed(bytesPerSecond: number): string {
+  if (!isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '—';
+  return `${formatFileSize(Math.round(bytesPerSecond))}/s`;
+}
+
+/** Compact duration for ETAs and countdowns: "45 s", "3 min", "2 h 5 min", "3 d 4 h". */
+export function formatDurationShort(seconds: number): string {
+  if (!isFinite(seconds) || seconds < 0) return '—';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(s / 3600);
+  if (h < 48) {
+    const rm = Math.floor((s % 3600) / 60);
+    return rm ? `${h} h ${rm} min` : `${h} h`;
+  }
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh ? `${d} d ${rh} h` : `${d} d`;
+}
+
+/** Human label for a link lifetime given in hours: "1 hour", "24 hours", "7 days". */
+export function formatHours(hours: number): string {
+  if (hours < 1) return `${Math.round(hours * 60)} minutes`;
+  if (hours < 48) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const d = Math.round(hours / 24);
+  return `${d} day${d === 1 ? '' : 's'}`;
+}

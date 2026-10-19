@@ -1,14 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
-import { detectFileType, FileType } from '@/lib/fileUtils';
-import { config } from '@/config';
+import { useSyncExternalStore } from 'react';
+import { Clock, Download as DownloadIcon, Lock, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { detectFileType } from '@/lib/fileUtils';
+import { formatDurationShort, formatFileSize } from '@/lib/utils';
 import VideoPlayer from './VideoPlayer';
 import AudioPlayer from '@/components/viewers/AudioPlayer';
 import ImageViewer from '@/components/viewers/ImageViewer';
 import PDFViewer from '@/components/viewers/PDFViewer';
 import DownloadViewer from '@/components/viewers/DownloadViewer';
+import DownloadButton from '@/components/viewers/DownloadButton';
+import FileTypeIcon, { fileTypeLabel } from '@/components/ui/FileTypeIcon';
 import type { PublicFile } from '@/db/files';
 
 interface OmniPlayerProps {
@@ -16,71 +18,96 @@ interface OmniPlayerProps {
   metadata?: PublicFile;
 }
 
+// A shared 1 s clock (client only; the server renders no countdown, so there is no hydration mismatch).
+function subscribeClock(cb: () => void) {
+  const t = setInterval(cb, 1000);
+  return () => clearInterval(t);
+}
+const clientNow = () => Math.floor(Date.now() / 1000) * 1000;
+const serverNow = () => null;
+
+function ExpiryCountdown({ expiresAt }: { expiresAt: number }) {
+  const now = useSyncExternalStore(subscribeClock, clientNow, serverNow);
+  const label = now === null
+    ? `Expires ${new Date(expiresAt).toISOString().slice(0, 10)}`
+    : expiresAt <= now ? 'Expired' : `Expires in ${formatDurationShort((expiresAt - now) / 1000)}`;
+  const soon = now !== null && expiresAt - now < 3600_000;
+  return (
+    <span
+      className={soon ? 'text-amber-300' : undefined}
+      title={now === null ? undefined : new Date(expiresAt).toLocaleString()}
+    >
+      {label}
+    </span>
+  );
+}
+
+function Pill({ children, tone = 'neutral' }: { children: React.ReactNode; tone?: 'neutral' | 'success' | 'warning' }) {
+  const tones = {
+    neutral: 'border-white/10 bg-white/5 text-gray-200',
+    success: 'border-emerald-400/25 bg-emerald-500/10 text-emerald-300',
+    warning: 'border-amber-400/25 bg-amber-500/10 text-amber-200',
+  };
+  return <li className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${tones[tone]}`}>{children}</li>;
+}
+
 export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
-  const [fileType, setFileType] = useState<FileType | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(true);
-  const originalName = metadata?.original_name;
+  // Share ids are random, so detect the type from the original filename (legacy ids embed it).
+  const name = metadata?.original_name || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
+  const fileType = detectFileType(name);
+  const isEncrypted = metadata?.is_encrypted === 1;
 
-  useEffect(() => {
-    // Share ids are random, so detect the type from the original filename (legacy ids embed it).
-    const name = originalName || decodeURIComponent(fileId).replace(/\.(omni|reactor)\.acs$/, '');
-    const detectedType = detectFileType(name);
-
-    // Quick analysis (configurable delay for smooth transition)
-    setTimeout(() => {
-      setFileType(detectedType);
-      setIsAnalyzing(false);
-    }, config.ui.analysisDelay);
-  }, [fileId, originalName]);
-
-  if (isAnalyzing || !fileType) {
-    return (
-      <div className="relative aspect-video bg-gradient-to-br from-gray-900 to-black flex flex-col items-center justify-center rounded-[28px] sm:rounded-[36px]">
-        <Loader2 className="w-12 h-12 text-primary animate-spin mb-4" />
-        <p className="text-[10px] font-mono text-primary animate-pulse tracking-[0.2em] uppercase">
-          Loading file...
-        </p>
-      </div>
-    );
-  }
-
-  // Route to appropriate viewer based on file type
+  let preview: React.ReactNode;
   switch (fileType) {
     case 'video':
-      return <VideoPlayer fileId={fileId} metadata={metadata} />;
-
+      preview = <VideoPlayer fileId={fileId} metadata={metadata} />;
+      break;
     case 'audio':
-      return (
-        <div className="bg-gradient-to-br from-gray-900 to-black rounded-[28px] sm:rounded-[36px]">
-          <AudioPlayer fileId={fileId} metadata={metadata} />
-        </div>
-      );
-
+      preview = <AudioPlayer fileId={fileId} metadata={metadata} />;
+      break;
     case 'image':
-      return (
-        <div className="bg-gradient-to-br from-gray-900 to-black rounded-[28px] sm:rounded-[36px] p-8">
-          <ImageViewer fileId={fileId} metadata={metadata} />
-        </div>
-      );
-
+      preview = <ImageViewer fileId={fileId} metadata={metadata} />;
+      break;
     case 'pdf':
-      return <PDFViewer fileId={fileId} metadata={metadata} />;
-
-    case 'document':
-    case 'archive':
-    case 'code':
-    case 'unknown':
-      return (
-        <div className="bg-gradient-to-br from-gray-900 to-black rounded-[28px] sm:rounded-[36px]">
-          <DownloadViewer fileId={fileId} fileType={fileType} metadata={metadata} />
-        </div>
-      );
-
+      preview = <PDFViewer fileId={fileId} metadata={metadata} />;
+      break;
     default:
-      return (
-        <div className="bg-gradient-to-br from-gray-900 to-black rounded-[28px] sm:rounded-[36px]">
-          <DownloadViewer fileId={fileId} fileType="unknown" metadata={metadata} />
-        </div>
-      );
+      preview = <DownloadViewer fileId={fileId} fileType={fileType === 'document' || fileType === 'archive' || fileType === 'code' ? fileType : 'unknown'} metadata={metadata} />;
   }
+
+  return (
+    <article aria-labelledby="file-name" className="flex flex-col gap-5">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 items-start gap-4">
+          <FileTypeIcon name={name} size="lg" />
+          <div className="min-w-0">
+            <h1 id="file-name" className="break-words text-xl font-semibold leading-snug text-white sm:text-2xl">{name}</h1>
+            <p className="mt-1 text-sm text-gray-300">
+              {metadata?.file_size ? formatFileSize(metadata.file_size) : 'Unknown size'} · {fileTypeLabel(name)}
+            </p>
+          </div>
+        </div>
+        <DownloadButton fileId={fileId} metadata={metadata} className="w-full sm:w-64 sm:shrink-0" />
+      </div>
+
+      <ul className="flex flex-wrap gap-2" aria-label="File details">
+        {isEncrypted ? (
+          <Pill tone="success"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> End-to-end encrypted</Pill>
+        ) : (
+          <Pill><ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" /> Encrypted in transit (HTTPS)</Pill>
+        )}
+        {metadata?.has_password ? <Pill><Lock className="h-3.5 w-3.5" aria-hidden="true" /> Password protected</Pill> : null}
+        {metadata?.expires_at ? (
+          <Pill><Clock className="h-3.5 w-3.5" aria-hidden="true" /> <ExpiryCountdown expiresAt={metadata.expires_at} /></Pill>
+        ) : (
+          <Pill><Clock className="h-3.5 w-3.5" aria-hidden="true" /> Does not expire</Pill>
+        )}
+        {metadata ? (
+          <Pill><DownloadIcon className="h-3.5 w-3.5" aria-hidden="true" /> {metadata.downloads} download{metadata.downloads === 1 ? '' : 's'}</Pill>
+        ) : null}
+      </ul>
+
+      <section aria-label="Preview">{preview}</section>
+    </article>
+  );
 }

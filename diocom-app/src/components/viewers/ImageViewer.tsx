@@ -1,12 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { motion } from 'framer-motion';
-import { ZoomIn, ZoomOut, AlertCircle, Download } from 'lucide-react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import Button from '@/components/ui/Button';
 import type { PublicFile } from '@/db/files';
 import { useE2ESource } from './useE2ESource';
+import { PreviewError, PreviewSkeleton } from './PreviewState';
 
 interface ImageViewerProps {
     fileId: string;
@@ -14,111 +13,57 @@ interface ImageViewerProps {
 }
 
 export default function ImageViewer({ fileId, metadata }: ImageViewerProps) {
-    const [zoom, setZoom] = useState(100);
-    const [isLoaded, setIsLoaded] = useState(false);
-    const [loadFailed, setLoadFailed] = useState(false);
-    const [retryTrigger, setRetryTrigger] = useState(0);
-    const { src: imageSrc, error: decryptError, download } = useE2ESource(fileId, metadata, retryTrigger);
-    const hasError = loadFailed || !!decryptError;
+    const [retry, setRetry] = useState(0);
+    // Load state is keyed by the attempt so a retry starts from "loading" again.
+    const [loaded, setLoaded] = useState<number | null>(null);
+    const [failed, setFailed] = useState<number | null>(null);
+    const [fullSize, setFullSize] = useState(false);
+    const { src, error } = useE2ESource(fileId, metadata, retry);
+    const name = metadata?.original_name || 'Shared image';
+    const isLoaded = loaded === retry;
+    const hasError = !!error || failed === retry;
 
-    const handleZoomIn = () => setZoom((prev) => Math.min(prev + 25, 200));
-    const handleZoomOut = () => setZoom((prev) => Math.max(prev - 25, 50));
+    if (hasError) {
+        return (
+            <PreviewError
+                className="min-h-64"
+                message={error || 'The image could not be displayed. If this is an encrypted file, make sure you opened the complete link including the part after “#”.'}
+                onRetry={() => setRetry((r) => r + 1)}
+            />
+        );
+    }
 
     return (
-        <div className="relative flex flex-col items-center justify-center py-8">
-            {/* Image Container */}
-            <div className="relative max-w-full overflow-auto rounded-lg min-h-[300px] w-full flex items-center justify-center bg-black/20">
-                {!hasError && imageSrc ? (
-                    <motion.img
-                        src={imageSrc}
-                        alt={decodeURIComponent(fileId)}
-                        className={cn(
-                            'max-w-full h-auto transition-opacity duration-300',
-                            isLoaded ? 'opacity-100' : 'opacity-0'
-                        )}
-                        style={{
-                            transform: `scale(${zoom / 100})`,
-                            transformOrigin: 'center',
-                        }}
-                        onLoad={() => {
-                            console.log('[VIEWER] Image loaded successfully');
-                            setIsLoaded(true);
-                        }}
-                        onError={() => {
-                            console.error('[VIEWER] Image load failed');
-                            setLoadFailed(true);
-                            setIsLoaded(true);
-                        }}
+        <figure className="relative">
+            {!isLoaded && <PreviewSkeleton label="Loading image…" className="aspect-[4/3] w-full sm:aspect-video" />}
+            {src && (
+                <div className={cn('overflow-auto rounded-2xl bg-black/40', !isLoaded && 'sr-only', fullSize ? 'max-h-[80vh]' : '')}>
+                    {/* A decrypted blob/stream URL: next/image optimisation can't apply, so a plain <img> is used. */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                        key={retry}
+                        src={src}
+                        alt={name}
+                        decoding="async"
+                        onLoad={() => setLoaded(retry)}
+                        onError={() => setFailed(retry)}
+                        className={cn('mx-auto block', fullSize ? 'max-w-none' : 'max-h-[70vh] w-auto max-w-full object-contain')}
                     />
-                ) : hasError ? (
-                    <div className="flex flex-col items-center justify-center p-12 text-center">
-                        <AlertCircle className="w-16 h-16 text-red-500/50 mb-4" />
-                        <h3 className="text-xl font-bold text-red-500 mb-2">Image could not be loaded</h3>
-                        <p className="text-sm text-gray-400 max-w-xs">
-                            {decryptError || 'The visual data stream could not be established. Ensure your URL includes the #key=... fragment for Zero-Knowledge decryption.'}
-                        </p>
-                        <Button
-                            variant="primary"
-                            size="md"
-                            className="mt-8"
-                            onClick={() => {
-                                setLoadFailed(false);
-                                setIsLoaded(false);
-                                setRetryTrigger((prev) => prev + 1);
-                            }}
-                        >
-                            Retry Handshake
-                        </Button>
-                    </div>
-                ) : null}
-
-                {!isLoaded && !hasError && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
-                        <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin shadow-[0_0_15px_rgba(0,242,255,0.3)]" />
-                        <span className="text-[10px] font-mono text-primary animate-pulse uppercase tracking-widest">Piping Bits...</span>
-                    </div>
-                )}
-            </div>
-
-            {/* Controls */}
-            {isLoaded && !hasError && imageSrc && (
-                <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-6 flex items-center gap-4 bg-black/40 backdrop-blur-md px-6 py-3 rounded-2xl border border-white/10"
-                >
-                    <button
-                        onClick={handleZoomOut}
-                        disabled={zoom <= 50}
-                        className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <ZoomOut className="w-5 h-5" />
-                    </button>
-
-                    <span className="text-sm font-mono text-white/70 min-w-[64px] text-center">
-                        {zoom}%
-                    </span>
-
-                    <button
-                        onClick={handleZoomIn}
-                        disabled={zoom >= 200}
-                        className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <ZoomIn className="w-5 h-5" />
-                    </button>
-
+                </div>
+            )}
+            {isLoaded && (
+                <figcaption className="mt-2 flex justify-end">
                     <button
                         type="button"
-                        onClick={() => {
-                            download().catch((err: unknown) => alert(err instanceof Error ? err.message : String(err)));
-                        }}
-                        className="w-10 h-10 bg-primary/20 text-primary rounded-lg flex items-center justify-center hover:bg-primary/30 transition-colors"
-                        title="Download Decrypted Image"
+                        onClick={() => setFullSize((v) => !v)}
+                        aria-pressed={fullSize}
+                        className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-gray-300 hover:bg-white/5 hover:text-white"
                     >
-                        <Download className="w-5 h-5" />
+                        {fullSize ? <Minimize2 className="h-4 w-4" aria-hidden="true" /> : <Maximize2 className="h-4 w-4" aria-hidden="true" />}
+                        {fullSize ? 'Fit to screen' : 'Actual size'}
                     </button>
-                </motion.div>
+                </figcaption>
             )}
-        </div>
+        </figure>
     );
 }

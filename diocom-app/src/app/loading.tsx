@@ -1,13 +1,11 @@
-import Spinner from '@/components/ui/Spinner';
+import { Loader2 } from 'lucide-react';
 
 export default function Loading() {
   return (
-    <div className="min-h-screen bg-mesh flex items-center justify-center">
-      <div className="flex flex-col items-center gap-4">
-        <Spinner size="xl" variant="primary" />
-        <p className="text-sm text-gray-400 uppercase tracking-widest font-bold">
-          Initializing Swarm...
-        </p>
+    <div className="bg-mesh flex min-h-dvh items-center justify-center" role="status" aria-live="polite">
+      <div className="flex flex-col items-center gap-3">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" aria-hidden="true" />
+        <p className="text-sm text-gray-300">Loading…</p>
       </div>
     </div>
   );

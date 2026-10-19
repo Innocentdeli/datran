@@ -1,60 +1,58 @@
 'use client';
 
-import { config } from '@/config';
-import AuthStatus from '@/components/features/AuthStatus';
 import Link from 'next/link';
-import InboxPanel from '@/components/features/InboxPanel';
+import { usePathname } from 'next/navigation';
+import { useSession } from 'next-auth/react';
 import { Zap, FolderOpen, CreditCard } from 'lucide-react';
+import AuthStatus from '@/components/features/AuthStatus';
+import InboxPanel from '@/components/features/InboxPanel';
+import BrandMark from '@/components/ui/BrandMark';
+import { cn } from '@/lib/utils';
+
+const NAV = [
+  { href: '/lobby', label: 'Live Lobby', icon: Zap },
+  { href: '/spaces', label: 'Spaces', icon: FolderOpen },
+  { href: '/billing', label: 'Billing', icon: CreditCard },
+];
 
 export default function Header() {
+  const pathname = usePathname();
+  const { status } = useSession();
+
   return (
-    <div className="max-w-7xl w-full flex flex-col sm:flex-row justify-between items-center gap-6 mb-16 sm:mb-20 relative z-30">
-      <Link href="/" className="flex items-center gap-4 group">
-        <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center font-black text-white text-xl shadow-lg ring-4 ring-primary/10 transition-transform group-hover:scale-105">
-          T
-        </div>
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight leading-none text-white">
-            Datran
-          </h1>
-          <p className="text-[10px] uppercase tracking-widest text-gray-300 font-medium mt-1">Premium Data Transfer</p>
-        </div>
+    <header className="relative z-30 mx-auto mb-10 flex w-full max-w-6xl items-center justify-between gap-3 sm:mb-14">
+      <Link href="/" className="flex shrink-0 items-center gap-3 rounded-xl">
+        <BrandMark />
+        <span className="text-lg font-bold tracking-tight text-white">Datran</span>
       </Link>
 
-      <div className="flex items-center gap-3 text-xs text-gray-400 font-medium">
-        {/* Nav Links */}
-        <Link
-          href="/lobby"
-          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-medium hover:bg-blue-500/15 transition-colors"
-        >
-          <Zap size={12} />
-          Live Lobby
-        </Link>
-        <Link
-          href="/spaces"
-          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs font-medium hover:bg-violet-500/15 transition-colors"
-        >
-          <FolderOpen size={12} />
-          Spaces
-        </Link>
-        <Link
-          href="/billing"
-          className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary/10 border border-primary/20 text-primary text-xs font-medium hover:bg-primary/15 transition-colors"
-        >
-          <CreditCard size={12} />
-          Billing
-        </Link>
+      <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+        <nav aria-label="Main" className="flex items-center gap-0.5 sm:gap-1">
+          {NAV.map(({ href, label, icon: Icon }) => {
+            const active = pathname?.startsWith(href);
+            return (
+              <Link
+                key={href}
+                href={href}
+                aria-current={active ? 'page' : undefined}
+                aria-label={label}
+                className={cn(
+                  'flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium transition-colors sm:px-3',
+                  active ? 'bg-white/10 text-white' : 'text-gray-300 hover:bg-white/5 hover:text-white'
+                )}
+              >
+                <Icon className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden md:inline">{label}</span>
+              </Link>
+            );
+          })}
+        </nav>
 
-        {/* Inbox Panel */}
-        <InboxPanel />
+        <span className="mx-1 hidden h-6 w-px bg-white/10 sm:block" aria-hidden="true" />
 
+        {status === 'authenticated' ? <InboxPanel /> : null}
         <AuthStatus />
-
-        <div className="hidden sm:flex items-center gap-2 bg-white/5 px-3 py-1.5 rounded-full border border-white/10">
-          <div className="w-1.5 h-1.5 rounded-full bg-success" />
-          <span className="text-[10px] font-mono text-gray-200">System Ready</span>
-        </div>
       </div>
-    </div>
+    </header>
   );
 }

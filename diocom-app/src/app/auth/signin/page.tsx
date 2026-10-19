@@ -113,24 +113,23 @@ export default function SignInPage() {
     };
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center p-4 sm:p-8 font-sans">
+        <div className="bg-mesh flex min-h-dvh flex-col px-4 pt-4 sm:px-8 sm:pt-6">
             <Header />
 
-            <main className="flex-1 flex flex-col items-center justify-center w-full max-w-md">
-                <div className="w-full glass p-8 sm:p-12 border border-white/10 rounded-3xl flex flex-col items-center shadow-2xl relative overflow-hidden z-10">
+            <main id="main" className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center">
+                <div className="panel relative z-10 flex w-full flex-col items-center overflow-hidden p-6 sm:p-10">
 
                     {/* Decorative Glow */}
                     <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-primary to-transparent opacity-50" />
                     <div className="absolute -top-20 -right-20 w-40 h-40 bg-primary/20 blur-[60px] rounded-full pointer-events-none" />
 
                     <div className="text-center mb-8 relative z-20">
-                        <h2 className="text-3xl font-bold tracking-tight mb-2">
-                            {isSignUp ? 'Create ' : 'Get '}
-                            <span className="text-primary">{isSignUp ? 'Account' : 'Started'}</span>
-                        </h2>
-                        <p className="text-gray-400 text-sm leading-relaxed">
+                        <h1 className="text-2xl font-bold tracking-tight mb-2 text-white">
+                            {isSignUp ? 'Create your account' : 'Sign in to Datran'}
+                        </h1>
+                        <p className="text-gray-300 text-sm leading-relaxed">
                             {isSignUp
-                                ? 'Join Datran for secure, high-speed file sharing.'
+                                ? 'Free accounts get larger uploads and longer-lived links.'
                                 : 'Sign in to access your transfers and settings.'}
                         </p>
                     </div>
@@ -139,30 +138,36 @@ export default function SignInPage() {
                     <form onSubmit={handleSubmit} className="w-full flex flex-col gap-4 mb-6 relative z-20">
                         <div className="space-y-4">
                             <div className="relative">
-                                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                                <label htmlFor="signin-email" className="sr-only">Email address</label>
+                                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" aria-hidden="true" />
                                 <input
+                                    id="signin-email"
                                     type="email"
-                                    placeholder="Email Address"
+                                    autoComplete="email"
+                                    placeholder="Email address"
                                     required
                                     value={email}
                                     onChange={(e) => setEmail(e.target.value)}
-                                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all placeholder:text-gray-600"
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:border-primary/60 transition-colors placeholder:text-gray-500 h-12"
                                 />
                             </div>
                             <div className="relative">
-                                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                                <label htmlFor="signin-password" className="sr-only">Password</label>
+                                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" aria-hidden="true" />
                                 <input
+                                    id="signin-password"
                                     type="password"
+                                    autoComplete={isSignUp ? 'new-password' : 'current-password'}
                                     placeholder="Password"
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
-                                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all placeholder:text-gray-600"
+                                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:border-primary/60 transition-colors placeholder:text-gray-500 h-12"
                                 />
                             </div>
                         </div>
 
                         {error && (
-                            <div className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 py-2 px-3 rounded-lg">
+                            <div role="alert" className="text-sm text-red-200 bg-red-500/10 border border-red-400/25 py-2 px-3 rounded-lg">
                                 {error}
                             </div>
                         )}
@@ -173,11 +178,10 @@ export default function SignInPage() {
                                 variant="primary"
                                 size="lg"
                                 disabled={loading || !password}
-                                className="flex-1 justify-center gap-2 py-4 shadow-lg shadow-primary/20"
-                                title="Login with Password"
+                                className="flex-1"
                             >
                                 {loading && password ? (
-                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                    <Loader2 className="w-5 h-5 animate-spin" aria-label="Signing in" />
                                 ) : (
                                     <span>{isSignUp ? 'Sign Up' : 'Sign In'}</span>
                                 )}
@@ -189,13 +193,14 @@ export default function SignInPage() {
                                 size="lg"
                                 onClick={handleWebAuthn}
                                 disabled={loading || !email}
-                                className="px-4 border-primary/30 hover:border-primary hover:bg-primary/10 transition-all group"
-                                title="Use Biometric Passkey"
+                                className="px-4 group"
+                                title="Sign in with a passkey"
+                                aria-label="Sign in with a passkey"
                             >
                                 {loading && !password ? (
                                      <Loader2 className="w-5 h-5 animate-spin text-primary" />
                                 ) : (
-                                    <Fingerprint className="w-5 h-5 text-gray-400 group-hover:text-primary transition-colors" />
+                                    <Fingerprint className="w-5 h-5 text-gray-300 group-hover:text-primary transition-colors" aria-hidden="true" />
                                 )}
                             </Button>
                         </div>
@@ -203,7 +208,7 @@ export default function SignInPage() {
                         <button
                             type="button"
                             onClick={() => setIsSignUp(!isSignUp)}
-                            className="text-xs text-gray-400 hover:text-white transition-colors mt-2"
+                            className="text-sm text-gray-300 hover:text-white transition-colors mt-2 rounded"
                         >
                             {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Create one"}
                         </button>
@@ -212,28 +217,28 @@ export default function SignInPage() {
                     <div className="w-full relative flex flex-col items-center mb-6 z-20">
                         <div className="w-full flex items-center">
                             <div className="flex-grow border-t border-white/10"></div>
-                            <span className="flex-shrink-0 mx-4 text-[10px] text-gray-500 font-bold uppercase tracking-widest">Or Use</span>
+                            <span className="flex-shrink-0 mx-4 text-xs text-gray-400">or continue with</span>
                             <div className="flex-grow border-t border-white/10"></div>
                         </div>
                     </div>
 
-                    <div className="w-full grid grid-cols-2 gap-3 mb-8">
+                    <div className="w-full grid grid-cols-2 gap-3">
                         <Button
                             variant="secondary"
-                            className="justify-center gap-2 py-3 bg-white/5 hover:bg-white/10 border-white/10"
+                            className="w-full"
                             onClick={() => signIn('google', { callbackUrl })}
                         >
                             <svg viewBox="0 0 24 24" className="w-4 h-4" aria-hidden="true"><path d="M12.48 10.92v3.28h7.84c-.24 1.84-.853 3.187-1.787 4.133-1.147 1.147-2.933 2.4-6.053 2.4-4.827 0-8.6-3.893-8.6-8.72s3.773-8.72 8.6-8.72c2.6 0 4.507 1.027 5.907 2.347l2.307-2.307C18.747 1.44 16.133 0 12.48 0 5.867 0 .533 5.333.533 12S5.867 24 12.48 24c3.44 0 6.013-1.133 8.053-3.24 2.08-2.16 2.707-5.507 2.507-7.84h-10.56z" fill="currentColor" /></svg>
-                            <span className="text-xs">Google</span>
+                            <span>Google</span>
                         </Button>
 
                         <Button
                             variant="secondary"
-                            className="justify-center gap-2 py-3 bg-white/5 hover:bg-white/10 border-white/10"
+                            className="w-full"
                             onClick={() => signIn('facebook', { callbackUrl })}
                         >
-                            <Facebook className="w-4 h-4 fill-current" />
-                            <span className="text-xs">Facebook</span>
+                            <Facebook className="w-4 h-4 fill-current" aria-hidden="true" />
+                            <span>Facebook</span>
                         </Button>
                     </div>
 

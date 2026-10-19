@@ -7,6 +7,9 @@ import { AnalyticsService } from '@/lib/analytics';
 import WormholeConnectWrapper from '@/components/features/WormholeConnectWrapper';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { hasFileAccess } from '@/lib/crypto/AccessToken';
+import BrandMark from '@/components/ui/BrandMark';
+import { buttonClasses } from '@/components/ui/Button';
+import { Clock, FileQuestion, Upload } from 'lucide-react';
 
 function isExpiredRecord(expiresAt: number | string | null | undefined): boolean {
   return !!expiresAt && Date.now() > Number(expiresAt);
@@ -50,72 +53,74 @@ export default async function OmniViewer({ params }: { params: Promise<{ id: str
   }
 
   return (
-    <div className="min-h-screen bg-[#0A0F1A] text-white p-4 sm:p-8 flex flex-col items-center justify-center font-sans relative overflow-hidden">
-      {/* Background Glow */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-primary/5 rounded-full blur-[120px] pointer-events-none" />
+    <div className="bg-mesh flex min-h-dvh flex-col px-4 pt-4 sm:px-8 sm:pt-6">
+      <header className="mx-auto mb-8 flex w-full max-w-4xl items-center justify-between gap-3">
+        <Link href="/" className="flex items-center gap-2.5 rounded-xl">
+          <BrandMark size="sm" />
+          <span className="text-base font-bold tracking-tight text-white">Datran</span>
+        </Link>
+        <Link href="/" className={buttonClasses('secondary', 'sm')}>
+          <Upload className="h-4 w-4" aria-hidden="true" /> Send a file
+        </Link>
+      </header>
 
-      <div className="max-w-4xl w-full z-10 flex flex-col gap-8">
-        {/* Header / Brand */}
-        <div className="flex justify-between items-center">
-          <Link href="/" className="flex items-center gap-3 group">
-            <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center font-black text-white text-base shadow-lg transition-transform group-hover:scale-110">
-              T
+      <main id="main" className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6">
+        <div className="panel p-4 sm:p-6">
+          {!fileRecord ? (
+            <LinkState
+              icon={<FileQuestion className="h-7 w-7" aria-hidden="true" />}
+              title="This link doesn't exist"
+              body="Check that you copied the whole link. It may also have been deleted by its owner."
+            />
+          ) : isExpired ? (
+            <LinkState
+              icon={<Clock className="h-7 w-7" aria-hidden="true" />}
+              title="This link has expired"
+              body="Shared files are removed when their link expires. Ask the sender to share it again."
+            />
+          ) : isLocked ? (
+            <PasswordGate shareId={fileRecord.share_id} />
+          ) : (
+            <OmniPlayer fileId={id} metadata={publicFile} />
+          )}
+        </div>
+
+        {publicFile ? (
+          <details className="group panel px-4 py-3 text-sm sm:px-6">
+            <summary className="cursor-pointer select-none rounded font-medium text-gray-200 marker:text-gray-400">
+              Security &amp; connection details
+            </summary>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2">
+              <dl className="flex flex-col gap-2 text-xs">
+                <div className="flex justify-between gap-3">
+                  <dt className="text-gray-400">Encryption</dt>
+                  <dd className="text-right text-gray-200">{isClientEncrypted ? 'End-to-end (AES-GCM, key in link)' : 'In transit (HTTPS)'}</dd>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <dt className="text-gray-400">Storage</dt>
+                  <dd className="text-right text-gray-200">{isCompressed ? `Lossless compression · ${publicFile.compression_ratio}` : 'Stored as uploaded'}</dd>
+                </div>
+              </dl>
+              <WormholeConnectWrapper />
             </div>
-            <span className="text-lg font-bold tracking-tight text-white">Datran</span>
-          </Link>
+          </details>
+        ) : null}
+      </main>
 
-          <div className="flex items-center gap-4 bg-white/5 px-4 py-2 rounded-full border border-white/10">
-            <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-            <span className="text-[10px] font-mono text-gray-400 uppercase tracking-widest">Secure Link</span>
-          </div>
-        </div>
+      <footer className="mx-auto mt-12 w-full max-w-4xl border-t border-white/10 py-6 text-center text-sm text-gray-400">
+        Shared with Datran · <Link href="/" className="font-medium text-primary underline-offset-4 hover:underline">Send your own files, end-to-end encrypted</Link>
+      </footer>
+    </div>
+  );
+}
 
-        {/* Decoder Container - Focused Card */}
-        <div className="relative group flex flex-col gap-6">
-          <div className="absolute -inset-1 bg-gradient-to-r from-primary/10 to-secondary/10 rounded-[40px] blur-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-1000 pointer-events-none" />
-          
-          <div className="glass p-2 rounded-[40px] shadow-2xl transition-all duration-700 bg-black/40 border-white/5 relative overflow-hidden z-10">
-            {!fileRecord ? (
-              <div className="min-h-[300px] flex items-center justify-center text-gray-400 text-sm">File not found.</div>
-            ) : isExpired ? (
-              <div className="min-h-[300px] flex items-center justify-center text-gray-400 text-sm">This link has expired.</div>
-            ) : isLocked ? (
-              <PasswordGate shareId={fileRecord.share_id} />
-            ) : (
-              <OmniPlayer fileId={id} metadata={publicFile} />
-            )}
-          </div>
-
-          <div className="w-full max-w-sm mx-auto z-10">
-            <WormholeConnectWrapper />
-          </div>
-        </div>
-
-        {/* Info Grid - Professional Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Security</span>
-            <span className="text-sm font-semibold text-white">
-              {isClientEncrypted ? 'End-to-End Encrypted (AES-GCM, key in link)' : 'Encrypted in transit (HTTPS)'}
-            </span>
-          </div>
-          <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Speed</span>
-            <span className="text-sm font-semibold text-primary">Optimized for Stream</span>
-          </div>
-          <div className="glass p-6 rounded-3xl border-white/5 bg-white/[0.02] flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">Storage</span>
-            <span className="text-sm font-semibold text-white">
-              {isCompressed ? `Lossless · ${publicFile?.compression_ratio}` : 'Stored as uploaded'}
-            </span>
-          </div>
-        </div>
-
-        {/* Footer Attribution */}
-        <p className="text-center text-[10px] text-gray-600 font-medium uppercase tracking-[0.4em] opacity-40 mt-4">
-          Sent via Datran Premium Transfer
-        </p>
-      </div>
+function LinkState({ icon, title, body }: { icon: React.ReactNode; title: string; body: string }) {
+  return (
+    <div className="flex min-h-72 flex-col items-center justify-center gap-3 px-4 py-10 text-center">
+      <span className="grid h-14 w-14 place-items-center rounded-2xl border border-white/10 bg-white/5 text-gray-300">{icon}</span>
+      <h1 className="text-xl font-semibold text-white">{title}</h1>
+      <p className="max-w-sm text-sm text-gray-300">{body}</p>
+      <Link href="/" className={buttonClasses('primary', 'md', 'mt-2')}>Send a file</Link>
     </div>
   );
 }

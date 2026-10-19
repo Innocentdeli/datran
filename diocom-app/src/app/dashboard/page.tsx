@@ -6,8 +6,10 @@ import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import { FileType } from 'lucide-react';
 import { formatFileSize, formatTimestamp } from '@/lib/utils';
-import { getFileIcon } from '@/lib/fileUtils';
 import Link from 'next/link';
+import Image from 'next/image';
+import FileTypeIcon from '@/components/ui/FileTypeIcon';
+import { buttonClasses } from '@/components/ui/Button';
 
 import SearchInput from '@/components/features/SearchInput';
 
@@ -31,57 +33,45 @@ export default async function DashboardPage({
         : await FileRepository.findByUserId(session.user.id || '');
 
     return (
-        <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center p-4 sm:p-8 font-sans selection:bg-primary/30">
-            <div className="fixed inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900/40 via-black to-black -z-10" />
-
+        <div className="bg-mesh flex min-h-dvh flex-col px-4 pt-4 sm:px-8 sm:pt-6">
             <Header />
 
-            <main className="w-full max-w-7xl flex-1 flex flex-col gap-8">
+            <main id="main" className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8">
                 <div className="flex flex-col sm:flex-row items-baseline justify-between gap-4">
                     <div>
-                        <h2 className="text-3xl font-bold tracking-tight text-white mb-1">
-                            My Transfers
-                        </h2>
-                        <p className="text-xs text-gray-400 font-medium tracking-wide uppercase">
-                            Manage your shared files and history
+                        <h1 className="text-3xl font-bold tracking-tight text-white">
+                            My transfers
+                        </h1>
+                        <p className="mt-1 text-sm text-gray-300">
+                            Files you&apos;ve shared while signed in.
                         </p>
                     </div>
 
-                    <div className="flex items-center gap-4 bg-white/5 border border-white/10 rounded-2xl px-4 py-3 backdrop-blur-md">
-                        <div className="flex flex-col">
-                            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Total Items</span>
-                            <span className="text-xl font-bold text-primary">{userFiles.length}</span>
-                        </div>
-                        <div className="w-px h-8 bg-white/10" />
-                        <div className="flex flex-col">
-                            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">System Status</span>
-                            <div className="flex items-center gap-1.5">
-                                <div className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                                <span className="text-xs font-bold text-gray-200 uppercase">Optimal</span>
-                            </div>
-                        </div>
-                    </div>
+                    <p className="panel px-4 py-2.5 text-sm text-gray-300">
+                        <span className="text-lg font-semibold text-white">{userFiles.length}</span> file{userFiles.length === 1 ? '' : 's'}
+                    </p>
                 </div>
 
                 <div className="flex flex-col md:flex-row gap-6 items-center">
                     {/* Collections */}
-                    <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hidden flex-1">
+                    <nav aria-label="Filter by category" className="flex gap-2 overflow-x-auto pb-1 scrollbar-hidden flex-1 w-full">
                         {['All', 'Code', 'Visual', 'Media', 'Docs'].map((filter) => {
                             const isActive = filter === 'All' ? !query : query.toLowerCase() === filter.toLowerCase();
                             return (
                                 <Link
                                     key={filter}
                                     href={filter === 'All' ? '/dashboard' : `/dashboard?q=${filter}`}
-                                    className={`px-5 py-2.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all border whitespace-nowrap ${isActive
-                                        ? 'bg-primary text-black border-primary shadow-[0_0_20px_rgba(0,242,255,0.3)]'
-                                        : 'bg-white/5 text-gray-400 border-white/10 hover:bg-white/10 hover:text-white'
+                                    aria-current={isActive ? 'page' : undefined}
+                                    className={`h-10 inline-flex items-center px-4 rounded-xl text-sm font-medium transition-colors border whitespace-nowrap ${isActive
+                                        ? 'bg-primary text-on-primary border-primary'
+                                        : 'bg-white/5 text-gray-300 border-white/10 hover:bg-white/10 hover:text-white'
                                         }`}
                                 >
                                     {filter}
                                 </Link>
                             );
                         })}
-                    </div>
+                    </nav>
 
                     <div className="w-full md:w-80">
                         <SearchInput />
@@ -92,19 +82,19 @@ export default async function DashboardPage({
                     <div className="flex-1 flex flex-col items-center justify-center p-12 transition-all">
                         <div className="w-24 h-24 rounded-3xl bg-white/5 border border-white/10 flex items-center justify-center mb-8 relative group overflow-hidden">
                             <div className="absolute inset-0 bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            <FileType className="w-10 h-10 text-white/30 group-hover:text-primary transition-colors" />
+                            <FileType className="w-10 h-10 text-gray-400 group-hover:text-primary transition-colors" aria-hidden="true" />
                         </div>
                         <h3 className="text-2xl font-bold mb-3 text-white">
                             {query ? `Nothing found for "${query}"` : 'Your history is clear'}
                         </h3>
                         <p className="text-gray-400 max-w-sm text-center mb-10 leading-relaxed">
-                            {query ? 'Try searching for a different name or category.' : 'Start sharing files to see them listed here. Datran keeps your transfers organized and secure.'}
+                            {query ? 'Try searching for a different name or category.' : 'Files you upload while signed in show up here with their links and download counts.'}
                         </p>
                         <Link
                             href="/"
-                            className="px-8 py-4 bg-white text-black font-black uppercase tracking-widest rounded-2xl hover:scale-105 transition-transform shadow-xl"
+                            className={buttonClasses('primary', 'lg')}
                         >
-                            {query ? 'Reset Search' : 'Start Transfer'}
+                            {query ? 'Reset search' : 'Send a file'}
                         </Link>
                     </div>
                 ) : (
@@ -113,34 +103,34 @@ export default async function DashboardPage({
                             <Link
                                 key={file.id}
                                 href={`/v1/${file.share_id}`}
-                                className="group relative bg-white/[0.03] border border-white/[0.08] hover:border-primary/40 hover:bg-white/[0.08] transition-all duration-500 rounded-[24px] p-6 flex flex-col gap-5 backdrop-blur-sm"
+                                className="group panel relative p-5 flex flex-col gap-4 transition-colors hover:border-primary/40"
                             >
                                 <div className="flex items-center gap-4">
-                                    <div className="w-16 h-16 rounded-2xl bg-black/40 border border-white/10 overflow-hidden shadow-2xl flex-shrink-0 relative group-hover:scale-110 transition-transform duration-500">
+                                    <div className="w-14 h-14 rounded-xl bg-black/40 border border-white/10 overflow-hidden flex-shrink-0 relative">
                                         {file.thumbnail_path ? (
-                                            <img
+                                            <Image
                                                 src={`/api/thumbnail/${file.share_id}`}
-                                                alt={file.original_name}
-                                                className="w-full h-full object-cover"
-                                                loading="lazy"
+                                                alt=""
+                                                fill
+                                                sizes="56px"
+                                                unoptimized
+                                                className="object-cover"
                                             />
                                         ) : (
-                                            <div className="w-full h-full flex items-center justify-center text-3xl">
-                                                {getFileIcon((file.original_name.split('.').pop() || 'file') as any)}
-                                            </div>
+                                            <FileTypeIcon name={file.original_name} className="h-full w-full rounded-none border-0" />
                                         )}
                                     </div>
                                     <div className="flex-1 min-w-0">
-                                        <h3 className="font-bold text-white group-hover:text-primary transition-colors truncate text-lg" title={file.original_name}>
+                                        <h2 className="font-semibold text-white group-hover:text-primary transition-colors truncate" title={file.original_name}>
                                             {file.original_name}
-                                        </h3>
+                                        </h2>
                                         <div className="flex items-center gap-2 mt-1.5">
-                                            <span className="text-[10px] font-bold text-gray-500 bg-white/5 border border-white/10 px-2 py-0.5 rounded-md uppercase tracking-widest">
+                                            <span className="text-xs text-gray-300">
                                                 {formatFileSize(file.file_size)}
                                             </span>
-                                            {file.tags && JSON.parse(file.tags).length > 0 && (
-                                                <span className="text-[9px] font-bold text-primary opacity-60 uppercase tracking-widest">
-                                                    #{JSON.parse(file.tags)[0]}
+                                            {firstTag(file.tags) && (
+                                                <span className="text-xs text-primary">
+                                                    #{firstTag(file.tags)}
                                                 </span>
                                             )}
                                         </div>
@@ -148,19 +138,19 @@ export default async function DashboardPage({
                                 </div>
 
                                 {file.summary && (
-                                    <p className="text-sm text-gray-400 line-clamp-2 leading-relaxed font-medium">
+                                    <p className="text-sm text-gray-300 line-clamp-2 leading-relaxed">
                                         {file.summary}
                                     </p>
                                 )}
 
-                                <div className="flex items-center justify-between text-[11px] text-gray-500 font-bold uppercase tracking-widest mt-auto pt-5 border-t border-white/[0.05]">
+                                <div className="flex items-center justify-between text-xs mt-auto pt-4 border-t border-white/[0.06]">
                                     <div className="flex flex-col gap-0.5">
-                                        <span className="text-[9px] opacity-40 font-medium">Uploaded</span>
-                                        <span className="text-gray-400">{formatTimestamp(new Date(file.created_at))}</span>
+                                        <span className="text-gray-400">Uploaded</span>
+                                        <span className="text-gray-200">{formatTimestamp(new Date(file.created_at))}</span>
                                     </div>
                                     <div className="flex flex-col gap-0.5 text-right">
-                                        <span className="text-[9px] opacity-40 font-medium">Interactions</span>
-                                        <span className="text-primary">{file.downloads} DL</span>
+                                        <span className="text-gray-400">Downloads</span>
+                                        <span className="text-gray-200">{file.downloads}</span>
                                     </div>
                                 </div>
                             </Link>
@@ -172,4 +162,13 @@ export default async function DashboardPage({
             <Footer />
         </div>
     );
+}
+
+function firstTag(tags: unknown): string | null {
+    try {
+        const arr = typeof tags === 'string' ? JSON.parse(tags) : tags;
+        return Array.isArray(arr) && typeof arr[0] === 'string' ? arr[0] : null;
+    } catch {
+        return null;
+    }
 }
