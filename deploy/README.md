@@ -234,3 +234,71 @@ docker run --rm --add-host=hostgw:host-gateway alpine/curl-http3 sh -c \
 
 Validate config changes with `caddy validate --config deploy/caddy/Caddyfile --adapter caddyfile`
 (set `SITE_ADDRESS` first) and `caddy fmt --overwrite deploy/caddy/*`.
+
+## Backup
+
+A full backup has three parts, taken in this order by `deploy/backup.sh`:
+
+1. **PostgreSQL** (`pg_dump -Fc`), which holds all app metadata. It is dumped first so that every file it
+   references already exists when the reactor snapshot is taken.
+2. **App storage** (`/data/app/storage` in the `app-data` volume, used when the app stores files
+   locally).
+3. **Reactor**: an online, consistent snapshot (`POST /store/backup`, the same code as
+   `reactor-admin backup`). It holds one redb read transaction, copies every pack up to its committed
+   end, every object file, the dictionaries, `state.json`, `node_id` and `cluster-leases.json`, and
+   writes a `MANIFEST.json` with the SHA-256 of every file. Uploads keep working while it runs; GC and
+   repairs pause until it finishes. Each run is incremental against the previous reactor backup: only
+   new objects and changed packs are copied, and the rest is referenced. Keep the older reactor backup
+   directories for as long as newer ones reference them, and prune whole chains.
+
+```sh
+deploy/backup.sh ./backups          # -> ./backups/<UTC stamp>/{postgres.dump,app-storage.tar.gz,...}
+                                    #    + ./backups/reactor/<UTC stamp>/ (reactor snapshot)
+REACTOR_FULL=1 deploy/backup.sh     # start a new full reactor chain
+```
+
+The reactor writes backups only below its `REACTOR_BACKUP_DIR`; without it `/store/backup` answers 403.
+Add this to the `reactor` service in `docker-compose.yml` (writable by uid 10002):
+
+```yaml
+    environment:
+      REACTOR_BACKUP_DIR: /backups
+    volumes:
+      - ${REACTOR_BACKUP_HOST_DIR:-./backups/reactor}:/backups
+```
+
+**Encryption keys are never part of a backup.** An encrypted store is backed up as ciphertext. Keep
+`REACTOR_MASTER_KEY` / `REACTOR_MASTER_KEYS` in your secret store: a restore without the same keys is
+refused, and the error names the missing key ids. Copy backups off the host (object storage, another
+machine) and test restores regularly.
+
+### Restore
+
+```sh
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env stop app reactor
+# reactor: verifies every file against MANIFEST.json, restores, then runs the deep fsck
+# (decrypt + decode + hash of every object); any failure leaves nothing usable behind.
+# Run with the same REACTOR_MASTER_KEY(S) as the source; the target must be empty unless --force.
+reactor-admin restore ./backups/reactor/<stamp> /path/to/new/reactor-state
+#   (then put that directory into the reactor-state volume, e.g. via a helper container)
+# PostgreSQL:
+docker compose ... exec -T postgres pg_restore -U datran -d datran --clean --if-exists < ./backups/<stamp>/postgres.dump
+# app storage:
+docker compose ... exec -T app sh -c 'cd /data/app && tar -xzf -' < ./backups/<stamp>/app-storage.tar.gz
+docker compose ... start reactor app
+```
+
+`reactor-admin` is built from `core-reactor` (`cargo build --release --bin reactor-admin`). Incremental
+reactor backups reference their bases by the path the reactor saw (`/backups/<name>`). Restore falls back
+to a sibling directory with the same name, so restore from the whole `backups/reactor/` directory. A
+restored reactor keeps its `node_id`: never run the old node and its restored copy at the same time in
+one cluster.
+
+### Reactor metrics
+
+The reactor serves Prometheus metrics at `GET /metrics` (NETWORK_SPEC §8). `prometheus/prometheus.yml`
+has a `reactor` job that authenticates with `Authorization: Bearer` from
+`/run/secrets/reactor_metrics_token`. To enable it, set `REACTOR_METRICS_TOKEN` on the reactor, add a
+compose secret `reactor_metrics_token` (`environment: REACTOR_METRICS_TOKEN`) and mount it into the
+`prometheus` service. Set `REACTOR_LOG_FORMAT=json` for JSON logs; every response carries
+`x-request-id`.

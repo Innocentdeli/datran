@@ -292,3 +292,24 @@ fn fuzz_corruptions_never_panic() {
     assert_eq!(errors + exact, 2000);
     assert!(errors > 1500, "errors {} exact {}", errors, exact);
 }
+
+#[test]
+fn zstd_mt_with_overlapped_verify_is_one_standard_frame() {
+    use core_reactor::codec::{decode_v2, encode_zstd_mt_verified, verify_v2, HEADER_LEN};
+    let data = common::json_logs(6 << 20, 77);
+    for (level, window) in [(1, None), (3, Some(20))] {
+        let b = encode_zstd_mt_verified(level, window, None, &data, 4).unwrap();
+        let payload = &b[HEADER_LEN..];
+        assert_eq!(zstd::zstd_safe::find_frame_compressed_size(payload).ok(), Some(payload.len()));
+        assert_eq!(zstd::zstd_safe::get_frame_content_size(payload).ok().flatten(), Some(data.len() as u64));
+        assert_eq!(decode_v2(&b, usize::MAX, &|_| None).unwrap(), data);
+        verify_v2(&b, &data, &|_| None).unwrap();
+        // the streaming verify rejects a blob that does not match the input
+        let mut other = data.clone();
+        other[123_456] ^= 1;
+        assert!(verify_v2(&b, &other, &|_| None).is_err());
+        let mut trailing = b.clone();
+        trailing.push(0);
+        assert!(verify_v2(&trailing, &data, &|_| None).is_err());
+    }
+}

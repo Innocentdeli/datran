@@ -184,6 +184,8 @@ impl Store {
     /// GC with an explicit grace period (tests / admin).
     pub fn gc_with_grace(&self, grace_ms: u64) -> Result<GcReport> {
         let mut report = GcReport::default();
+        // an online backup is copying the files of its snapshot: collect after it finished
+        let Ok(_gate) = self.maint_gate.try_read() else { return Ok(report) };
         loop {
             let ts = now();
             let due: Vec<Id> = {

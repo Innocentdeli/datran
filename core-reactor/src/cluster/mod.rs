@@ -787,7 +787,7 @@ impl Cluster {
                 match store.apply_tombstone(&id, ms) {
                     Ok(true) => removed.push(id),
                     Ok(false) => {}
-                    Err(e) => eprintln!("[cluster] applying tombstone {}: {}", id_hex(&id), e),
+                    Err(e) => tracing::warn!("applying tombstone {}: {}", id_hex(&id), e),
                 }
             }
             removed
@@ -895,7 +895,7 @@ impl Cluster {
         }
         tokio::spawn(async move {
             if let Err(e) = me.pull(&file, reason).await {
-                eprintln!("[cluster] pull of {} failed: {}", id_hex(&file), e);
+                tracing::warn!("pull of {} failed: {}", id_hex(&file), e);
             }
         });
     }
@@ -1064,7 +1064,7 @@ impl Cluster {
             match self.pull(&f, PullReason::Repair).await {
                 Ok(true) => n += 1,
                 Ok(false) => {}
-                Err(e) => eprintln!("[cluster] repair of {} failed: {}", id_hex(&f), e),
+                Err(e) => tracing::warn!("repair of {} failed: {}", id_hex(&f), e),
             }
         }
         n
@@ -1080,7 +1080,7 @@ impl Cluster {
             match self.try_drop(&m).await {
                 Ok(true) => n += 1,
                 Ok(false) => {}
-                Err(e) => eprintln!("[cluster] drop of {} failed: {}", id_hex(&m.file_id), e),
+                Err(e) => tracing::warn!("drop of {} failed: {}", id_hex(&m.file_id), e),
             }
         }
         n
@@ -1193,7 +1193,7 @@ impl Cluster {
             serde_json::to_vec(&*l).unwrap_or_default()
         };
         if let Err(e) = write_atomic(&leases_path(&self.cfg.state_dir), &snapshot) {
-            eprintln!("[cluster] failed to persist leases: {}", e);
+            tracing::warn!("failed to persist leases: {}", e);
         }
         resp.granted = true;
         resp.expires_ms = now + ttl;
@@ -1251,7 +1251,7 @@ impl Cluster {
             }
             Err(e) => {
                 self.metrics.quarantine_repair_failures.fetch_add(1, Ordering::Relaxed);
-                eprintln!("[cluster] could not repair quarantined object {}: {}", id_hex(&oid), e);
+                tracing::warn!("could not repair quarantined object {}: {}", id_hex(&oid), e);
             }
         }
     }
@@ -1324,6 +1324,14 @@ impl Cluster {
     }
 
     // ---- status ----------------------------------------------------------------------------
+
+    /// `(healthy, total)` peers, excluding this node.
+    pub fn peer_health(&self) -> (usize, usize) {
+        let now = now_ms();
+        let peers = lock(&self.peers);
+        let others: Vec<&Peer> = peers.iter().filter(|p| !p.is_self).collect();
+        (others.iter().filter(|p| p.healthy(now, self.cfg.peer_timeout)).count(), others.len())
+    }
 
     pub fn metrics_json(&self) -> serde_json::Value {
         let m = &self.metrics;

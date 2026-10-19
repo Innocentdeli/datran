@@ -36,7 +36,7 @@ fn store_error(e: StoreError) -> Response {
         )
             .into_response(),
         StoreError::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
-        StoreError::KeyUnavailable(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
+        StoreError::KeyUnavailable(m) | StoreError::Busy(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
         StoreError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof || e.kind() == std::io::ErrorKind::ConnectionAborted => {
             error(StatusCode::BAD_REQUEST, format!("upload aborted: {}", e))
         }
@@ -51,6 +51,40 @@ pub fn routes() -> Router<AppState> {
         .route("/store/files/:file_id", get(get_file).head(get_file).delete(delete_file))
         .route("/store/stats", get(stats))
         .route("/store/rekey", axum::routing::post(rekey))
+        .route("/store/backup", axum::routing::post(backup))
+}
+
+#[derive(serde::Deserialize)]
+struct BackupReq {
+    /// Directory name relative to `REACTOR_BACKUP_DIR` (created; must not exist or be empty).
+    dest: String,
+    /// Earlier backup (relative to `REACTOR_BACKUP_DIR`) for an incremental backup.
+    #[serde(default)]
+    previous: Option<String>,
+}
+
+/// `POST /store/backup` `{ "dest": "<name>", "previous": "<name>"? }`: online backup into
+/// `$REACTOR_BACKUP_DIR/<dest>` on the reactor host. Disabled (403) without `REACTOR_BACKUP_DIR`,
+/// so an API token alone can never make the reactor write to arbitrary paths.
+async fn backup(State(st): State<AppState>, Json(req): Json<BackupReq>) -> Response {
+    let Some(store) = st.store.clone() else { return disabled() };
+    let Some(root) = std::env::var_os("REACTOR_BACKUP_DIR").filter(|v| !v.is_empty()).map(std::path::PathBuf::from) else {
+        return error(StatusCode::FORBIDDEN, "online backups over HTTP need REACTOR_BACKUP_DIR on the reactor");
+    };
+    let rel = |s: &str| super::backup::safe_rel(s).then(|| super::backup::rel_join(&root, s));
+    let Some(dest) = rel(&req.dest) else { return error(StatusCode::BAD_REQUEST, "dest must be a relative path inside REACTOR_BACKUP_DIR") };
+    let previous = match req.previous.as_deref() {
+        Some(p) => match rel(p) {
+            Some(p) => Some(p),
+            None => return error(StatusCode::BAD_REQUEST, "previous must be a relative path inside REACTOR_BACKUP_DIR"),
+        },
+        None => None,
+    };
+    match tokio::task::spawn_blocking(move || store.backup(&dest, previous.as_deref())).await {
+        Ok(Ok(rep)) => Json(rep).into_response(),
+        Ok(Err(e)) => store_error(e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("backup task failed: {}", e)),
+    }
 }
 
 fn disabled() -> Response {
@@ -208,7 +242,7 @@ async fn get_file(State(st): State<AppState>, method: Method, Path(file_id): Pat
     tokio::task::spawn_blocking(move || {
         let res = store.read_range(&id, start, end, &mut |b| tx.blocking_send(Ok(Bytes::copy_from_slice(b))).is_ok());
         if let Err(e) = res {
-            eprintln!("[store] read of {} failed mid-stream: {}", super::id_hex(&id), e);
+            tracing::warn!("read of {} failed mid-stream: {}", super::id_hex(&id), e);
             let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });

@@ -35,12 +35,13 @@ fn gossip_cfg_token_set(g: &Gossip) -> bool {
 
 #[tokio::main]
 async fn main() {
+    core_reactor::logging::init();
     let port: u16 = std::env::var("REACTOR_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3005);
     let bind: IpAddr = match std::env::var("REACTOR_BIND") {
         Ok(b) if !b.trim().is_empty() => match b.trim().parse() {
             Ok(ip) => ip,
             Err(_) => {
-                eprintln!("[reactor] invalid REACTOR_BIND {:?}", b);
+                tracing::error!("invalid REACTOR_BIND {:?}", b);
                 std::process::exit(2);
             }
         },
@@ -49,22 +50,22 @@ async fn main() {
     let reactor_token = std::env::var("REACTOR_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| Arc::new(t.into_bytes()));
     let gossip_cfg = GossipConfig::from_env();
     if let Err(e) = server::check_bind(bind, reactor_token.is_some(), gossip_cfg.cluster_token.is_some()) {
-        eprintln!("[reactor] {}", e);
+        tracing::error!("{}", e);
         std::process::exit(2);
     }
     if reactor_token.is_none() {
-        println!("[reactor] REACTOR_TOKEN not set: endpoints are unauthenticated (loopback only)");
+        tracing::info!("REACTOR_TOKEN not set: endpoints are unauthenticated (loopback only)");
     }
     if gossip_cfg.cluster_token.is_none() && !gossip_cfg.peers.is_empty() {
-        println!("[reactor] REACTOR_PEERS set but REACTOR_CLUSTER_TOKEN missing: gossip disabled");
+        tracing::info!("REACTOR_PEERS set but REACTOR_CLUSTER_TOKEN missing: gossip disabled");
     }
 
-    // Encryption at rest (NETWORK_SPEC §7): bad key configuration or REACTOR_REQUIRE_ENCRYPTION
+    // Encryption at rest (NETWORK_SPEC Â§7): bad key configuration or REACTOR_REQUIRE_ENCRYPTION
     // without a key refuses to start; no key at all runs unencrypted with a loud warning.
     let keys = match core_reactor::crypto::keyring_for_startup() {
         Ok(k) => Arc::new(k),
         Err(e) => {
-            eprintln!("[reactor] {}", e);
+            tracing::error!("{}", e);
             std::process::exit(2);
         }
     };
@@ -81,27 +82,27 @@ async fn main() {
         match tokio::task::spawn_blocking(move || Store::open(cfg, e)).await.expect("store init") {
             Ok(s) => Some(Arc::new(s)),
             Err(err) => {
-                eprintln!("[reactor] failed to open object store: {}", err);
+                tracing::error!("failed to open object store: {}", err);
                 std::process::exit(2);
             }
         }
     } else {
         None
     };
-    // Data gravity (NETWORK_SPEC §4): needs the store and a cluster token.
+    // Data gravity (NETWORK_SPEC Â§4): needs the store and a cluster token.
     let cluster = match (&store, gossip_cfg_token_set(&gossip)) {
         (Some(s), true) => {
             let cfg = match ClusterConfig::from_env(&engine.cfg.state_dir) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[reactor] cannot create node id: {}", e);
+                    tracing::error!("cannot create node id: {}", e);
                     std::process::exit(2);
                 }
             };
             match Cluster::start(cfg, s.clone()) {
                 Ok(c) => Some(c),
                 Err(e) => {
-                    eprintln!("[reactor] data gravity disabled: {}", e);
+                    tracing::error!("data gravity disabled: {}", e);
                     std::process::exit(2);
                 }
             }
@@ -126,8 +127,9 @@ async fn main() {
 
     let addr = SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind TCP listener");
-    println!(
-        "[reactor] Datran core reactor listening on {}://{} (encryption {}, evolution {}, state dir {}, gossip {}, peers {}, store {}, gravity {})",
+    tracing::info!(
+        profile = engine.cfg.profile.name(),
+        "Datran core reactor listening on {}://{} (encryption {}, evolution {}, state dir {}, gossip {}, peers {}, store {}, gravity {})",
         if tls.is_some() { "https" } else { "http" },
         addr,
         match keys.active_id() {
@@ -145,9 +147,9 @@ async fn main() {
         }
     );
 
-    tls::serve(listener, server::router(state), tls, shutdown_signal()).await.expect("Reactor server failed");
+    tls::serve(listener, server::router_with(state, server::MetricsAuth::from_env(bind)), tls, shutdown_signal()).await.expect("Reactor server failed");
 
-    println!("[reactor] shutting down; saving evolution state");
+    tracing::info!("shutting down; saving evolution state");
     let _ = tx.send(true);
     let _ = tokio::time::timeout(Duration::from_secs(60), scheduler).await;
     if let Some(t) = store_task {
@@ -161,8 +163,8 @@ async fn main() {
     }
     let e = engine.clone();
     match tokio::task::spawn_blocking(move || e.save()).await {
-        Ok(Ok(())) => println!("[reactor] state saved to {}", engine.state_path().display()),
-        Ok(Err(err)) => eprintln!("[reactor] failed to save state: {}", err),
-        Err(err) => eprintln!("[reactor] failed to save state: {}", err),
+        Ok(Ok(())) => tracing::info!("state saved to {}", engine.state_path().display()),
+        Ok(Err(err)) => tracing::error!("failed to save state: {}", err),
+        Err(err) => tracing::error!("failed to save state: {}", err),
     }
 }

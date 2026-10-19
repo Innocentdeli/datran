@@ -347,4 +347,16 @@ fn engine_uses_mt_only_for_large_zstd_bodies() {
     assert_eq!(r.codec, Codec::Zstd, "baseline champion");
     assert_single_frame(&out.blob, data.len());
     assert_eq!(codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(), data);
+
+    // REACTOR_OVERLAP_VERIFY: same guarantee and format, verify runs alongside the encode
+    let mut c = test_config(dir.path(), 3);
+    c.persist = false;
+    c.mt_threshold = 1 << 20;
+    c.mt_workers = 4;
+    c.overlap_verify = true;
+    let e = Engine::new(c);
+    let out = e.compress(&data, Some("text/plain"), false);
+    assert_eq!(out.recipe.expect("v2 blob").codec, Codec::Zstd, "{:?}", out.note);
+    assert_single_frame(&out.blob, data.len());
+    assert_eq!(codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(), data);
 }

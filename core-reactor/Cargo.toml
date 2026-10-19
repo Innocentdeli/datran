@@ -28,6 +28,9 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 aes-gcm-siv = "0.12"
 hkdf = "0.13"
 zeroize = "1"
+prometheus = { version = "0.13", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [profile.release]
 opt-level = 3

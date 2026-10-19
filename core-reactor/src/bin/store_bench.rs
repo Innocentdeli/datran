@@ -201,8 +201,10 @@ fn main() {
     }
     let root = keep.unwrap_or_else(|| std::env::temp_dir().join(format!("core-reactor-store-bench-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&root);
-    let mut ec = EvoConfig::new(root.join("evo"));
+    let profile = std::env::var("REACTOR_PROFILE").ok().and_then(|v| core_reactor::evolution::Profile::parse(&v)).unwrap_or_default();
+    let mut ec = EvoConfig::new(root.join("evo")).with_profile(profile);
     ec.persist = false;
+    println!("profile: {} (default recipe {})", profile.name(), profile.default_recipe().label());
     // encryption at rest: REACTOR_MASTER_KEY* from the environment, or `--encrypt` (random key)
     let mut keys = core_reactor::crypto::KeyRing::from_env().expect("key configuration");
     if encrypt && !keys.enabled() {

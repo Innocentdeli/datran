@@ -45,11 +45,13 @@ jobs:
             echo "WEBAUTHN_RP_ID=localhost"
             echo "WEBAUTHN_ORIGIN=http://localhost:3000"
             echo "DIOCOM_SECRET=$(gen)"
-            echo "DATABASE_URL="
+            echo "POSTGRES_PASSWORD=$(gen)"
+            echo "REDIS_PASSWORD=$(gen)"
             echo "MAX_UPLOAD_BYTES=209715200"
             echo "STORAGE_BACKEND=reactor"
             echo "REACTOR_TOKEN=$(gen)"
             echo "REACTOR_CLUSTER_TOKEN=$(gen)"
+            echo "REACTOR_MASTER_KEY=$(openssl rand -base64 32)"
           } > deploy/.env
 
       - name: compose build
@@ -64,6 +66,16 @@ jobs:
       - name: reactor /health from the app container (internal network)
         run: |
           $COMPOSE exec -T app node -e "fetch('http://reactor:3005/health').then(r=>{console.log(r.status);process.exit(r.ok?0:1)}).catch(e=>{console.error(e);process.exit(1)})"
+
+      - name: app readiness (DB migrated, Redis and reactor reachable)
+        run: |
+          for _ in $(seq 1 60); do
+            if $COMPOSE exec -T app node -e "fetch('http://127.0.0.1:3000/api/health/ready').then(async r=>{console.log(r.status, await r.text());process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
 
       - name: app responds
         run: |

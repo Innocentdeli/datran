@@ -167,7 +167,7 @@ impl Gossip {
         for peer in &self.cfg.peers {
             match self.fetch_dict_from(engine, peer, id).await {
                 Ok(()) => return true,
-                Err(e) => eprintln!("[reactor] dict {} from {}: {}", hex::encode(id), peer, e),
+                Err(e) => tracing::warn!("dict {} from {}: {}", hex::encode(id), peer, e),
             }
         }
         false

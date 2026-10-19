@@ -71,6 +71,64 @@ fn main() {
             frames_ok
         );
     }
+    // per-stage breakdown of the /compress path per profile champion (the default recipe before
+    // any generation) and per codec: classify+entropy, encode (MT for zstd), verify (streaming
+    // compare) and the previous verify (full decode_v2 + compare), plus the end-to-end call
+    let dict = |_: &DictId| None;
+    let t = Instant::now();
+    let _ = core_reactor::reactor::DiocomNativeReactor::calculate_entropy(&data);
+    let _ = core_reactor::classify::classify(&data, Some("text/plain"));
+    println!("stage classify+entropy: {:.1} MiB/s", mib / t.elapsed().as_secs_f64());
+    for (label, recipe, w) in [
+        ("lz4 (speed seed)", Recipe::new(codec::Codec::Lz4, 0), 0u32),
+        ("zstd-1 MT (speed default)", Recipe::new(codec::Codec::Zstd, 1), workers),
+        ("zstd-3 MT (balanced default)", Recipe::new(codec::Codec::Zstd, 3), workers),
+    ] {
+        let t = Instant::now();
+        let b = recipe.encode_with_workers(&data, None, w).unwrap();
+        let enc = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        codec::verify_v2(&b, &data, &dict).unwrap();
+        let ver = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        assert_eq!(codec::decode_v2(&b, usize::MAX, &dict).unwrap(), data);
+        let old = t.elapsed().as_secs_f64();
+        println!(
+            "stage {:<30} encode {:>8.1} MiB/s | verify {:>8.1} MiB/s (old decode+compare {:>8.1} MiB/s) | encode+verify {:>8.1} MiB/s | ratio {:.3}x",
+            label,
+            mib / enc,
+            mib / ver,
+            mib / old,
+            mib / (enc + ver),
+            data.len() as f64 / b.len() as f64
+        );
+    }
+    for level in [1, 3] {
+        let t = Instant::now();
+        let b = codec::encode_zstd_mt_verified(level, None, None, &data, workers).unwrap();
+        let s = t.elapsed().as_secs_f64();
+        let payload = &b[HEADER_LEN..];
+        assert_eq!(zstd::zstd_safe::find_frame_compressed_size(payload).ok(), Some(payload.len()));
+        println!("stage zstd-{} MT encode with overlapped verify: {:>8.1} MiB/s ratio {:.3}x", level, mib / s, data.len() as f64 / b.len() as f64);
+    }
+    for profile in [core_reactor::evolution::Profile::Speed, core_reactor::evolution::Profile::Balanced] {
+        let mut c = EvoConfig::new(std::env::temp_dir().join("core-reactor-compress-bench")).with_profile(profile);
+        c.persist = false;
+        c.mt_workers = workers;
+        c.max_output = usize::MAX;
+        let e = Engine::new(c);
+        let t = Instant::now();
+        let out = e.compress(&data, Some("text/plain"), false);
+        let s = t.elapsed().as_secs_f64();
+        println!(
+            "profile {:<9} Engine::compress {:>8.3} s {:>8.1} MiB/s ratio {:.3}x recipe {}",
+            profile.name(),
+            s,
+            mib / s,
+            data.len() as f64 / out.blob.len() as f64,
+            out.recipe.as_ref().map(|r| r.label()).unwrap_or_else(|| "raw".into())
+        );
+    }
     for level in [3, 9] {
         let recipe = Recipe::new(codec::Codec::Zstd, level);
         let mut line = format!("bare zstd-{} encode:", level);

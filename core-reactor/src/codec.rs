@@ -463,6 +463,170 @@ pub fn decode_v2(
     Ok(out)
 }
 
+/// Checks that `blob` (v2) decodes to exactly `data` — the round-trip check of an encode.
+///
+/// Unfiltered zstd blobs are decoded as a stream in 1 MiB slices that are compared with `data`
+/// as they come out (no output allocation of the full size, no CRC pass: the byte comparison is
+/// strictly stronger); everything else goes through [`decode_v2`] + comparison. The frame must
+/// end exactly at the end of the blob either way.
+pub fn verify_v2(blob: &[u8], data: &[u8], dict_lookup: &dyn Fn(&DictId) -> Option<Arc<Vec<u8>>>) -> Result<(), DecodeError> {
+    let h = parse_header(blob, usize::MAX)?;
+    if h.original_len != data.len() as u64 {
+        return Err(invalid(format!("header length {} != input length {}", h.original_len, data.len())));
+    }
+    if h.codec != Codec::Zstd || h.filter != Filter::None {
+        return match decode_v2(blob, data.len(), dict_lookup)? {
+            out if out.as_slice() == data => Ok(()),
+            _ => Err(invalid("round-trip mismatch")),
+        };
+    }
+    let dict = match &h.dict {
+        Some(id) => Some(dict_lookup(id).ok_or(DecodeError::UnknownDict(*id))?),
+        None => None,
+    };
+    let dict_bytes: &[u8] = dict.as_deref().map(|d| d.as_slice()).unwrap_or(&[]);
+    let mut dec = zstd::stream::read::Decoder::with_dictionary(&blob[HEADER_LEN..], dict_bytes)
+        .map_err(|e| invalid(format!("zstd init failed: {}", e)))?
+        .single_frame();
+    let mut buf = vec![0u8; (1 << 20).min(data.len().max(1))];
+    let mut pos = 0usize;
+    loop {
+        let n = dec.read(&mut buf).map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
+        if n == 0 {
+            break;
+        }
+        if pos + n > data.len() || buf[..n] != data[pos..pos + n] {
+            return Err(invalid("round-trip mismatch"));
+        }
+        pos += n;
+    }
+    if pos != data.len() {
+        return Err(invalid(format!("decoded length {} != original length {}", pos, data.len())));
+    }
+    dec.finish_frame().map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
+    no_trailing(dec.into_inner(), "zstd")
+}
+
+/// Blocking `Read` over compressed segments sent by the encoder thread.
+struct SegmentReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    cur: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for SegmentReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.cur.len() {
+            match self.rx.recv() {
+                Ok(v) => {
+                    self.cur = v;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.cur.len() - self.pos);
+        buf[..n].copy_from_slice(&self.cur[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// Appends everything to `out` and sends a copy of each segment to the verifier.
+struct Tee<'a> {
+    out: &'a mut Vec<u8>,
+    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+}
+
+impl Write for Tee<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.out.extend_from_slice(buf);
+        if let Some(tx) = &self.tx {
+            if tx.send(buf.to_vec()).is_err() {
+                // the verifier already failed; its error is reported by the caller
+                self.tx = None;
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Multithreaded zstd encode of unfiltered `data` with the round-trip check running
+/// **concurrently**: the frame is produced with zstd's streaming MT encoder and every compressed
+/// segment is handed to a decoder thread that compares the decoded bytes with `data` as they come
+/// out. Returns the v2 blob only if the whole frame decoded to exactly `data` and ended exactly at
+/// the end of the output (same guarantee as encode + [`verify_v2`], wall time ≈ the slower of the
+/// two instead of their sum). The frame is one standard zstd frame with the content size, like
+/// [`encode_with_workers`].
+pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option<(&DictId, &[u8])>, data: &[u8], workers: u32) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(HEADER_LEN + data.len() / 3 + 64);
+    out.push(FLAG_RECIPE);
+    out.push(FORMAT_VERSION);
+    out.push(Codec::Zstd.id());
+    out.push(Filter::None.id());
+    out.push(0);
+    out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    out.extend_from_slice(&crc32(data).to_le_bytes());
+    out.extend_from_slice(dict.map(|(id, _)| id).unwrap_or(&NO_DICT));
+    let dict_bytes: &[u8] = dict.map(|(_, d)| d).unwrap_or(&[]);
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    std::thread::scope(|s| {
+        let verifier = s.spawn(move || -> Result<(), String> {
+            let reader = std::io::BufReader::with_capacity(1 << 16, SegmentReader { rx, cur: Vec::new(), pos: 0 });
+            let mut dec = zstd::stream::read::Decoder::with_dictionary(reader, dict_bytes).map_err(|e| format!("zstd init: {}", e))?.single_frame();
+            let mut buf = vec![0u8; 1 << 20];
+            let mut pos = 0usize;
+            loop {
+                let n = dec.read(&mut buf).map_err(|e| format!("round-trip failed: zstd decode: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                if pos + n > data.len() || buf[..n] != data[pos..pos + n] {
+                    return Err("round-trip mismatch".into());
+                }
+                pos += n;
+            }
+            if pos != data.len() {
+                return Err(format!("round-trip failed: decoded {} of {} bytes", pos, data.len()));
+            }
+            dec.finish_frame().map_err(|e| format!("round-trip failed: {}", e))?;
+            let mut rest = dec.finish();
+            let mut probe = [0u8; 1];
+            if rest.read(&mut probe).map_err(|e| e.to_string())? != 0 {
+                return Err("round-trip failed: bytes after the zstd frame".into());
+            }
+            Ok(())
+        });
+        let encoded = (|| -> std::io::Result<()> {
+            let tee = Tee { out: &mut out, tx: Some(tx) };
+            let mut enc = zstd::stream::write::Encoder::with_dictionary(tee, level, dict_bytes)?;
+            enc.include_contentsize(true)?;
+            enc.set_pledged_src_size(Some(data.len() as u64))?;
+            if let Some(w) = window_log {
+                enc.window_log(w)?;
+            }
+            if workers > 1 {
+                // a library built without ZSTD_MULTITHREAD rejects this: stay single-threaded
+                let _ = enc.multithread(workers);
+            }
+            // feed in slices so the first compressed segments reach the verifier early
+            for part in data.chunks(4 << 20) {
+                enc.write_all(part)?;
+            }
+            let tee = enc.finish()?;
+            drop(tee); // closes the channel: the verifier sees the end of the stream
+            Ok(())
+        })();
+        let verified = verifier.join().map_err(|_| "verifier panicked".to_string())?;
+        encoded.map_err(|e| format!("zstd: {}", e))?;
+        verified
+    })?;
+    Ok(out)
+}
+
 /// Decode any reactor blob: legacy flags 0x00–0x03 and v2 (0x10).
 pub fn decode_any(
     blob: &[u8],

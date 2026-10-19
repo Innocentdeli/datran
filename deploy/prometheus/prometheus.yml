@@ -26,9 +26,15 @@ scrape_configs:
       - source_labels: [__address__]
         target_label: instance
 
-  # TODO(reactor): the Rust reactor does not expose Prometheus metrics yet (only JSON at /store/stats).
-  # When it does, add a job here, e.g.:
-  # - job_name: reactor
-  #   metrics_path: /metrics
-  #   static_configs:
-  #     - targets: ['reactor:3005']
+  # Rust core reactor: GET /metrics (Prometheus text format). Auth: Bearer REACTOR_METRICS_TOKEN
+  # (set the same value on the reactor). The reactor also accepts its x-reactor-token, but
+  # Prometheus cannot send custom headers, so use the dedicated metrics token. Labels are bounded
+  # (route templates, codecs, content classes, key ids; never file / object ids).
+  - job_name: reactor
+    metrics_path: /metrics
+    scheme: http            # https when REACTOR_TLS_CERT is set on the reactor
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/reactor_metrics_token
+    static_configs:
+      - targets: ['reactor:3005']   # keep in sync with REACTOR_PORT

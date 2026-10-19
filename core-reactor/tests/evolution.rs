@@ -276,3 +276,42 @@ fn immigrants_are_scored_locally() {
     assert!((m.score.as_ref().unwrap().fitness - local.fitness).abs() < 1e-12);
     assert!(engine.pending_immigrants(BINARY_NUMERIC).is_empty());
 }
+
+#[test]
+fn profiles_set_weights_seeds_and_default_recipe() {
+    use core_reactor::evolution::{EvoConfig, Profile};
+    use core_reactor::codec::Codec;
+    assert_eq!(Profile::parse("SPEED"), Some(Profile::Speed));
+    assert_eq!(Profile::parse("ratio"), Some(Profile::Ratio));
+    assert_eq!(Profile::parse("bogus"), None);
+    for p in [Profile::Speed, Profile::Balanced, Profile::Ratio] {
+        let seeds = p.seeds();
+        assert_eq!(seeds.len(), POPULATION_SIZE);
+        assert_eq!(seeds[0], p.default_recipe());
+        assert!(seeds.iter().all(|r| r.validate().is_ok()));
+        let mut uniq = seeds.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), seeds.len(), "{:?} seeds must be distinct", p);
+    }
+    assert_eq!(Profile::Balanced.seeds(), seed_population());
+    let speed = Profile::Speed.seeds();
+    assert!(speed.iter().any(|r| r.codec == Codec::Lz4));
+    assert!(speed.iter().all(|r| r.codec != Codec::Brotli && (r.codec != Codec::Zstd || r.level <= 3)));
+    let (se, sd) = Profile::Speed.weights();
+    let (be, bd) = Profile::Balanced.weights();
+    let (re, rd) = Profile::Ratio.weights();
+    assert!(se > be && sd > bd && re < be && rd < bd);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = EvoConfig::new(dir.path()).with_profile(Profile::Speed);
+    c.persist = false;
+    assert_eq!((c.w_enc, c.w_dec), (se, sd));
+    let e = Engine::new(c);
+    assert_eq!(e.champion_recipe("text/json"), Recipe::new(Codec::Zstd, 1));
+    let out = e.compress(&common::json_logs(20_000, 1), Some("application/json"), true);
+    assert_eq!(out.recipe, Some(Recipe::new(Codec::Zstd, 1)));
+    let r = e.run_generation("text/json").unwrap();
+    assert!(r.scored.iter().any(|m| m.recipe.codec == Codec::Lz4 && m.score.is_some()));
+    assert_eq!(e.status()["profile"], "speed");
+}

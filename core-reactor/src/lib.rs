@@ -9,6 +9,8 @@ pub mod crypto;
 pub mod dicts;
 pub mod evolution;
 pub mod gossip;
+pub mod logging;
+pub mod metrics;
 pub mod procedural;
 pub mod reactor;
 pub mod recipe;

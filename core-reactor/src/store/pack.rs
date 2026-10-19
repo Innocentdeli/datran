@@ -299,7 +299,9 @@ impl Store {
         self.packs.appends.fetch_add(1, Ordering::Relaxed);
         self.fail("pack.after_append")?;
         for f in &touched {
+            let t = std::time::Instant::now();
             f.sync_all()?;
+            crate::metrics::fsync("pack", t.elapsed());
             self.packs.fsyncs.fetch_add(1, Ordering::Relaxed);
         }
         Ok((locs, pin))
@@ -391,22 +393,22 @@ impl Store {
                 f.set_len(row.end)?;
                 f.sync_all()?;
                 truncated += len - row.end;
-                eprintln!("[store] pack {}: truncated {} uncommitted / torn tail bytes", id, len - row.end);
+                tracing::warn!("pack {}: truncated {} uncommitted / torn tail bytes", id, len - row.end);
             } else if len < row.end {
-                eprintln!("[store] pack {}: {} bytes on disk but {} committed; records beyond are lost (scrub quarantines them)", id, len, row.end);
+                tracing::warn!("pack {}: {} bytes on disk but {} committed; records beyond are lost (scrub quarantines them)", id, len, row.end);
                 continue;
             }
             present.insert(id);
         }
         for id in rows.keys() {
             if !self.pack_path(*id).exists() {
-                eprintln!("[store] pack {} is missing (its objects will be quarantined by reads / scrub)", id);
+                tracing::warn!("pack {} is missing (its objects will be quarantined by reads / scrub)", id);
             }
         }
         self.packs.startup_truncated_bytes.store(truncated, Ordering::Relaxed);
         self.packs.startup_removed_packs.store(removed, Ordering::Relaxed);
         if removed > 0 {
-            eprintln!("[store] startup removed {} pack files without index rows", removed);
+            tracing::warn!("startup removed {} pack files without index rows", removed);
         }
         let mut w = lock(&self.packs.writer);
         w.next_id = max_id + 1;
@@ -456,6 +458,8 @@ impl Store {
         if self.is_crashed() {
             return 0;
         }
+        // a running backup may still be copying a retired pack's committed bytes
+        let Ok(_gate) = self.maint_gate.try_read() else { return 0 };
         let ts = now();
         let due: Vec<u64> = {
             let mut r = lock(&self.packs.retired);
@@ -587,7 +591,7 @@ impl Store {
                     report.packs_compacted += 1;
                     report.bytes_reclaimed += end;
                     lock(&self.packs.retired).push((pid, now().saturating_add(retire_grace_ms)));
-                    eprintln!("[store] compacted pack {} ({} bytes retired)", pid, end);
+                    tracing::info!("compacted pack {} ({} bytes retired)", pid, end);
                 }
             }
         }

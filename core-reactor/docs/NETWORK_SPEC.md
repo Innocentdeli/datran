@@ -154,6 +154,42 @@ Packs are append-only and self-describing (a pack can be scanned record by recor
 | DELETE | `/store/files/:file_id` | unpin |
 | GET | `/store/stats` | logical/physical bytes, dedup ratio, objects, super-chunks, fusion gains, GC queue, scrub status, packs, encryption (§7) |
 | POST | `/store/rekey` | re-encrypt under the active key (§7); returns a rekey report |
+| POST | `/store/backup` | `{dest, previous?}` online backup below `REACTOR_BACKUP_DIR` (403 when unset); see below |
+
+### Backup & restore
+`reactor-admin backup <dest> [--previous <dir>]` takes a **consistent online snapshot** (`reactor-admin
+restore <backup> <state-dir> [--force]` brings it back):
+
+- **Consistency.** The backup holds the store's *maintenance gate* exclusively for its whole run. Everything
+  that deletes, moves or rewrites object or pack files in place (GC, retired-pack deletion, quarantine moves,
+  repair / rekey installs) takes the gate shared with `try_read` and skips, defers or answers busy
+  (`503`, retried by the caller) while a backup runs. Writes, reads and pack appends are not blocked. Under
+  the gate the backup opens **one redb read transaction** and copies every index table into a fresh
+  `store/index.redb`, then copies what that snapshot references: every pack listed in it **up to its
+  committed end** (bytes below the end never change), every non-quarantined file object (quarantined objects
+  keep their flagged row and get repaired from peers after a restore), and the node files `state.json`,
+  `node_id`, `cluster-leases.json` and `dicts/*.dict`. `MANIFEST.json` is written last (atomic rename). It
+  lists `{path, size, sha256, base?, key_slot?}` for every file, the index summary and the key ids in use.
+- **Online vs offline.** If the reactor is stopped, `reactor-admin` opens the store itself. If the index is
+  locked because the reactor is running, it calls `POST /store/backup` on `--url` (default
+  `http://127.0.0.1:$REACTOR_PORT`, `REACTOR_TOKEN`). The reactor only writes below its
+  `REACTOR_BACKUP_DIR`, so an API token alone can never make it write anywhere else. The destination must be
+  empty and outside the state dir.
+- **Incremental.** With `--previous`, a file object with the same id, size and key slot, or a pack with the
+  same id and committed length, is not copied. Its manifest entry instead names the backup that physically
+  holds it (`base`, always one hop). Stored bytes only change through rekey / repair; those change the slot
+  or the size, and any copy of an object decrypts and decodes to the same plaintext. Keep base backups as
+  long as backups reference them.
+- **Encryption.** Ciphertext is copied as it is and master keys are **never** included. Restore refuses to
+  start unless every key id in the manifest is configured (`REACTOR_MASTER_KEYS` / `REACTOR_MASTER_KEY`),
+  and it names the missing ids.
+- **Restore** refuses a non-empty target unless `--force` (which replaces `store/`, `dicts/` and the node
+  files). It copies each file while checking its size and SHA-256 against the manifest (any mismatch
+  aborts). Then it opens the restored store and runs the **deep fsck** (decrypt + decode + plaintext hash of
+  every object, all counters). On any failure it removes what it restored and exits non-zero. `node_id` is
+  restored too, so do not run the original node and its restored copy at the same time.
+- Full-stack procedure (reactor + Postgres + app storage): `deploy/README.md` "Backup" and
+  `deploy/backup.sh`.
 
 ---
 
@@ -343,3 +379,47 @@ ingest plain 139 / 254 / 162 MiB/s vs encrypted 142 / 193 / 211 MiB/s; verified 
 MiB/s vs encrypted 373 / 337 / 303 MiB/s — run-to-run noise exceeds the difference. Stored bytes +0.11 %
 (455.83 → 456.32 MiB for 13 154 objects). Single-core AEAD incl. key derivation and copies (64 KiB objects):
 seal ≈ 530 MiB/s, open ≈ 1.5 GiB/s.
+
+---
+
+## 8. Observability (reactor)
+
+**Metrics.** `GET /metrics` serves the Prometheus text format (`prometheus` crate). Auth: `x-reactor-token`
+(when `REACTOR_TOKEN` is set) **or** `Authorization: Bearer $REACTOR_METRICS_TOKEN`. It is unauthenticated
+only with `REACTOR_METRICS_PUBLIC=true` on a loopback bind (ignored with a warning otherwise). With no token
+configured and not public it answers `401`; it is never open by accident. Series:
+
+| Family | Labels | Source |
+| :--- | :--- | :--- |
+| `reactor_http_requests_total`, `reactor_http_request_duration_seconds` | `route` (template, e.g. `/store/files/:file_id`; `unmatched`), `method`, `status` | middleware |
+| `reactor_codec_bytes_total`, `reactor_codec_duration_seconds` | `op` = `compress` / `verify` / `compress_verify` / `decompress`, `codec` | request path |
+| `reactor_evolution_generation`, `_champion_fitness`, `_champion_ratio`, `_samples` | `class` (fixed list) | engine |
+| `reactor_profile` | `profile` | config |
+| `reactor_store_{logical,unique,physical,live_physical}_bytes`, `_dedup_ratio`, `_compression_ratio`, `_total_ratio`, `_files`, `_objects`, `_chunks`, `_super_chunks` | — | index counters |
+| `reactor_store_packs`, `_pack_bytes`, `_pack_dead_bytes`, `_packed_objects`, `_pack_compactions_total`, `_pack_fsyncs_total` | — | packs |
+| `reactor_store_gc_*`, `_scrub_*`, `_quarantined_objects`, `_fusions_total`, `_unfusions_total`, `_fusion_*` | — | GC / scrub / fusion |
+| `reactor_store_ingest_inflight_bytes` (all uploads, live), `_ingest_inflight_peak_bytes` | — | ingest pipeline |
+| `reactor_store_group_commit_batch_jobs` (histogram), `_group_commit_{batches,jobs}_total` | — | group commit |
+| `reactor_store_fsync_duration_seconds` | `kind` = `pack` / `index_commit` | durability |
+| `reactor_store_encrypted_objects` | `key_id` (configured ids, ≤ 63; `plaintext`) | §7 |
+| `reactor_store_backups_total` | `result` | backup |
+| `reactor_cluster_peers`, `_peers_healthy`, `_leases_active`, `_{pulls,pull_bytes,drops,repairs,remote_reads,remote_read_bytes,leases_granted,…}_total` | — | §4 |
+
+Event series (HTTP, codec, fsync, batches, in-flight) are recorded on the hot path. State series are read at
+scrape time from the same counters as `/store/stats`, `/evolution/status` and `/cluster/status`, so the two
+views never disagree. Label cardinality is bounded by construction: no file, chunk or object ids, no raw
+paths, no peer URLs.
+
+**Logs.** All reactor logging goes through `tracing` to stderr. `REACTOR_LOG_FORMAT=json` writes one JSON
+object per line (timestamp, level, target, message, fields, current span); otherwise output is
+human-readable. The level filter is `REACTOR_LOG` / `RUST_LOG` (default `info`). Every request runs in a
+span with `request_id`, `method` and `route`, and ends with one `request` event (`status`, `ms`; debug level
+for `/health` and `/metrics`). The request id is the client's `x-request-id` when it is 1–128 visible ASCII
+characters, else a random 32-hex id, and it is echoed in the response. Never logged: master keys, tokens,
+request / response bodies, file contents, raw paths (route templates only). Content-hash ids may appear in
+store warnings.
+
+**Tracing export.** OTLP export (`tracing-opentelemetry`) is **not included**. The OpenTelemetry crates
+would add a second HTTP/gRPC client stack (tonic / prost, or a reqwest version different from the one the
+reactor uses) for an optional feature. The `tracing` spans above are ready for a subscriber layer if it is
+added later.

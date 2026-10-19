@@ -544,18 +544,29 @@ impl Credit {
             return None;
         }
         g.0 += len;
+        crate::metrics::ingest_inflight_add(len as i64);
         Some(g.0)
     }
 
     fn release(&self, len: u64) {
         let mut g = super::lock(&self.state);
-        g.0 = g.0.saturating_sub(len);
+        let n = len.min(g.0);
+        g.0 -= n;
+        crate::metrics::ingest_inflight_add(-(n as i64));
         self.cv.notify_all();
     }
 
     fn abort(&self) {
         super::lock(&self.state).1 = true;
         self.cv.notify_all();
+    }
+}
+
+impl Drop for Credit {
+    fn drop(&mut self) {
+        // an aborted upload never releases its outstanding credit: take it off the global gauge
+        let left = super::lock(&self.state).0;
+        crate::metrics::ingest_inflight_add(-(left as i64));
     }
 }
 

@@ -69,7 +69,8 @@ Recipes received from peers are validated against these ranges and otherwise dro
 - **Fitness** of a recipe = mean over the class's **held-out** reservoir samples of
   `ln(original / compressed) − W_enc · enc_seconds_per_MiB − W_dec · dec_seconds_per_MiB`,
   where each sample is verified lossless (failure ⇒ fitness −∞).
-  Defaults `W_enc = 0.5`, `W_dec = 1.0` (`REACTOR_WEIGHT_ENCODE`, `REACTOR_WEIGHT_DECODE`).
+  Defaults `W_enc = 0.5`, `W_dec = 1.0` (`REACTOR_WEIGHT_ENCODE`, `REACTOR_WEIGHT_DECODE`), set by the
+  profile (see **Profiles** below).
   All recipes in a generation (with and without dictionaries) are scored on the same held-out samples.
   Encode timings for fitness are always single-threaded (`Recipe::encode`), so scores stay comparable
   regardless of core count. Multithreading is used only on the request path: `/compress` bodies larger
@@ -80,6 +81,22 @@ Recipes received from peers are validated against these ranges and otherwise dro
   unaffected.
   Only while the held-out split is still empty (a single upload) are recipes scored on the samples
   that no dictionary trained by this process has seen.
+- **Profiles** (`REACTOR_PROFILE=speed|balanced|ratio`, default `balanced`). Each profile sets the default
+  weights, the 12 seed recipes and the recipe a class uses before its first generation. Explicit
+  `REACTOR_WEIGHT_*` still override the weights.
+
+  | profile | `W_enc` / `W_dec` | seeds | default recipe |
+  | :--- | :--- | :--- | :--- |
+  | `speed` | 100 / 50 | zstd-1, lz4, zstd-2, zstd-3, lz4 + shuffle4 / delta4, zstd-1 + shuffle4 / shuffle8 / delta4, zstd-1 w17, deflate 1, procedural 1 | zstd-1 |
+  | `balanced` | 0.5 / 1.0 | the list under *Population* | zstd-3 |
+  | `ratio` | 0.05 / 0.1 | zstd 3/9/15/19, zstd-19 w27, brotli 9/11, brotli-11 w24, zstd-19 + shuffle4 / 8, zstd-15 + delta4, procedural 9 | zstd-3 |
+
+  With the balanced weights the time terms are tiny (zstd-3 at ~300 MiB/s single-threaded costs
+  0.5 × 0.0033 ≈ 0.002 fitness), so balanced is ratio-led. The speed weights make a 2× throughput
+  difference worth about the same as a 1.5× ratio difference. On request bodies above
+  `REACTOR_MT_THRESHOLD`, zstd champions (zstd-1/-3 in the speed pool) run multithreaded. lz4 is
+  always single-threaded: its blob payload is one LZ4 block. `/evolution/status` and `/health` report
+  the profile.
 - **Population**: per class, 12 recipes, seeded with sensible defaults (zstd 3/9/19, brotli 5/9, lz4,
   deflate 6, zstd 9 + shuffle 4, procedural 3, …). Each generation: score, keep the top 4, fill with crossover
   (codec params from one parent, filter from the other) + mutation (level ±, window ±, filter/stride flip,
@@ -96,7 +113,20 @@ Recipes received from peers are validated against these ranges and otherwise dro
   (default `./reactor-state`), saved after each generation and on shutdown. `REACTOR_EVOLVE=false`
   freezes evolution (champions still used).
 - **Guarantee**: `/compress` verifies the round-trip before responding; if it fails or the output is not
-  smaller than legacy raw, it emits legacy raw.
+  smaller than legacy raw, it emits legacy raw. Unfiltered zstd blobs are verified by streaming decode in
+  1 MiB slices compared against the input as they come out. That is a strictly stronger check than the CRC,
+  needs no full-size output buffer, and measured 1.5–2.2× faster than full decode + compare on 1 GiB.
+  Other codecs use decode + compare. A zstd-MT frame is one frame, so its decode cannot be split.
+  `REACTOR_OVERLAP_VERIFY=true` instead streams the compressed output into a decoder thread *while*
+  encoding (same check). It measured no faster on the reference 12-core laptop part (the decoder thread
+  competes with the encoder workers), so it is off by default.
+- **Measured** (`compress-bench 1024`, 1 GiB generated text, Intel Core Ultra 7 155U: 12 cores / 14
+  threads, Windows, two runs, noisy laptop numbers). Bare encode: zstd-1 MT 904–1468 MiB/s, zstd-3 MT
+  664–1176 MiB/s, lz4 380–490 MiB/s (single block). Streaming verify: zstd 440–720 MiB/s, lz4
+  740–880 MiB/s. Classify + entropy ≈ 2 GiB/s. End-to-end `Engine::compress` (classify, encode, verify):
+  speed profile 237–343 MiB/s (zstd-1, ratio 4.51×), balanced 251–429 MiB/s (zstd-3, ratio 4.73×). The
+  verify decode, not the encode, limits large-body throughput, and 3 GB/s compress-only is **not**
+  reached on this machine.
 
 ## 4. Network (gossip)
 
@@ -124,6 +154,7 @@ Recipes received from peers are validated against these ranges and otherwise dro
 | GET | `/evolution/status` | `x-reactor-token` | per-class generation, champion (recipe, fitness, ratio, enc/dec MiB/s), population size, sample count; weights; peers (url, last ok, last error) |
 | GET | `/evolution/champions` | `x-cluster-token` | `[{ "class", "recipe", "fitness" }]` |
 | GET | `/evolution/dict/:sha256` | `x-cluster-token` + sharing enabled | dictionary bytes |
+| GET | `/metrics` | `x-reactor-token` or `Bearer $REACTOR_METRICS_TOKEN` | Prometheus metrics incl. per-class generation / champion fitness ([NETWORK_SPEC.md §8](NETWORK_SPEC.md)) |
 
 `/compress` response headers (in addition to whatever existing headers the app already reads):
 `x-reactor-class`, `x-reactor-recipe` (compact JSON), `x-original-size`, `x-compressed-size`.

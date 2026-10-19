@@ -44,7 +44,7 @@ impl Pool {
                 }
             });
             if spawned.is_err() {
-                eprintln!("[workers] could not spawn compression thread {}", i);
+                tracing::warn!("could not spawn compression thread {}", i);
             }
         }
         Pool { tx: Mutex::new(tx), threads }

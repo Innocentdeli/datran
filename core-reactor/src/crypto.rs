@@ -274,11 +274,11 @@ pub fn keyring_for_startup() -> Result<KeyRing, String> {
         if require_encryption_from_env() {
             return Err("REACTOR_REQUIRE_ENCRYPTION is set but no master key is configured (REACTOR_MASTER_KEY, REACTOR_MASTER_KEY_FILE or REACTOR_MASTER_KEYS)".into());
         }
-        eprintln!("[reactor] ************************************************************************");
-        eprintln!("[reactor] WARNING: encryption at rest is DISABLED (no REACTOR_MASTER_KEY configured).");
-        eprintln!("[reactor] Stored objects and dictionaries are written in plaintext. Development only;");
-        eprintln!("[reactor] set REACTOR_REQUIRE_ENCRYPTION=true in production to refuse this.");
-        eprintln!("[reactor] ************************************************************************");
+        tracing::warn!("************************************************************************");
+        tracing::warn!("WARNING: encryption at rest is DISABLED (no REACTOR_MASTER_KEY configured).");
+        tracing::warn!("Stored objects and dictionaries are written in plaintext. Development only;");
+        tracing::warn!("set REACTOR_REQUIRE_ENCRYPTION=true in production to refuse this.");
+        tracing::warn!("************************************************************************");
     }
     Ok(ring)
 }

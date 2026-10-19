@@ -24,9 +24,101 @@ const DICT_MAX_MEDIAN: usize = 64 * 1024;
 /// Retrain a class dictionary after this many new uploads were seen.
 const DICT_RETRAIN_AFTER: u64 = 64;
 
+/// `REACTOR_PROFILE`: which end of the size/speed trade-off evolution aims for.
+///
+/// | profile | `W_enc` | `W_dec` | seed pool | default recipe |
+/// | :--- | ---: | ---: | :--- | :--- |
+/// | `speed` | 100 | 50 | lz4, zstd 1–3 (+filters), deflate 1, procedural 1 | zstd-1 |
+/// | `balanced` (default) | 0.5 | 1.0 | [`seed_population`] | zstd-3 |
+/// | `ratio` | 0.05 | 0.1 | zstd 9–19 (wide windows), brotli 9/11, … | zstd-3 |
+///
+/// `REACTOR_WEIGHT_ENCODE` / `REACTOR_WEIGHT_DECODE` still override the profile's weights.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    Speed,
+    #[default]
+    Balanced,
+    Ratio,
+}
+
+impl Profile {
+    pub fn parse(s: &str) -> Option<Profile> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "speed" | "fast" | "throughput" => Some(Profile::Speed),
+            "balanced" | "default" | "" => Some(Profile::Balanced),
+            "ratio" | "size" | "small" => Some(Profile::Ratio),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Speed => "speed",
+            Profile::Balanced => "balanced",
+            Profile::Ratio => "ratio",
+        }
+    }
+
+    /// `(W_enc, W_dec)` in fitness units per (second per MiB).
+    pub fn weights(self) -> (f64, f64) {
+        match self {
+            Profile::Speed => (100.0, 50.0),
+            Profile::Balanced => (0.5, 1.0),
+            Profile::Ratio => (0.05, 0.1),
+        }
+    }
+
+    /// The recipe a class uses before its first generation (and when a champion's dictionary
+    /// is missing).
+    pub fn default_recipe(self) -> Recipe {
+        match self {
+            Profile::Speed => Recipe::new(Codec::Zstd, 1),
+            _ => Recipe::baseline(),
+        }
+    }
+
+    /// The 12 seeded recipes of this profile; `[0]` is [`Profile::default_recipe`].
+    pub fn seeds(self) -> Vec<Recipe> {
+        match self {
+            Profile::Balanced => seed_population(),
+            Profile::Speed => vec![
+                Recipe::new(Codec::Zstd, 1),
+                Recipe::new(Codec::Lz4, 0),
+                Recipe::new(Codec::Zstd, 2),
+                Recipe::new(Codec::Zstd, 3),
+                Recipe::new(Codec::Lz4, 0).with_filter(Filter::Shuffle, 4),
+                Recipe::new(Codec::Lz4, 0).with_filter(Filter::Delta, 4),
+                Recipe::new(Codec::Zstd, 1).with_filter(Filter::Shuffle, 4),
+                Recipe::new(Codec::Zstd, 1).with_filter(Filter::Shuffle, 8),
+                Recipe::new(Codec::Zstd, 1).with_filter(Filter::Delta, 4),
+                Recipe::new(Codec::Zstd, 1).with_window(Some(17)),
+                Recipe::new(Codec::Deflate, 1),
+                Recipe::new(Codec::Procedural, 1),
+            ],
+            Profile::Ratio => vec![
+                Recipe::new(Codec::Zstd, 3),
+                Recipe::new(Codec::Zstd, 9),
+                Recipe::new(Codec::Zstd, 15),
+                Recipe::new(Codec::Zstd, 19),
+                Recipe::new(Codec::Zstd, 19).with_window(Some(27)),
+                Recipe::new(Codec::Brotli, 9),
+                Recipe::new(Codec::Brotli, 11),
+                Recipe::new(Codec::Brotli, 11).with_window(Some(24)),
+                Recipe::new(Codec::Zstd, 19).with_filter(Filter::Shuffle, 4),
+                Recipe::new(Codec::Zstd, 19).with_filter(Filter::Shuffle, 8),
+                Recipe::new(Codec::Zstd, 15).with_filter(Filter::Delta, 4),
+                Recipe::new(Codec::Procedural, 9),
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EvoConfig {
     pub enabled: bool,
+    /// `REACTOR_PROFILE` (default balanced); sets the default weights, seeds and default recipe.
+    pub profile: Profile,
     pub w_enc: f64,
     pub w_dec: f64,
     pub sample_bytes_max: usize,
@@ -41,6 +133,11 @@ pub struct EvoConfig {
     pub mt_threshold: usize,
     /// zstd worker threads for those bodies (`REACTOR_COMPRESS_THREADS`, default every core).
     pub mt_workers: u32,
+    /// `REACTOR_OVERLAP_VERIFY` (default off): for those MT zstd bodies, run the round-trip check
+    /// concurrently with the encode ([`codec::encode_zstd_mt_verified`]) instead of after it.
+    /// Measured no faster on a 12-core laptop part (the single decoder thread competes with the
+    /// encoder workers); may pay off on machines with many fast cores.
+    pub overlap_verify: bool,
     /// Master keys for encryption at rest (dictionaries here, objects in the store). Disabled by
     /// default; the binaries load it with [`crate::crypto::keyring_for_startup`].
     pub keys: Arc<crate::crypto::KeyRing>,
@@ -54,6 +151,7 @@ impl EvoConfig {
     pub fn new(state_dir: impl Into<PathBuf>) -> EvoConfig {
         EvoConfig {
             enabled: true,
+            profile: Profile::Balanced,
             w_enc: 0.5,
             w_dec: 1.0,
             sample_bytes_max: 1024 * 1024,
@@ -64,14 +162,28 @@ impl EvoConfig {
             persist: true,
             mt_threshold: 8 << 20,
             mt_workers: crate::workers::configured_threads().min(256) as u32,
+            overlap_verify: false,
             keys: Arc::new(crate::crypto::KeyRing::disabled()),
         }
+    }
+
+    /// Applies a profile: its weights (callers / env may override them afterwards).
+    pub fn with_profile(mut self, p: Profile) -> EvoConfig {
+        self.profile = p;
+        (self.w_enc, self.w_dec) = p.weights();
+        self
     }
 
     pub fn from_env() -> EvoConfig {
         let mut c = EvoConfig::new(
             std::env::var("REACTOR_STATE_DIR").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "./reactor-state".into()),
         );
+        if let Ok(v) = std::env::var("REACTOR_PROFILE") {
+            match Profile::parse(&v) {
+                Some(p) => c = c.with_profile(p),
+                None => tracing::warn!(value = %v, "unknown REACTOR_PROFILE (expected speed|balanced|ratio); using balanced"),
+            }
+        }
         if let Ok(v) = std::env::var("REACTOR_EVOLVE") {
             c.enabled = !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
         }
@@ -90,6 +202,9 @@ impl EvoConfig {
         c.seed = env_parse::<u64>("REACTOR_EVOLVE_SEED");
         if let Some(n) = env_parse::<usize>("REACTOR_MT_THRESHOLD") {
             c.mt_threshold = n;
+        }
+        if let Ok(v) = std::env::var("REACTOR_OVERLAP_VERIFY") {
+            c.overlap_verify = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
         }
         c
     }
@@ -263,9 +378,10 @@ struct ClassEvo {
 }
 
 impl ClassEvo {
-    fn new(class: &str) -> ClassEvo {
+    fn new(class: &str, profile: Profile) -> ClassEvo {
         let population = if classify::is_evolvable(class) {
-            seed_population()
+            profile
+                .seeds()
                 .into_iter()
                 .map(|recipe| Member { recipe, score: None, origin: "seed".into() })
                 .collect()
@@ -296,11 +412,13 @@ impl ClassEvo {
 struct Inner {
     classes: BTreeMap<&'static str, ClassEvo>,
     rng: ChaCha8Rng,
+    profile: Profile,
 }
 
 impl Inner {
     fn class(&mut self, class: &'static str) -> &mut ClassEvo {
-        self.classes.entry(class).or_insert_with(|| ClassEvo::new(class))
+        let p = self.profile;
+        self.classes.entry(class).or_insert_with(|| ClassEvo::new(class, p))
     }
 }
 
@@ -353,7 +471,7 @@ impl Engine {
         let dicts = Arc::new(DictStore::with_keys(cfg.state_dir.join("dicts"), cfg.keys.clone()));
         let engine = Engine {
             dicts,
-            inner: Mutex::new(Inner { classes: BTreeMap::new(), rng: ChaCha8Rng::seed_from_u64(seed) }),
+            inner: Mutex::new(Inner { classes: BTreeMap::new(), rng: ChaCha8Rng::seed_from_u64(seed), profile: cfg.profile }),
             gen_lock: Mutex::new(()),
             save_lock: Mutex::new(()),
             cfg,
@@ -362,7 +480,7 @@ impl Engine {
             match state::load(&engine.state_path()) {
                 Ok(Some(s)) => engine.restore(s),
                 Ok(None) => {}
-                Err(e) => eprintln!("[reactor] ignoring unreadable state.json: {}", e),
+                Err(e) => tracing::warn!("ignoring unreadable state.json: {}", e),
             }
         }
         engine
@@ -433,7 +551,12 @@ impl Engine {
             .get(class)
             .and_then(|c| c.champion.as_ref())
             .map(|c| c.recipe.clone())
-            .unwrap_or_else(Recipe::baseline)
+            .unwrap_or_else(|| self.cfg.profile.default_recipe())
+    }
+
+    /// The profile's default recipe (before the first generation / dictionary missing).
+    pub fn default_recipe(&self) -> Recipe {
+        self.cfg.profile.default_recipe()
     }
 
     pub fn champion(&self, class: &str) -> Option<Champion> {
@@ -477,8 +600,8 @@ impl Engine {
         }
         let prefix = &data[..data.len().min(self.cfg.sample_bytes_max)];
         let mut guard = lock(&self.inner);
-        let Inner { classes, rng } = &mut *guard;
-        let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class));
+        let Inner { classes, rng, profile } = &mut *guard;
+        let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class, *profile));
         let r = &mut c.reservoir;
         let seq = r.seen;
         r.seen += 1;
@@ -527,14 +650,36 @@ impl Engine {
                 dict = self.dict_bytes(&recipe);
                 if dict.is_none() {
                     note = Some("champion dictionary missing; using baseline".to_string());
-                    recipe = Recipe::baseline();
+                    recipe = self.default_recipe();
                 }
             }
-            match recipe.encode_with_workers(data, dict.as_deref().map(|d| d.as_slice()), self.mt_workers_for(&recipe, data.len())) {
+            let codec_name = recipe.codec.name();
+            let workers = self.mt_workers_for(&recipe, data.len());
+            let dict_slice = dict.as_deref().map(|d| d.as_slice());
+            let t = Instant::now();
+            // MT zstd without a filter: verify concurrently with the encode (one pass, same check)
+            let overlapped = self.cfg.overlap_verify && workers > 1 && recipe.filter == Filter::None && recipe.validate().is_ok();
+            let encoded = if overlapped {
+                let id = recipe.dict_id();
+                let pair = match (&id, dict_slice) {
+                    (Some(id), Some(b)) => Some((id, b)),
+                    _ => None,
+                };
+                codec::encode_zstd_mt_verified(recipe.level, recipe.window_log, pair, data, workers)
+            } else {
+                recipe.encode_with_workers(data, dict_slice, workers)
+            };
+            crate::metrics::codec_op(if overlapped { "compress_verify" } else { "compress" }, codec_name, data.len() as u64, t.elapsed());
+            match encoded {
                 Ok(b) => {
                     let lookup = |id: &DictId| if Some(*id) == recipe.dict_id() { dict.clone() } else { None };
-                    match codec::decode_v2(&b, usize::MAX, &lookup) {
-                        Ok(out) if out.as_slice() == data => {
+                    let t = Instant::now();
+                    let verified = if overlapped { Ok(()) } else { codec::verify_v2(&b, data, &lookup) };
+                    if !overlapped {
+                        crate::metrics::codec_op("verify", codec_name, data.len() as u64, t.elapsed());
+                    }
+                    match verified {
+                        Ok(()) => {
                             if b.len() < data.len() + 1 {
                                 blob = Some(b);
                                 recipe_used = Some(recipe);
@@ -542,7 +687,6 @@ impl Engine {
                                 note = Some("v2 not smaller than legacy raw".into());
                             }
                         }
-                        Ok(_) => note = Some("round-trip mismatch".into()),
                         Err(e) => note = Some(format!("round-trip failed: {}", e)),
                     }
                 }
@@ -640,13 +784,13 @@ impl Engine {
             Ok(d) if !d.is_empty() && d.len() <= MAX_DICT_BYTES => match self.dicts.put(d) {
                 Ok(id) => Some(id),
                 Err(e) => {
-                    eprintln!("[reactor] failed to persist dictionary: {}", e);
+                    tracing::warn!("failed to persist dictionary: {}", e);
                     None
                 }
             },
             Ok(_) => None,
             Err(e) => {
-                eprintln!("[reactor] dictionary training skipped: {}", e);
+                tracing::warn!("dictionary training skipped: {}", e);
                 None
             }
         }
@@ -737,8 +881,9 @@ impl Engine {
         // 4. Selection, crossover, mutation; write back.
         let report = {
             let mut guard = lock(&self.inner);
-            let Inner { classes, rng } = &mut *guard;
-            let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class));
+            let Inner { classes, rng, profile } = &mut *guard;
+            let profile = *profile;
+            let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class, profile));
             if let Some(d) = &dict_trained {
                 if !c.dicts.contains(d) {
                     c.dicts.push(d.clone());
@@ -759,7 +904,7 @@ impl Engine {
             }
             let mut next = elites.clone();
             if elites.is_empty() {
-                next = ClassEvo::new(class).population;
+                next = ClassEvo::new(class, profile).population;
             }
             let mut attempts = 0;
             while next.len() < POPULATION_SIZE && attempts < 1000 && !elites.is_empty() {
@@ -800,7 +945,7 @@ impl Engine {
             }
         };
         if let Err(e) = self.save() {
-            eprintln!("[reactor] failed to save state: {}", e);
+            tracing::warn!("failed to save state: {}", e);
         }
         Some(report)
     }
@@ -837,6 +982,7 @@ impl Engine {
         json!({
             "enabled": self.cfg.enabled,
             "interval_ms": self.cfg.interval.as_millis() as u64,
+            "profile": self.cfg.profile,
             "weights": { "encode": self.cfg.w_enc, "decode": self.cfg.w_dec },
             "classes": classes,
         })
@@ -861,7 +1007,7 @@ pub fn spawn_scheduler(
             for class in engine.due_classes() {
                 let e = engine.clone();
                 if let Err(err) = tokio::task::spawn_blocking(move || e.run_generation(class)).await {
-                    eprintln!("[reactor] evolution task failed: {}", err);
+                    tracing::warn!("evolution task failed: {}", err);
                 }
             }
         }

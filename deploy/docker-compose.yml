@@ -108,6 +108,15 @@ services:
       REACTOR_TLS_CERT: ${REACTOR_TLS_CERT:-}
       REACTOR_TLS_KEY: ${REACTOR_TLS_KEY:-}
       REACTOR_TLS_CA: ${REACTOR_TLS_CA:-}
+      # Encryption at rest (core-reactor NETWORK_SPEC §7): required in this deployment.
+      REACTOR_MASTER_KEY: ${REACTOR_MASTER_KEY:?set REACTOR_MASTER_KEY (32 random bytes, base64)}
+      REACTOR_REQUIRE_ENCRYPTION: "true"
+      REACTOR_PROFILE: ${REACTOR_PROFILE:-balanced}
+      REACTOR_LOG_FORMAT: json
+      # Bearer token Prometheus uses for GET /metrics (unset = only x-reactor-token works).
+      REACTOR_METRICS_TOKEN: ${REACTOR_METRICS_TOKEN:-}
+      # Online backups (deploy/backup.sh) are written only below this directory.
+      REACTOR_BACKUP_DIR: /backups
     # No `ports:` on purpose: the reactor API is internal. Multi-node clusters connect
     # reactors directly with their own TLS (REACTOR_TLS_*); publish 3005 only on a private
     # interface for that, never through Caddy.
@@ -115,6 +124,7 @@ services:
       - "3005"
     volumes:
       - reactor-state:/data/reactor-state
+      - ${REACTOR_BACKUP_HOST_DIR:-./backups/reactor}:/backups
     networks: [internal]
 
   redis:
@@ -184,6 +194,8 @@ services:
     secrets:
       - source: metrics_token
         target: metrics_token
+      - source: reactor_metrics_token
+        target: reactor_metrics_token
     expose:
       - "9090"
     networks: [internal, observability]
@@ -217,6 +229,9 @@ secrets:
   # Bearer token Prometheus sends to /api/metrics (same value as the app's METRICS_TOKEN).
   metrics_token:
     environment: METRICS_TOKEN
+  # Bearer token Prometheus sends to the reactor's /metrics (same value as REACTOR_METRICS_TOKEN).
+  reactor_metrics_token:
+    environment: REACTOR_METRICS_TOKEN
 
 volumes:
   caddy-data: {}

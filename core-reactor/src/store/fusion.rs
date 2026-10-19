@@ -75,7 +75,7 @@ impl Store {
         };
         if need_flush {
             if let Err(e) = self.flush_access() {
-                eprintln!("[store] access flush failed: {}", e);
+                tracing::warn!("access flush failed: {}", e);
             }
         }
     }
@@ -501,7 +501,7 @@ impl Store {
         })?;
         drop(pins);
         if done {
-            eprintln!("[store] unfused super-chunk {} into {} objects", id_hex(id), live.len());
+            tracing::info!("unfused super-chunk {} into {} objects", id_hex(id), live.len());
         }
         Ok(done)
     }

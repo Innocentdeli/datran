@@ -29,6 +29,7 @@
 //! is reserved or one of whose members is reserved, and it checks the reservation set while holding
 //! the reservation lock across its commit and file deletion.
 
+pub mod backup;
 pub mod fusion;
 pub mod gc;
 mod group;
@@ -124,6 +125,8 @@ pub enum StoreError {
     /// A stored item is encrypted under a key id this node is not configured with (a
     /// configuration error: never quarantined, never read as plaintext).
     KeyUnavailable(String),
+    /// Temporarily refused (an online backup holds the maintenance gate); retry later.
+    Busy(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -140,6 +143,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Db(m) => write!(f, "index error: {}", m),
             StoreError::Injected(p) => write!(f, "injected failure at {}", p),
             StoreError::KeyUnavailable(m) => write!(f, "{}", m),
+            StoreError::Busy(m) => write!(f, "busy: {}", m),
         }
     }
 }
@@ -507,6 +511,11 @@ pub struct Store {
     key_slots: HashMap<String, u8>,
     /// Slot of the active key (0 = encryption disabled, new objects are plaintext).
     active_slot: u8,
+    /// Online backups hold this exclusively for their whole run; every operation that deletes,
+    /// moves or rewrites an object file or pack file in place (GC, retired-pack deletion,
+    /// quarantine moves, repair / rekey installs) takes it shared with `try_read` and skips or
+    /// defers its work while a backup runs, so the files a backup snapshot references stay put.
+    pub(crate) maint_gate: RwLock<()>,
 }
 
 impl Store {
@@ -551,6 +560,7 @@ impl Store {
             packs: pack::Packs::default(),
             read_hook: RwLock::new(None),
             stats: RuntimeStats::default(),
+            maint_gate: RwLock::new(()),
         };
         store.sweep()?;
         store.recover_packs()?;
@@ -607,7 +617,7 @@ impl Store {
         self.stats.startup_orphans.store(orphans, Ordering::Relaxed);
         self.stats.startup_temps.store(temps, Ordering::Relaxed);
         if orphans + temps > 0 {
-            eprintln!("[store] startup sweep removed {} orphan objects and {} temp files", orphans, temps);
+            tracing::info!("startup sweep removed {} orphan objects and {} temp files", orphans, temps);
         }
         Ok(())
     }
@@ -639,7 +649,7 @@ impl Store {
             rec.stored_len = len;
             t.put_obj(id, &rec)
         })?;
-        eprintln!("[store] startup: object {} adopted its rewritten file ({} bytes)", id_hex(id), len);
+        tracing::info!("startup: object {} adopted its rewritten file ({} bytes)", id_hex(id), len);
         Ok(())
     }
 
@@ -879,7 +889,7 @@ impl Store {
         if let Some(id) = recipe.dict_id() {
             dict = self.engine.dicts.get(&id);
             if dict.is_none() {
-                recipe = Recipe::baseline();
+                recipe = self.engine.default_recipe();
             }
         }
         ObjEncoder { class, recipe, dict }
@@ -1300,8 +1310,8 @@ impl Store {
                     .await;
                     match r {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => eprintln!("[store] {} failed: {}", job, e),
-                        Err(e) => eprintln!("[store] {} task panicked: {}", job, e),
+                        Ok(Err(e)) => tracing::warn!("{} failed: {}", job, e),
+                        Err(e) => tracing::warn!("{} task panicked: {}", job, e),
                     }
                 }
             }

@@ -26,7 +26,7 @@ fn store_err(e: StoreError) -> Response {
     match e {
         StoreError::NotFound => error(StatusCode::NOT_FOUND, "not found"),
         StoreError::Corrupt(m) => error(StatusCode::CONFLICT, m),
-        StoreError::KeyUnavailable(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
+        StoreError::KeyUnavailable(m) | StoreError::Busy(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
         other => error(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
     }
 }

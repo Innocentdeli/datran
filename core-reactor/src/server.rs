@@ -70,7 +70,97 @@ async fn require_cluster(State(st): State<AppState>, req: Request, next: Next) -
     next.run(req).await
 }
 
+/// Who may read `GET /metrics` (NETWORK_SPEC §8): a matching `x-reactor-token` (when the reactor
+/// has one), or `Authorization: Bearer <REACTOR_METRICS_TOKEN>`; unauthenticated only with
+/// `REACTOR_METRICS_PUBLIC=true` on a loopback bind. With none of these the endpoint answers 401.
+#[derive(Clone, Default)]
+pub struct MetricsAuth {
+    pub token: Option<Arc<Vec<u8>>>,
+    pub public: bool,
+}
+
+impl MetricsAuth {
+    /// `REACTOR_METRICS_TOKEN` / `REACTOR_METRICS_PUBLIC`; public is ignored (with a warning)
+    /// unless `bind` is loopback.
+    pub fn from_env(bind: IpAddr) -> MetricsAuth {
+        let token = std::env::var("REACTOR_METRICS_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| Arc::new(t.into_bytes()));
+        let want_public = std::env::var("REACTOR_METRICS_PUBLIC").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+        if want_public && !bind.is_loopback() {
+            tracing::warn!(%bind, "REACTOR_METRICS_PUBLIC ignored on a non-loopback bind; /metrics needs a token");
+        }
+        MetricsAuth { token, public: want_public && bind.is_loopback() }
+    }
+}
+
+fn metrics_allowed(st: &AppState, auth: &MetricsAuth, h: &HeaderMap) -> bool {
+    if auth.public {
+        return true;
+    }
+    if let Some(expected) = &auth.token {
+        let bearer = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().as_bytes());
+        if bearer.is_some_and(|b| constant_time_eq(b, expected)) {
+            return true;
+        }
+    }
+    if let Some(expected) = &st.reactor_token {
+        if let Some(p) = h.get("x-reactor-token") {
+            return constant_time_eq(p.as_bytes(), expected);
+        }
+    }
+    false
+}
+
+async fn metrics_handler(State((st, auth)): State<(AppState, MetricsAuth)>, h: HeaderMap) -> Response {
+    if !metrics_allowed(&st, &auth, &h) {
+        return error(StatusCode::UNAUTHORIZED, "metrics need x-reactor-token or Authorization: Bearer <REACTOR_METRICS_TOKEN>");
+    }
+    let body = tokio::task::spawn_blocking(move || crate::metrics::render(&st.engine, st.store.as_deref(), st.cluster.as_deref())).await.unwrap_or_default();
+    ([(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))], body).into_response()
+}
+
+/// A client-supplied `x-request-id` is kept when it is 1–128 visible ASCII characters; otherwise
+/// a random 16-byte hex id is generated. Either way it is echoed in the response.
+fn request_id(h: &HeaderMap) -> String {
+    if let Some(v) = h.get("x-request-id").and_then(|v| v.to_str().ok()) {
+        let v = v.trim();
+        if !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| (0x21..0x7f).contains(&b)) {
+            return v.to_string();
+        }
+    }
+    hex::encode(rand::random::<[u8; 16]>())
+}
+
+/// Request id, tracing span, access log line and HTTP metrics for every request.
+async fn observe(req: Request, next: Next) -> Response {
+    use tracing::Instrument;
+    let route = req.extensions().get::<axum::extract::MatchedPath>().map(|m| m.as_str().to_string()).unwrap_or_else(|| "unmatched".into());
+    let method = req.method().as_str().to_string();
+    let rid = request_id(req.headers());
+    let span = tracing::info_span!("request", request_id = %rid, method = %method, route = %route);
+    let t = std::time::Instant::now();
+    let mut resp = next.run(req).instrument(span.clone()).await;
+    let elapsed = t.elapsed();
+    let status = resp.status().as_u16();
+    crate::metrics::http_request(&route, &method, status, elapsed);
+    span.in_scope(|| {
+        if route == "/health" || route == "/metrics" {
+            tracing::debug!(status, ms = elapsed.as_secs_f64() * 1000.0, "request");
+        } else {
+            tracing::info!(status, ms = elapsed.as_secs_f64() * 1000.0, "request");
+        }
+    });
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert(HeaderName::from_static("x-request-id"), v);
+    }
+    resp
+}
+
 pub fn router(state: AppState) -> Router {
+    router_with(state, MetricsAuth::default())
+}
+
+pub fn router_with(state: AppState, metrics_auth: MetricsAuth) -> Router {
+    let metrics = Router::new().route("/metrics", get(metrics_handler)).with_state((state.clone(), metrics_auth));
     let protected = Router::new()
         .route("/entropy", post(entropy_check))
         .route("/compress", post(compress_handler))
@@ -90,6 +180,8 @@ pub fn router(state: AppState) -> Router {
         .merge(cluster)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
+        .merge(metrics)
+        .layer(middleware::from_fn(observe))
 }
 
 async fn health_check(State(st): State<AppState>) -> impl IntoResponse {
@@ -101,7 +193,8 @@ async fn health_check(State(st): State<AppState>) -> impl IntoResponse {
         "max_buffer_mb": BODY_LIMIT / (1024 * 1024),
         "max_output_bytes": st.max_output,
         "evolution": st.engine.cfg.enabled,
-        "features": ["shannon_entropy", "symbit_packing", "lz4_flex", "zlib_fast", "blob_v2", "zstd", "brotli", "procedural", "evolution", "gossip", "store", "fusion", "gravity"]
+        "profile": st.engine.cfg.profile,
+        "features": ["shannon_entropy", "symbit_packing", "lz4_flex", "zlib_fast", "blob_v2", "zstd", "brotli", "procedural", "evolution", "gossip", "store", "fusion", "gravity", "metrics", "backup"]
     }))
 }
 
@@ -176,7 +269,14 @@ async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, bo
 fn decode_blocking(st: &AppState, body: Bytes) -> tokio::task::JoinHandle<Result<Vec<u8>, DecodeError>> {
     let engine = st.engine.clone();
     let limit = st.max_output;
-    tokio::task::spawn_blocking(move || codec::decode_any(&body, limit, &|id: &DictId| engine.dicts.get(id)))
+    tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let r = codec::decode_any(&body, limit, &|id: &DictId| engine.dicts.get(id));
+        if let Ok(out) = &r {
+            crate::metrics::codec_op("decompress", crate::metrics::blob_codec(&body), out.len() as u64, t.elapsed());
+        }
+        r
+    })
 }
 
 async fn decompress_handler(State(st): State<AppState>, body: Bytes) -> Response {

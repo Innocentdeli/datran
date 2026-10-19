@@ -16,6 +16,8 @@ info:
       called by peer reactors, not by applications. Without `REACTOR_CLUSTER_TOKEN` they answer `404`.
       Data gravity (NETWORK_SPEC §4) is enabled when the store is on and `REACTOR_CLUSTER_TOKEN` is set;
       otherwise `/cluster/*` answers `503`.
+    * Every response carries `x-request-id`: the client's value when it is 1–128 visible ASCII
+      characters, else a generated 32-hex id (also logged with the request, NETWORK_SPEC §8).
     * Errors are JSON `{"error": "<message>"}` (see `Error`). Unknown routes answer `404` with an empty body;
       a wrong method answers `405` with an `Allow` header.
     * Request bodies are limited to 500 MiB (`413` above); decoded output is limited by
@@ -371,6 +373,81 @@ paths:
         "409": { description: A rekey is already running. }
         "503": { $ref: "#/components/responses/StoreDisabled" }
 
+  /store/backup:
+    post:
+      tags: [store]
+      operationId: storeBackup
+      summary: Online consistent backup to a directory on the reactor host
+      description: |
+        Snapshot of the index (one redb read transaction) plus every pack up to its committed end,
+        every file object, dictionaries, `state.json`, `node_id` and `cluster-leases.json`, with a
+        `MANIFEST.json` holding the SHA-256 of every file (NETWORK_SPEC §2 "Backup & restore").
+        Writes only below `REACTOR_BACKUP_DIR` (`403` when unset). While it runs, GC / pack-file
+        deletion / repair are deferred (repairs and rekey answer `503` busy and retry). Stored bytes
+        are copied as they are (ciphertext when encryption at rest is on); master keys are never
+        included. Used by `reactor-admin backup` when the reactor is running.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dest]
+              properties:
+                dest: { type: string, description: "Directory relative to REACTOR_BACKUP_DIR; must not exist or be empty." }
+                previous: { type: string, description: "Earlier backup (relative to REACTOR_BACKUP_DIR) for an incremental backup." }
+      responses:
+        "200":
+          description: Backup complete (`MANIFEST.json` written last).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dest: { type: string }
+                  files: { type: integer }
+                  bytes_total: { type: integer }
+                  bytes_copied: { type: integer }
+                  objects_copied: { type: integer }
+                  objects_reused: { type: integer }
+                  packs_copied: { type: integer }
+                  packs_reused: { type: integer }
+                  key_ids: { type: array, items: { type: string }, description: "Key ids the backed-up ciphertext needs at restore." }
+                  seconds: { type: number }
+        "400": { description: "Bad dest / previous path, destination not empty or inside the state dir." }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "REACTOR_BACKUP_DIR is not configured." }
+        "503": { $ref: "#/components/responses/StoreDisabled" }
+
+  /metrics:
+    get:
+      tags: [system]
+      operationId: metrics
+      summary: Prometheus metrics (text exposition format 0.0.4)
+      description: |
+        HTTP request counts / latency histograms per route template and status, codec bytes and
+        latency per op (`compress`, `verify`, `compress_verify`, `decompress`) and codec, evolution
+        generation / champion fitness / ratio per content class, store bytes and ratios, objects,
+        packs and dead bytes, GC / scrub / fusion / compaction counters, ingest in-flight bytes,
+        group-commit batch sizes, fsync / index-commit latency, objects per encryption key id,
+        cluster peers (healthy / total), pulls, drops, repairs, remote reads and bytes, leases
+        (NETWORK_SPEC §8). Labels never contain file, chunk or object ids.
+
+        Auth: `x-reactor-token` (when the reactor has `REACTOR_TOKEN`) **or**
+        `Authorization: Bearer <REACTOR_METRICS_TOKEN>`. Unauthenticated only with
+        `REACTOR_METRICS_PUBLIC=true` on a loopback bind; otherwise `401`, also when no token is
+        configured at all.
+      security:
+        - reactorToken: []
+        - metricsBearer: []
+      responses:
+        "200":
+          description: Metrics.
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /cluster/status:
     get:
       tags: [cluster]
@@ -584,6 +661,10 @@ components:
       in: header
       name: x-cluster-token
       description: Equals `REACTOR_CLUSTER_TOKEN`. Peer-to-peer only.
+    metricsBearer:
+      type: http
+      scheme: bearer
+      description: "`REACTOR_METRICS_TOKEN` (for Prometheus, which cannot send custom headers). Only valid for `/metrics`."
 
   parameters:
     ContentTypeHint:

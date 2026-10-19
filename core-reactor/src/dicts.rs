@@ -44,12 +44,12 @@ impl DictStore {
         let bytes = match self.keys.open(Kind::Dict, id, &stored) {
             Ok(b) => b.into_owned(),
             Err(e) => {
-                eprintln!("[reactor] dictionary {}: {}", hex::encode(id), e);
+                tracing::warn!("dictionary {}: {}", hex::encode(id), e);
                 return None;
             }
         };
         if sha256(&bytes) != *id {
-            eprintln!("[reactor] dictionary {} on disk fails SHA-256 check; ignoring", hex::encode(id));
+            tracing::warn!("dictionary {} on disk fails SHA-256 check; ignoring", hex::encode(id));
             return None;
         }
         let arc = Arc::new(bytes);

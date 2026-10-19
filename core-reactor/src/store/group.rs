@@ -90,6 +90,7 @@ fn dup_err(e: &StoreError) -> StoreError {
         StoreError::Db(m) => StoreError::Db(m.clone()),
         StoreError::Injected(p) => StoreError::Injected(p),
         StoreError::KeyUnavailable(m) => StoreError::KeyUnavailable(m.clone()),
+        StoreError::Busy(m) => StoreError::Busy(m.clone()),
     }
 }
 
@@ -180,6 +181,7 @@ impl Store {
         self.group.batches.fetch_add(1, Ordering::Relaxed);
         self.group.jobs.fetch_add(n, Ordering::Relaxed);
         self.group.max_batch.fetch_max(n, Ordering::Relaxed);
+        crate::metrics::group_commit_batch(n);
         // held until the index transaction(s) below finished
         let _pin = match self.append_batch(&mut batch).and_then(|pin| self.fail("pack.before_commit").map(|_| pin)) {
             Ok(pin) => pin,
@@ -195,7 +197,9 @@ impl Store {
                     v.push(apply_commit(&mut t, job, ts)?);
                 }
             }
+            let t = Instant::now();
             tx.commit()?;
+            crate::metrics::fsync("index_commit", t.elapsed());
             Ok(v)
         })();
         let mut results: Vec<(u64, JobResult)> = match shared {

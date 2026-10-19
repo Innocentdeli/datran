@@ -480,6 +480,14 @@ async fn cluster_auth_and_wire_shapes() {
     // local GETs record demand (store read hook)
     assert_eq!(a.cluster.demand(&fid), 0.0);
     assert_eq!(get(&a, &fid, None).await.1, data);
+    // the read hook fires when the streaming task finishes, which may be just after the client
+    // received the last byte
+    for _ in 0..100 {
+        if a.cluster.demand(&fid) > 0.0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!((a.cluster.demand(&fid) - 1.0).abs() < 0.01);
     let inv: Value = c.get(format!("{}/cluster/inventory?since=0", ua)).header("x-cluster-token", CTOK).send().await.unwrap().json().await.unwrap();
     assert_eq!(inv["demand"][0]["file_id"], id_hex(&fid));

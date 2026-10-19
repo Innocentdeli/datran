@@ -132,7 +132,7 @@ pub async fn serve(cluster: Arc<Cluster>, id: Id, method: Method, headers: &Head
             let plain = match cluster.object_plain(&c.object_id, &holders).await {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("[cluster] remote read of {} failed: {}", id_hex(&id), e);
+                    tracing::warn!("remote read of {} failed: {}", id_hex(&id), e);
                     let _ = tx.send(Err(std::io::Error::other(e))).await;
                     return;
                 }

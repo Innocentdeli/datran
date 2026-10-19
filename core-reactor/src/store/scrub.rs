@@ -88,10 +88,19 @@ impl Store {
                         }
                     }
                     None => {
-                        let _ = std::fs::rename(self.object_path(id), self.quarantine_path(id));
+                        // during an online backup the file stays where the snapshot expects it
+                        // (a copy is kept for inspection instead; GC removes both later)
+                        match self.maint_gate.try_read() {
+                            Ok(_g) => {
+                                let _ = std::fs::rename(self.object_path(id), self.quarantine_path(id));
+                            }
+                            Err(_) => {
+                                let _ = std::fs::copy(self.object_path(id), self.quarantine_path(id));
+                            }
+                        }
                     }
                 }
-                eprintln!("[store] quarantined object {}: {}", id_hex(id), reason);
+                tracing::warn!("quarantined object {}: {}", id_hex(id), reason);
                 super::lock(&self.scrub).corrupt_found += 1;
                 let hook = self.quarantine_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
                 if let Some(h) = hook {
@@ -99,7 +108,7 @@ impl Store {
                 }
             }
             Ok(None) => {}
-            Err(e) => eprintln!("[store] failed to quarantine {}: {}", id_hex(id), e),
+            Err(e) => tracing::warn!("failed to quarantine {}: {}", id_hex(id), e),
         }
     }
 
@@ -181,7 +190,7 @@ impl Store {
                 Err(super::VerifyFail::Unavailable(reason)) => {
                     report.unverifiable += 1;
                     super::lock(&self.scrub).unverifiable += 1;
-                    eprintln!("[store] scrub cannot verify object {}: {}", id_hex(id), reason);
+                    tracing::warn!("scrub cannot verify object {}: {}", id_hex(id), reason);
                 }
             }
         }
@@ -240,6 +249,10 @@ impl Store {
     /// Some((pack, stored_len))` the index row is only repointed if the object is still exactly
     /// there and not quarantined (returns false otherwise; the new copy is then garbage).
     pub(crate) fn install_stored(&self, id: &Id, stored: &[u8], expect: Option<(Option<index::PackLoc>, u64)>) -> Result<bool> {
+        // rewrites an object file in place / deletes it: never while a backup copies the snapshot
+        let Ok(_gate) = self.maint_gate.try_read() else {
+            return Err(StoreError::Busy("an online backup is running; retry when it finished".into()));
+        };
         let mut res = Reservation::new(self);
         res.add(*id);
         let file_in_place = !self.pack_eligible(stored.len());
@@ -295,7 +308,7 @@ impl Store {
         }
         if was_quarantined {
             let _ = std::fs::remove_file(self.quarantine_path(id));
-            eprintln!("[store] repaired object {}", id_hex(id));
+            tracing::info!("repaired object {}", id_hex(id));
         }
         Ok(true)
     }
