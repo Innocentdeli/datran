@@ -9,7 +9,7 @@ Datran is a self-hosted file-sharing platform built on a **self-optimizing, evol
 
 Every byte is stored losslessly and verified on write and on read.
 
-Every figure in this document was measured. Section 9 explains how to reproduce the numbers on your own data.
+Every figure in this document was measured. The Benchmarks section names the command for each one, so you can reproduce it on your own data.
 
 ---
 
@@ -35,7 +35,9 @@ Every figure in this document was measured. Section 9 explains how to reproduce 
 ### Prerequisites
 - Node.js 24 (its built-in zstd is used by the fallback decoder)
 - Rust stable toolchain, with a C compiler for zstd
-- Optional: PostgreSQL (otherwise a local JSON database is used)
+- PostgreSQL in production. In development, a local JSON database is used when `DATABASE_URL` is unset.
+- Optional: Redis, needed to run more than one app instance
+- Docker, for the Postgres, end-to-end and cluster tests
 
 ### Setup
 ```bash
@@ -45,12 +47,20 @@ npm start                                           # reactor on :3005 + web app
 ```
 `npm start` launches the reactor (running `cargo run --release` if no binary is built yet), generates a shared reactor token, and starts the web app with `STORAGE_BACKEND=reactor`.
 
-### Production (HTTP/3)
-`deploy/` contains:
-- a Caddy reverse proxy: HTTP/3 over QUIC on UDP 443, HTTP/2 fallback, automatic TLS, settings tuned for streaming large transfers, security headers, and compression for text types only
-- a `docker-compose.yml` that runs the proxy, the app and the reactor (the reactor port is never exposed publicly)
+### Production
+`deploy/docker-compose.yml` runs the whole stack:
+- **Caddy:** HTTP/3 over QUIC on UDP 443, HTTP/2 fallback, automatic TLS, settings tuned for large streaming transfers, security headers, and compression for text types only.
+- **The app**, which applies database migrations before it starts.
+- **The reactor**, with encryption at rest required. Its port is never exposed publicly.
+- **PostgreSQL** and **Redis**, on the internal network only.
+- **Optional observability profile:** Prometheus and Grafana, published on `127.0.0.1` only.
 
-See [deploy/README.md](deploy/README.md) for setup, firewall rules (open UDP 443) and how to verify that `h3` is in use.
+Compose refuses to start without these secrets:
+- `DIOCOM_SECRET`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`
+- `REACTOR_TOKEN`, `REACTOR_CLUSTER_TOKEN`
+- `REACTOR_MASTER_KEY`. Keep it apart from your backups: without it, stored files can't be read.
+
+[deploy/README.md](deploy/README.md) covers setup, firewall rules, checking that HTTP/3 (`h3`) is in use, backups (`deploy/backup.sh`), billing and observability.
 
 ### Running a cluster
 Start every reactor with the following settings:
@@ -61,8 +71,11 @@ REACTOR_PEERS=http://node-b:3005,http://node-c:3005
 REACTOR_TOKEN=<shared>   REACTOR_CLUSTER_TOKEN=<shared>
 REACTOR_MIN_REPLICAS=2   REACTOR_REGION=eu-north     # optional
 REACTOR_TLS_CERT=... REACTOR_TLS_KEY=... REACTOR_TLS_CA=...   # recommended across hosts
+REACTOR_QUIC_PORT=4433   REACTOR_QUIC_MTLS=true             # optional: node-to-node over HTTP/3
 ```
-A reactor refuses to listen on a non-loopback address unless both tokens are set.
+- A reactor refuses to listen on a non-loopback address unless both tokens are set.
+- **QUIC peers:** give peers as `quic://host:port`. If QUIC fails, that peer falls back to HTTPS automatically. Open the UDP port between nodes only.
+- **Test harness:** [deploy/cluster-test/](deploy/cluster-test/) starts a 3-node cluster in separate containers and runs failure, partition and corruption scenarios against it.
 
 ---
 
@@ -78,9 +91,12 @@ The full contract is [core-reactor/openapi.yaml](core-reactor/openapi.yaml). Cli
 | DELETE | `/store/files/:id` | Unpin a file. When nothing pins it, a tombstone is created and propagates cluster-wide. |
 | GET | `/store/stats` | Dedup, compression, packs, fusion, scrub and garbage-collection status |
 | GET | `/evolution/status` | Evolution state per content type: generation, champion recipe, fitness, measured speeds |
-| GET | `/cluster/status` | Peers, holder samples, demand, pulls/drops/repairs, remote reads |
+| GET | `/cluster/status` | Peers (including which transport each uses), holder samples, demand, pulls/drops/repairs, remote reads |
+| GET | `/metrics` | Prometheus metrics. Labels are bounded: never file or object ids. |
+| POST | `/store/backup` | Consistent online backup into `REACTOR_BACKUP_DIR`. Can be incremental, with a SHA-256 manifest. |
+| POST | `/store/rekey` | Re-encrypts objects under the active master key (key rotation) |
 
-- **Auth:** `/health` is open. Every other endpoint needs the `x-reactor-token` header.
+- **Auth:** `/health` is open. Every other endpoint needs the `x-reactor-token` header. `/metrics` also accepts `Bearer $REACTOR_METRICS_TOKEN`.
 - **Node-to-node endpoints** (`/cluster/inventory`, `/manifests`, `/objects`, `/chunks`, `/hold`, `/unpin`) use `x-cluster-token`. They are documented as internal.
 
 | Client | Install / location | Notes |
@@ -130,7 +146,25 @@ The full contract is [core-reactor/openapi.yaml](core-reactor/openapi.yaml). Cli
 - **Dropping copies safely:** a cold replica is dropped only after enough other holders grant 10-minute hold-leases to keep `REACTOR_MIN_REPLICAS` copies. The node a file was first uploaded to (its origin) keeps it until another holder takes over that role through the same lease mechanism.
 - **Repair:** under-replicated files are repaired by exactly one node, chosen deterministically.
 - **Deletes:** tombstones remove a file everywhere, and a stale replica that rejoins cannot bring it back.
-- **Transport:** optional TLS between nodes. All cluster traffic is authenticated and size-capped.
+- **Transport:** HTTPS, or HTTP/3 over QUIC with optional mutual TLS.
+  - **QUIC connections:** each peer gets one connection carrying many parallel streams, so a lost packet only stalls its own transfer.
+  - **0-RTT:** only GET requests may be sent early, because they are safe to replay.
+  - **Limits:** all cluster traffic is authenticated and size-capped.
+- **Health:** each peer's sync is recorded independently. A dead node can't make healthy peers look unhealthy, and long repair passes don't delay gossip.
+
+### 4b. Encryption at rest and operations (`core-reactor/src/crypto.rs`, `store/backup.rs`, `metrics.rs`)
+- **Encryption at rest:** every object, whether stored in a file or a pack, and every dictionary is encrypted with AES-256-GCM-SIV.
+  - **Keys:** each object gets its own key, derived from the master key with HKDF.
+  - **Swap protection:** the encryption binds the object id and key id, so moving a blob to another id fails.
+  - **Rotation:** run `reactor-admin rekey` or `POST /store/rekey`.
+  - **Nodes:** each node can use a different master key; objects are re-encrypted when they arrive.
+  - **What stays plaintext:** the index and `state.json`, which hold no user content.
+- **Backups:** `reactor-admin backup` / `POST /store/backup` makes a consistent online snapshot while the reactor runs. GC and pack deletion pause during the backup.
+  - **Incremental:** unchanged objects are skipped.
+  - **Restore:** `reactor-admin restore` checks every SHA-256, then runs a deep verify before declaring success.
+  - **Full stack:** `deploy/backup.sh` backs up the reactor and Postgres together.
+- **Speed profiles:** `REACTOR_PROFILE=speed|balanced|ratio` sets the fitness weights and the starting recipe pool.
+- **Observability:** `/metrics` for Prometheus, JSON logs via `tracing` with request ids, and no secrets or user data in logs.
 
 ### 5. The Oracle: access prediction (`diocom-app/src/lib/predict/`)
 - **Signals:** a decayed recency/frequency score, a 168-bin hour-of-week histogram per file, and a per-user first-order Markov model of "file opened next" (within 30 minutes).
@@ -149,6 +183,24 @@ The full contract is [core-reactor/openapi.yaml](core-reactor/openapi.yaml). Cli
 
 ### 7. Web app (`diocom-app`)
 - **Uploads:** streamed with constant memory. A 1 GiB upload peaked at 226 MiB of server RSS, against 3.8 GB before. Each file is hashed as it arrives and verified against the reactor's file ID.
+- **Resumable uploads:** a tus 1.0 endpoint at `/api/uploads` supports creation, termination, expiration and checksums.
+  - **Resume:** a dropped connection or a page reload resumes where it stopped, including for end-to-end-encrypted uploads.
+  - **Locking:** offsets are locked through Redis, so concurrent requests can't corrupt an upload.
+  - **Shared finalize:** `/api/ingest` and tus finish uploads through the same code path.
+  - **Controls:** Cancel, Pause and Resume.
+- **Plans, quotas and billing:**
+  - **Tiers:** Free, Pro (monthly or yearly) and pay-as-you-go credits. All limits are set through env vars.
+  - **Enforcement:** checked when an upload is created and again as bytes arrive. Storage is reserved atomically, and downloads count against the owner's monthly quota.
+  - **Stripe:** Checkout, the Customer Portal, and a webhook that verifies signatures and safely ignores repeat deliveries. Pro status is derived only from webhook events.
+  - **Without Stripe keys:** everyone is on the Free tier.
+- **Mobile sign-in:** `/api/mobile/token` issues a 15-minute access JWT and a rotating 30-day refresh token. Reusing an old refresh token revokes every token from that sign-in. Server routes accept either the bearer token or the web session cookie.
+- **Database:** versioned, checksummed Postgres migrations (`npm run db:migrate`), with an advisory lock so instances don't race. Production refuses to start without a migrated Postgres.
+- **Multiple instances:** rate limits, single-use tokens, WebAuthn challenges, swarm signaling, upload progress and the cleanup leader lock all share state through Redis. Without `REDIS_URL` they fall back to memory, which is single-instance only.
+- **Observability:**
+  - Structured pino logs with request ids and redaction of passwords, tokens and keys.
+  - Prometheus `/api/metrics`, behind a token.
+  - Optional OTLP tracing.
+  - `/api/health/live` and `/api/health/ready`. Ready checks the database, Redis and the reactor.
 - **Downloads:** streamed with Range support.
 - **Sharing:**
   - Password-protected links, with PBKDF2-SHA256 at 600k iterations and HMAC-signed unlock cookies.
@@ -191,6 +243,30 @@ Only `text/plain` has enough held-out files to be a solid measurement.
 | One 1 GiB upload, 1 → 4 → all 14 threads | 53–57 → 137–147 → 149–173 MiB/s. Beyond 4 threads, disk writes are the limit on this machine. |
 | zstd encode alone, 1 thread → multithreaded | zstd-3: 350 → 1,255 MiB/s · zstd-9: 45 → 141 MiB/s |
 
+**Speed profile and verification.** Command: `cargo run --release --bin compress-bench`. 1 GiB, 12-core laptop CPU.
+
+| Stage | MiB/s |
+| :--- | ---: |
+| zstd-1, multithreaded encode | 904–1,468 |
+| zstd verify (streaming decode) | 440–720 |
+| End-to-end `/compress`, speed profile | 237–343 |
+
+The peak is about 1.47 GB/s; 3 GB/s is not reached on this machine. The safety step that decodes every output before storing it is the end-to-end limit.
+
+**Encryption at rest.** 1 GiB, 14 threads. Ingest and read-back speeds varied more between runs than between encrypted and unencrypted storage, and stored size grew 0.11%.
+
+**QUIC between nodes.** Pulling a 500 MiB replica (6,589 objects) on loopback, with 8 objects in parallel:
+
+| Path | Time |
+| :--- | ---: |
+| HTTPS | 16.1 s |
+| QUIC | 12.5 s |
+| QUIC with 2% packet loss | 20.8 s (one at a time: 35.5 s) |
+
+On a clean link the two are roughly level. The loopback advantage shows under packet loss.
+
+In the multi-container cluster test (100 ms delay plus 2% loss, simulated with netem), throughput varied a lot between runs, and neither transport was clearly faster. Remote reads fetch objects one at a time, so they reach only about 0.2 MiB/s at 100 ms round-trip time. Fetching them in parallel is the obvious next improvement for high-latency links.
+
 **Prediction.** Simulated trace: a user who opens a report and then slides every weekday morning, plus background traffic, over 4 weeks. Overall cache hit rate was 41.6% with prefetch against 0.3% without. For the user's routine files it was 100% against 0%.
 
 ---
@@ -206,7 +282,10 @@ Only `text/plain` has enough held-out files to be a solid measurement.
 | Evolution | `REACTOR_EVOLVE`, `REACTOR_WEIGHT_ENCODE`, `REACTOR_WEIGHT_DECODE`, `REACTOR_EVOLVE_INTERVAL_MS`, `REACTOR_SAMPLE_BYTES_MAX`, `REACTOR_SHARE_DICTIONARIES` |
 | Store | `REACTOR_STORE`, `REACTOR_STORE_MAX_BYTES`, `REACTOR_GC_GRACE_MS`, `REACTOR_PACK_THRESHOLD`, `REACTOR_PACK_MAX_BYTES`, `REACTOR_FUSE_COACCESS_MIN` |
 | Parallelism | `REACTOR_COMPRESS_THREADS`, `REACTOR_INGEST_INFLIGHT_BYTES`, `REACTOR_MT_THRESHOLD` |
-| Cluster | `REACTOR_PEERS`, `REACTOR_CLUSTER_TOKEN`, `REACTOR_REGION`, `REACTOR_MIN_REPLICAS`, `REACTOR_GRAVITY_PULL`, `REACTOR_DEMAND_HALFLIFE_MS`, `REACTOR_GOSSIP_INTERVAL_MS`, `REACTOR_TLS_CERT` / `_KEY` / `_CA` |
+| Cluster | `REACTOR_PEERS`, `REACTOR_CLUSTER_TOKEN`, `REACTOR_REGION`, `REACTOR_MIN_REPLICAS`, `REACTOR_GRAVITY_PULL`, `REACTOR_DEMAND_HALFLIFE_MS`, `REACTOR_GOSSIP_INTERVAL_MS`, `REACTOR_PULL_CONCURRENCY`, `REACTOR_TLS_CERT` / `_KEY` / `_CA` |
+| QUIC | `REACTOR_QUIC_PORT`, `REACTOR_QUIC_MTLS`, `REACTOR_PEER_TRANSPORT` |
+| Encryption | `REACTOR_MASTER_KEY` / `_FILE`, `REACTOR_MASTER_KEYS`, `REACTOR_ACTIVE_KEY_ID`, `REACTOR_REQUIRE_ENCRYPTION` |
+| Operations | `REACTOR_PROFILE`, `REACTOR_BACKUP_DIR`, `REACTOR_METRICS_TOKEN`, `REACTOR_LOG_FORMAT` |
 
 - **Specs:** byte formats and protocols are in [EVOLUTION_SPEC.md](core-reactor/docs/EVOLUTION_SPEC.md) and [NETWORK_SPEC.md](core-reactor/docs/NETWORK_SPEC.md).
 
@@ -215,9 +294,13 @@ Only `text/plain` has enough held-out files to be a solid measurement.
 ## Tests
 
 ```bash
-cd core-reactor && cargo test        # codecs, procedural, evolution, store, packs, fusion, cluster, TLS, crash recovery
-npm test                             # TS decoder (all formats + Rust fixtures + fuzzing), prediction, upload streaming
+cd core-reactor && cargo test        # codecs, evolution, store, packs, fusion, encryption, backup, cluster over HTTP and QUIC
+npm test                             # TS decoder, prediction, uploads/tus, billing, tokens, migrations, KV, observability
+cd diocom-app && npm run test:e2e    # Playwright: 58 browser tests on desktop and mobile (needs Docker)
+python deploy/cluster-test/run_cluster_test.py    # 3-node cluster in containers: failures, partition, corruption
 cd clients/python && python -m unittest           # each client runs against a live reactor (REACTOR_BIN=...)
 ```
+
+CI (`.github/workflows/`) runs all of these on every push except the cluster test. The cluster test runs weekly and whenever the reactor changes.
 
 The legacy simulation code in `src/` (swarm, oracle and evolution simulations) predates the real implementation and is kept for reference only.

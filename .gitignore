@@ -61,3 +61,5 @@ visual_dna.acs
 
 # Rust reactor runtime state (may contain dictionaries derived from user data)
 core-reactor/reactor-state/
+__pycache__/
+*.pyc

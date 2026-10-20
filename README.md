@@ -11,6 +11,12 @@ Self-hosted file sharing on a self-optimizing, evolutionary compression network:
 
 Every byte is stored losslessly and verified.
 
+Around that core:
+- **Encryption:** end-to-end-encrypted links, plus encryption at rest on every storage node.
+- **Uploads:** resumable, so dropped connections and page reloads pick up where they stopped.
+- **Accounts:** Free and Pro plans with Stripe billing, and a mobile app.
+- **Deployment:** an HTTP/3 deployment, metrics, and backups that are verified on restore.
+
 ```bash
 npm install && (cd diocom-app && npm install)
 cp diocom-app/.env.example diocom-app/.env.local   # set DIOCOM_SECRET at minimum
