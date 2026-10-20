@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getLobbyRole, setLobbyRoleCookie } from '../_shared';

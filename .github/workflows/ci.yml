@@ -239,11 +239,10 @@ jobs:
       - name: typecheck
         working-directory: diocom-app
         run: npx tsc --noEmit
-      # TODO: drop continue-on-error once the pending lint cleanup lands (~28 pre-existing errors).
-      - name: eslint (non-blocking until cleanup)
+      # Lints everything eslint.config.mjs covers (src, e2e, scripts); same as `npm run lint`.
+      - name: eslint
         working-directory: diocom-app
-        continue-on-error: true
-        run: npx eslint src
+        run: npx eslint
       - uses: actions/cache@v4
         with:
           path: diocom-app/.next/cache

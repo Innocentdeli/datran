@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { generateRegistrationOptions, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import db from '@/db';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { getWebAuthnConfig, storeChallenge, takeChallenge } from '../_shared';

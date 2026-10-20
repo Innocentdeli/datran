@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
 import { Zap, Users, Copy, Check, Loader2, ArrowRight, Upload, Wifi, WifiOff, CheckCircle } from 'lucide-react';
 
 type LobbyStatus = 'idle' | 'creating' | 'waiting' | 'joining' | 'active' | 'transferring' | 'complete' | 'expired';

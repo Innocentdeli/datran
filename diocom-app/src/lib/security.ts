@@ -18,6 +18,12 @@ const secretHolder = globalThis as unknown as { __diocomDevSecret?: string };
 export function getAppSecret(): string {
     const secret = process.env.DIOCOM_SECRET || process.env.NEXTAUTH_SECRET;
     if (secret) return secret;
+    // `next build` evaluates route modules (authOptions reads the secret at import) while collecting page data.
+    // Nothing is signed or verified during the build, and the server it produces is a separate process that
+    // still requires a real secret below, so builds don't need secrets in their environment.
+    if (process.env.NEXT_PHASE === 'phase-production-build') {
+        return 'build-phase-placeholder-not-used-at-runtime';
+    }
     if (process.env.NODE_ENV === 'production') {
         throw new Error('DIOCOM_SECRET or NEXTAUTH_SECRET must be set in production');
     }

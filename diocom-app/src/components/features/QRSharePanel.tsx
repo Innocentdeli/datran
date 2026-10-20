@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QrCode, Wifi, CheckCircle, Clock, RefreshCw, X } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
@@ -12,6 +12,22 @@ interface QRSharePanelProps {
 
 type SessionStatus = 'creating' | 'waiting' | 'paired' | 'complete' | 'expired';
 
+interface CreatedQrSession {
+  sessionId: string;
+  pairUrl: string;
+  expiresAt: number;
+}
+
+async function requestQrSession(shareId: string): Promise<CreatedQrSession | null> {
+  const res = await fetch('/api/qr/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileIds: [shareId] })
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export default function QRSharePanel({ shareId, onClose }: QRSharePanelProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pairUrl, setPairUrl] = useState<string | null>(null);
@@ -19,20 +35,19 @@ export default function QRSharePanel({ shareId, onClose }: QRSharePanelProps) {
   const [expiresAt, setExpiresAt] = useState<number>(0);
   const [timeLeft, setTimeLeft] = useState(300);
 
-  const createSession = useCallback(async () => {
-    setStatus('creating');
-    const res = await fetch('/api/qr/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileIds: [shareId] })
-    });
-    if (!res.ok) return;
-    const data = await res.json();
+  const applySession = (data: CreatedQrSession | null) => {
+    if (!data) return;
     setSessionId(data.sessionId);
     setPairUrl(data.pairUrl);
     setExpiresAt(data.expiresAt);
     setStatus('waiting');
-  }, [shareId]);
+  };
+
+  // Retry button: status starts as 'creating' on mount, so only a regeneration needs to reset it.
+  const createSession = () => {
+    setStatus('creating');
+    requestQrSession(shareId).then(applySession);
+  };
 
   // Poll session state
   useEffect(() => {
@@ -59,7 +74,9 @@ export default function QRSharePanel({ shareId, onClose }: QRSharePanelProps) {
     return () => clearInterval(interval);
   }, [expiresAt]);
 
-  useEffect(() => { createSession(); }, [createSession]);
+  useEffect(() => {
+    requestQrSession(shareId).then(applySession);
+  }, [shareId]);
 
   const formatTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 

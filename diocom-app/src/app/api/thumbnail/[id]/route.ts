@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { FileRepository } from '@/db/files';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import { resolveStoredPath } from '@/lib/storage';
 import { withObservability } from '@/lib/observability';
 

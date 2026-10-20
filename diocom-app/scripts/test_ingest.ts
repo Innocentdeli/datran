@@ -1,8 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 
 async function testIngest() {
-    const fs = require('fs');
-    const path = require('path');
-
     console.log('🚀 Testing Ingest API...');
 
     const filePath = path.join(process.cwd(), 'package.json');
@@ -23,8 +22,8 @@ async function testIngest() {
         console.log('Status:', res.status);
         const data = await res.json();
         console.log('Response:', JSON.stringify(data, null, 2));
-    } catch (e: any) {
-        console.error('Fetch Error:', e.message);
+    } catch (e) {
+        console.error('Fetch Error:', e instanceof Error ? e.message : String(e));
     }
 }
 

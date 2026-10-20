@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import { getReactorUrl } from '@/lib/reactorWorker';
 import { withObservability, getLogger, traceHeaders } from '@/lib/observability';
 

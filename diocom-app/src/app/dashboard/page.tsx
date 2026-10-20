@@ -1,6 +1,6 @@
 import { getServerSession } from 'next-auth';
 import { redirect } from 'next/navigation';
-import { authOptions } from '../api/auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import { FileRepository } from '@/db/files';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';

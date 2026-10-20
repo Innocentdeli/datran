@@ -3,13 +3,24 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
-import { FolderOpen, Plus, Globe, Lock, Users, FolderPlus, Loader2, X, ArrowRight, LogIn } from 'lucide-react';
+import { FolderOpen, Plus, Globe, Lock, FolderPlus, Loader2, X, ArrowRight, LogIn } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 
 interface Space {
   id: string; name: string; slug: string;
   description: string; is_public: number; created_at: number;
+}
+
+interface SpacesResponse {
+  owned?: Space[];
+  member?: Space[];
+}
+
+async function fetchSpaces(): Promise<SpacesResponse | null> {
+  const res = await fetch('/api/spaces');
+  if (!res.ok) return null;
+  return res.json();
 }
 
 export default function SpacesDashboard() {
@@ -24,20 +35,20 @@ export default function SpacesDashboard() {
   const [form, setForm] = useState({ name: '', description: '', isPublic: false });
   const [submitting, setSubmitting] = useState(false);
 
-  const fetchSpaces = async () => {
-    if (!isAuthenticated) {
-      setLoading(false);
-      return;
-    }
-    const res = await fetch('/api/spaces');
-    if (!res.ok) return;
-    const data = await res.json();
+  // Only meaningful while signed in; until the session resolves (or when signed out) the list isn't fetched.
+  const showLoading = status === 'loading' || (isAuthenticated && loading);
+
+  const applySpaces = (data: SpacesResponse | null) => {
+    if (!data) return;
     setOwned(data.owned || []);
     setMember(data.member || []);
     setLoading(false);
   };
 
-  useEffect(() => { fetchSpaces(); }, []);
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    fetchSpaces().then(applySpaces);
+  }, [isAuthenticated]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,7 +61,7 @@ export default function SpacesDashboard() {
     if (res.ok) {
       setCreating(false);
       setForm({ name: '', description: '', isPublic: false });
-      fetchSpaces();
+      fetchSpaces().then(applySpaces);
     }
     setSubmitting(false);
   };
@@ -112,7 +123,7 @@ export default function SpacesDashboard() {
           )}
         </div>
 
-        {loading ? (
+        {showLoading ? (
           <div className="flex justify-center py-20"><Loader2 size={28} className="text-violet-400 animate-spin" /></div>
         ) : !isAuthenticated ? (
           <div className="flex flex-col items-center justify-center py-24 text-center glass bg-[#0d1424] border-white/5 rounded-[40px] px-8">

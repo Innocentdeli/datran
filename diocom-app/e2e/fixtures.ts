@@ -192,38 +192,39 @@ type Fixtures = {
     newRecipientContext: () => Promise<BrowserContext>;
 };
 
+// Fixture callbacks name Playwright's `use` argument `provide` so react-hooks/rules-of-hooks doesn't mistake it for React's use().
 export const test = base.extend<Fixtures>({
-    envGuard: [async ({}, use, testInfo) => {
+    envGuard: [async ({}, provide, testInfo) => {
         testInfo.skip(!!process.env.E2E_SKIP_REASON, process.env.E2E_SKIP_REASON);
-        await use();
+        await provide();
     }, { auto: true }],
 
-    extraHTTPHeaders: async ({ extraHTTPHeaders }, use) => {
-        await use({ ...extraHTTPHeaders, 'X-Forwarded-For': testIp() });
+    extraHTTPHeaders: async ({ extraHTTPHeaders }, provide) => {
+        await provide({ ...extraHTTPHeaders, 'X-Forwarded-For': testIp() });
     },
 
-    seededUser: async ({}, use) => {
-        await use({ email: process.env.E2E_USER_EMAIL!, password: process.env.E2E_USER_PASSWORD! });
+    seededUser: async ({}, provide) => {
+        await provide({ email: process.env.E2E_USER_EMAIL!, password: process.env.E2E_USER_PASSWORD! });
     },
 
     // A fresh account per test: the app limits sign-ins per email (10 / 5 min), so sharing the seeded user across
     // every test and project would trip it. The seeded user is exercised by global-setup and 06-auth.
-    signedInPage: async ({ page, freshAccount }, use) => {
+    signedInPage: async ({ page, freshAccount }, provide) => {
         await signInViaApi(page.request, freshAccount);
-        await use(page);
+        await provide(page);
     },
 
-    freshAccount: async ({ playwright, baseURL }, use) => {
+    freshAccount: async ({ playwright, baseURL }, provide) => {
         const account = newAccount();
         const request = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { 'X-Forwarded-For': testIp() } });
         await signInViaApi(request, account, { signUp: true });
         await request.dispose();
-        await use(account);
+        await provide(account);
     },
 
-    newRecipientContext: async ({ browser, baseURL, contextOptions, viewport, userAgent, isMobile, hasTouch, deviceScaleFactor, extraHTTPHeaders }, use) => {
+    newRecipientContext: async ({ browser, baseURL, contextOptions, viewport, userAgent, isMobile, hasTouch, deviceScaleFactor, extraHTTPHeaders }, provide) => {
         const contexts: BrowserContext[] = [];
-        await use(async () => {
+        await provide(async () => {
             const ctx = await browser.newContext({
                 ...contextOptions,
                 baseURL,

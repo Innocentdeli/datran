@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { FolderOpen, Upload, Users, Download, Trash2, Globe, Lock, Plus, FileText, Image, Archive, Loader2, Link, CheckCircle, LogIn } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { FolderOpen, Upload, Users, Download, Globe, Lock, FileText, Image as ImageIcon, Archive, Loader2, Link, CheckCircle, LogIn } from 'lucide-react';
 
 interface SpaceFile {
   share_id: string;
@@ -33,7 +33,7 @@ interface Space {
 }
 
 function fileIcon(mime: string) {
-  if (mime?.startsWith('image/')) return <Image size={14} className="text-blue-400" />;
+  if (mime?.startsWith('image/')) return <ImageIcon size={14} className="text-blue-400" />;
   if (mime?.includes('zip')) return <Archive size={14} className="text-amber-400" />;
   return <FileText size={14} className="text-slate-400" />;
 }
@@ -62,30 +62,28 @@ export default function SpacePage() {
   const [loading, setLoading] = useState(true);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const fetchSpace = useCallback(async () => {
-    const res = await fetch(`/api/spaces/${slug}`);
-    if (!res.ok) { 
-      setErrorStatus(res.status);
-      setLoading(false); 
-      return; 
-    }
-    const data = await res.json();
-    setSpace(data.space);
-    setFiles(data.files);
-    setMembers(data.members);
-    setLoading(false);
+  useEffect(() => {
+    (async () => {
+      const res = await fetch(`/api/spaces/${slug}`);
+      if (!res.ok) {
+        setErrorStatus(res.status);
+        setLoading(false);
+        return;
+      }
+      const data = await res.json();
+      setSpace(data.space);
+      setFiles(data.files);
+      setMembers(data.members);
+      setLoading(false);
+    })();
   }, [slug]);
-
-  useEffect(() => { fetchSpace(); }, [fetchSpace]);
 
   const handleDrop = async (e: React.DragEvent) => {
     if (!isAuthenticated) return;
     e.preventDefault();
-// ... (omitting unchanged rest of handleDrop for brevity in snippet)
-// ...
+    // Uploading straight into a space is not implemented yet (files are added via POST /api/spaces/[slug]/files).
   };
 
   const copySpaceLink = () => {
@@ -181,19 +179,10 @@ export default function SpacePage() {
               className="relative rounded-2xl border-2 border-dashed bg-white/2 transition-colors"
             >
               <div className="flex flex-col items-center justify-center py-10 gap-2 pointer-events-none">
-                {uploading ? (
-                  <>
-                    <Loader2 size={28} className="text-violet-400 animate-spin" />
-                    <p className="text-sm text-slate-500">Uploading to space…</p>
-                  </>
-                ) : (
-                  <>
-                    <Upload size={28} className={isDragging ? 'text-violet-400' : 'text-slate-600'} />
-                    <p className="text-sm text-slate-500">
-                      {isDragging ? 'Drop to add to space' : 'Drag & drop files here to share with the space'}
-                    </p>
-                  </>
-                )}
+                <Upload size={28} className={isDragging ? 'text-violet-400' : 'text-slate-600'} />
+                <p className="text-sm text-slate-500">
+                  {isDragging ? 'Drop to add to space' : 'Drag & drop files here to share with the space'}
+                </p>
               </div>
             </motion.div>
 
@@ -248,6 +237,8 @@ export default function SpacePage() {
                 {members.map((m) => (
                   <div key={m.id} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/4 transition-colors">
                     {m.image ? (
+                      // OAuth avatar from an arbitrary provider host: next/image would need every host in remotePatterns.
+                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={m.image} className="w-7 h-7 rounded-full object-cover" alt="" />
                     ) : (
                       <div className="w-7 h-7 rounded-full bg-violet-500/25 flex items-center justify-center text-violet-400 text-[11px] font-bold">

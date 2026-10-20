@@ -5,10 +5,17 @@ import { useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Download, FileText, Wifi, CheckCircle, Loader2, QrCode } from 'lucide-react';
 
+/** Body of GET /api/qr/[sessionId] (fields absent on error responses). */
+interface QrSession {
+  status?: string;
+  fileIds?: string[];
+  expiresAt?: number | string;
+}
+
 export default function PairPage() {
   const params = useParams();
   const sessionId = params?.sessionId as string;
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<QrSession | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'expired' | 'downloading'>('loading');
 
   useEffect(() => {

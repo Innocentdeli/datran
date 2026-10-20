@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import db from '@/db';
 import { toPublicFile } from '@/db/files';
 import { withObservability } from '@/lib/observability';

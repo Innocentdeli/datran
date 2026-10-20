@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { FileRepository } from '@/db/files';
 import { getServerSession } from 'next-auth';
-import { authOptions } from '../../auth/[...nextauth]/route';
+import { authOptions } from '@/lib/auth/options';
 import { AuditLogger } from '@/lib/AuditLogger';
 import { withObservability, getLogger } from '@/lib/observability';
 

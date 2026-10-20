@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import StatCard from '@/components/ui/StatCard';
@@ -12,7 +12,23 @@ interface AdminStats {
     totalFiles: number;
     totalDownloads: number;
     totalStorage: number;
-    recentEvents: any[];
+    recentEvents: AnalyticsEvent[];
+    ledgerBlocks?: LedgerBlock[];
+}
+
+/** Row of `analytics` joined with the file name (see AnalyticsService.getStats). */
+interface AnalyticsEvent {
+    id: string | number;
+    event_type: string;
+    timestamp: number | string;
+    original_name?: string | null;
+}
+
+/** Upload hash-log entry (see LedgerService.getRecentBlocks). */
+interface LedgerBlock {
+    index: number;
+    digest: string;
+    fileHash: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +612,6 @@ export default function AdminDashboard() {
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        setLoading(true);
         fetch('/api/admin/stats')
             .then(async (res) => {
                 if (res.status === 401) {
@@ -654,7 +669,7 @@ export default function AdminDashboard() {
     if (!stats) return null;
 
     // Transform recent events for chart (simple grouping by time/type)
-    const chartData = stats.recentEvents.slice(0, 20).reverse().map((e: any) => ({
+    const chartData = stats.recentEvents.slice(0, 20).reverse().map((e) => ({
         name: new Date(e.timestamp).toLocaleTimeString(),
         downloads: e.event_type === 'download' ? 1 : 0,
         views: e.event_type === 'view' ? 1 : 0,
@@ -753,7 +768,7 @@ export default function AdminDashboard() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-white/5 text-gray-300 font-mono text-[10px]">
-                                    {stats.recentEvents.map((event: any) => (
+                                    {stats.recentEvents.map((event) => (
                                         <tr key={event.id} className="hover:bg-white/5 transition-colors">
                                             <td className="px-6 py-4 opacity-50">{formatTimestamp(new Date(event.timestamp))}</td>
                                             <td className="px-6 py-4">
@@ -791,7 +806,7 @@ export default function AdminDashboard() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-white/5 text-gray-300 font-mono text-[10px]">
-                                    {(stats as any).ledgerBlocks?.map((block: any) => (
+                                    {stats.ledgerBlocks?.map((block) => (
                                         <tr key={block.index} className="hover:bg-primary/5 transition-colors border-l-2 border-l-transparent hover:border-l-primary">
                                             <td className="px-6 py-4 text-primary font-bold">#{block.index}</td>
                                             <td className="px-6 py-4 opacity-70 italic truncate max-w-[150px]">{block.digest}</td>
@@ -800,7 +815,7 @@ export default function AdminDashboard() {
                                     ))}
                                 </tbody>
                             </table>
-                            {(!(stats as any).ledgerBlocks || (stats as any).ledgerBlocks.length === 0) && (
+                            {(!stats.ledgerBlocks || stats.ledgerBlocks.length === 0) && (
                                 <div className="p-12 text-center text-gray-600 text-xs uppercase tracking-widest font-mono">
                                     Awaiting Network Consensus...
                                 </div>

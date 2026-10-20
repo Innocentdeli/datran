@@ -61,7 +61,7 @@ export async function runQueryPathScenario(expectBackend: 'postgres' | 'local'):
     const u2 = randomUUID();
     const email = `Alice-${u1.slice(0, 8)}@Example.com`;
 
-    // users: credentials sign-up (src/app/api/auth/[...nextauth]/route.ts)
+    // users: credentials sign-up (src/lib/auth/credentials.ts, used by src/lib/auth/options.ts)
     await db.query(
         'INSERT INTO users (id, name, email, password_hash, image, provider, role, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
         [u1, 'Alice', email, 'scrypt$x', null, 'credentials', 'user', now]

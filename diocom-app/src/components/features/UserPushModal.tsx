@@ -75,7 +75,7 @@ export default function UserPushModal({ shareId, onClose }: UserPushModalProps) 
             </div>
             <div>
               <h3 className="text-sm font-bold text-white">Push to User</h3>
-              <p className="text-[11px] text-slate-500">Send directly to someone's inbox</p>
+              <p className="text-[11px] text-slate-500">Send directly to someone&apos;s inbox</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-xl hover:bg-white/8 text-slate-500 hover:text-white transition-colors">
@@ -90,7 +90,7 @@ export default function UserPushModal({ shareId, onClose }: UserPushModalProps) 
             </motion.div>
             <p className="text-white font-semibold text-lg">Sent!</p>
             <p className="text-slate-500 text-sm mt-1">
-              File is now in <span className="text-violet-400">@{selected?.username}</span>'s inbox
+              File is now in <span className="text-violet-400">@{selected?.username}</span>&apos;s inbox
             </p>
             <button onClick={onClose} className="mt-6 px-6 py-2.5 rounded-xl bg-violet-500/20 border border-violet-500/30 text-violet-300 text-sm hover:bg-violet-500/30 transition-colors">
               Done
@@ -128,6 +128,8 @@ export default function UserPushModal({ shareId, onClose }: UserPushModalProps) 
                           className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/6 transition-colors text-left"
                         >
                           {r.image ? (
+                            // OAuth avatar from an arbitrary provider host: next/image would need every host in remotePatterns.
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img src={r.image} className="w-8 h-8 rounded-full object-cover" alt="" />
                           ) : (
                             <div className="w-8 h-8 rounded-full bg-violet-500/25 flex items-center justify-center text-violet-400 text-xs font-bold">
@@ -148,6 +150,8 @@ export default function UserPushModal({ shareId, onClose }: UserPushModalProps) 
               /* Selected user chip */
               <div className="flex items-center gap-3 px-4 py-3 bg-violet-500/10 border border-violet-500/30 rounded-2xl">
                 {selected.image ? (
+                  // OAuth avatar from an arbitrary provider host (see above).
+                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={selected.image} className="w-8 h-8 rounded-full" alt="" />
                 ) : (
                   <div className="w-8 h-8 rounded-full bg-violet-500/30 flex items-center justify-center text-violet-400 text-xs font-bold">
