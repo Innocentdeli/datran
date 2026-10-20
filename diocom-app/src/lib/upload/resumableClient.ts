@@ -9,7 +9,7 @@
  *    IndexedDB key (see ./resumableUpload.ts), so the regenerated ciphertext matches the bytes already uploaded.
  */
 import * as tus from 'tus-js-client';
-import { uploadEncryptedFile, type EncryptedUploadOptions, type UploadResult } from '../crypto/e2eClient';
+import { uploadEncryptedFile, xhrUpload, type EncryptedUploadOptions, type UploadResult } from '../crypto/e2eClient';
 import { tusUpload, forgetStoredUploads, TusUploadError, TUS_ENDPOINT, type TusUploadOutcome } from './tusClient';
 import {
     uploadDce2Resumable,
@@ -96,6 +96,15 @@ function isDefinitive(status: number | null): boolean {
     return status !== null && [400, 401, 403, 413, 415, 429].includes(status);
 }
 
+/** What an aborted upload rejects with (Cancel / Pause in the UI). The tus upload and its resume state are kept. */
+function abortError(): DOMException {
+    return new DOMException('Upload aborted', 'AbortError');
+}
+
+export function isAbortError(e: unknown): boolean {
+    return e instanceof DOMException && e.name === 'AbortError';
+}
+
 function parseBody(body: string | null): UploadResult['data'] {
     try { return body ? JSON.parse(body) : null; } catch { return null; }
 }
@@ -132,9 +141,12 @@ export async function uploadEncryptedResumable(o: EncryptedUploadOptions): Promi
             endpoint: TUS_ENDPOINT,
             dce2ChunkSize: o.chunkSize,
             onProgress: (sent, total) => o.onProgress?.(total ? sent / total : 1, 'uploading'),
+            signal: o.signal,
         });
         return toResult(out, out.keyStr);
     } catch (e) {
+        // Paused/cancelled: never fall back to a single request (that would restart the upload from zero).
+        if (o.signal?.aborted) throw abortError();
         const status = e instanceof TusUploadError ? e.status : null;
         if (e instanceof TusUploadError && isDefinitive(status)) {
             return { status: status!, data: parseBody(e.body), transport: 'tus', keyStr: o.keyStr, resumedFrom: null };
@@ -155,25 +167,21 @@ export interface PlainUploadOptions {
     file: File;
     fields: Array<[string, string]>;
     onProgress?: (fraction: number) => void;
+    /** Aborts the upload (rejects with an AbortError DOMException); a tus upload stays resumable. */
+    signal?: AbortSignal;
 }
 
-function xhrIngest(file: File, fields: Array<[string, string]>, onProgress?: (f: number) => void): Promise<UploadResult> {
-    return new Promise((resolve, reject) => {
-        const form = new FormData();
-        for (const [k, v] of fields) form.append(k, v);
-        form.append('file', file, file.name);
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/ingest');
-        xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress?.(ev.loaded / ev.total); };
-        xhr.onload = () => resolve({ status: xhr.status, data: parseBody(xhr.responseText), transport: 'blob' });
-        xhr.onerror = () => reject(new TypeError('Network error during upload'));
-        xhr.send(form);
-    });
+async function xhrIngest(file: File, fields: Array<[string, string]>, onProgress?: (f: number) => void, signal?: AbortSignal): Promise<UploadResult> {
+    const form = new FormData();
+    for (const [k, v] of fields) form.append(k, v);
+    form.append('file', file, file.name);
+    const res = await xhrUpload('/api/ingest', form, onProgress, signal);
+    return { status: res.status, data: res.data as UploadResult['data'], transport: 'blob' };
 }
 
 /** Unencrypted upload: tus directly (resumable), /api/ingest for tiny files or as the fallback. */
 export async function uploadPlainResumable(o: PlainUploadOptions): Promise<UploadResult & { resumedFrom: number | null }> {
-    const fallback = async () => ({ ...(await xhrIngest(o.file, o.fields, o.onProgress)), resumedFrom: null });
+    const fallback = async () => ({ ...(await xhrIngest(o.file, o.fields, o.onProgress, o.signal)), resumedFrom: null });
     if (o.file.size < TUS_MIN_BYTES || !tus.isSupported) return fallback();
     const metadata: Record<string, string> = Object.fromEntries(o.fields);
     metadata.filename = o.file.name;
@@ -186,12 +194,26 @@ export async function uploadPlainResumable(o: PlainUploadOptions): Promise<Uploa
             metadata,
             fingerprint: `diocom-plain:${fileFingerprint(o.file)}`,
             onProgress: (sent, total) => o.onProgress?.(total ? sent / total : 1),
+            signal: o.signal,
         });
         return { status: out.status, data: out.data, transport: 'tus', resumedFrom: out.resumedFrom };
     } catch (e) {
+        if (o.signal?.aborted) throw abortError();
         const status = e instanceof TusUploadError ? e.status : null;
         if (e instanceof TusUploadError && isDefinitive(status)) return { status: status!, data: parseBody(e.body), transport: 'tus', resumedFrom: null };
         console.warn('[upload] Resumable upload failed, falling back to a single request:', e);
         return fallback();
     }
+}
+
+/**
+ * Forgets an interrupted upload of `file` (Cancel): terminates the unfinished tus upload on the server and drops the
+ * local resume state (DCE2 record and stored upload URLs), so selecting the file again starts from scratch.
+ */
+export async function discardResumableUpload(file: File): Promise<void> {
+    const fp = fileFingerprint(file);
+    const rec = await localRecords.get(fp);
+    if (rec) await forgetStoredUploads(tusFingerprintFor(fp, rec));
+    await localRecords.remove(fp);
+    await forgetStoredUploads(`diocom-plain:${fp}`);
 }

@@ -138,6 +138,13 @@ export function tusUpload(o: TusUploadOptions): Promise<TusUploadOutcome> {
             uploadSize: o.size,
             chunkSize: o.chunkSize ?? 32 * 1024 * 1024,
             retryDelays: o.retryDelays ?? DEFAULT_RETRY_DELAYS,
+            // tus-js-client's default refuses to retry while navigator.onLine is false, so a short connection drop
+            // failed the upload at once (and the caller fell back to a non-resumable single request). Keep retrying
+            // through the backoff schedule instead; client errors (4xx except 409/423) are still final.
+            onShouldRetry: (err) => {
+                const status = err.originalResponse?.getStatus() ?? 0;
+                return !(status >= 400 && status < 500) || status === 409 || status === 423;
+            },
             fingerprint: async () => o.fingerprint,
             storeFingerprintForResuming: true,
             removeFingerprintOnSuccess: true,
@@ -174,12 +181,15 @@ export function tusUpload(o: TusUploadOptions): Promise<TusUploadOutcome> {
         if (o.httpStack) options.httpStack = o.httpStack;
         options.urlStorage = secretFreeUrlStorage(o.urlStorage ?? tus.defaultOptions.urlStorage);
         const upload = new tus.Upload(o.source as Blob, options);
+        if (o.signal?.aborted) { fail(new Error('Upload aborted')); return; }
         o.signal?.addEventListener('abort', () => {
+            // abort(false): stop sending but keep the upload on the server (and its stored URL) so it can resume.
             upload.abort(false).catch(() => undefined);
             fail(new Error('Upload aborted'));
         }, { once: true });
         upload.findPreviousUploads().then(
             (previous) => {
+                if (settled) return; // aborted while looking up previous uploads
                 const prev = previous.find((p) => p.size === o.size && p.uploadUrl);
                 if (prev) {
                     resumedFrom = 0; // refined by the first progress event after the HEAD (onProgress)
@@ -187,7 +197,7 @@ export function tusUpload(o: TusUploadOptions): Promise<TusUploadOutcome> {
                 }
                 upload.start();
             },
-            () => upload.start(),
+            () => { if (!settled) upload.start(); },
         );
     });
 }

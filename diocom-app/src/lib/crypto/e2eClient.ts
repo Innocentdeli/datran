@@ -379,6 +379,8 @@ export interface EncryptedUploadOptions {
     url?: string;
     chunkSize?: number;
     onProgress?: (fraction: number, phase: 'encrypting' | 'uploading') => void;
+    /** Aborts the upload (rejects with an AbortError DOMException). */
+    signal?: AbortSignal;
 }
 
 export interface UploadResult {
@@ -457,6 +459,7 @@ async function uploadStreaming(o: EncryptedUploadOptions, master: CryptoKey, fie
         body,
         duplex: 'half',
         headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        signal: o.signal,
     } as RequestInit);
     const data = await res.json().catch(() => null);
     return { status: res.status, data, transport: 'stream' };
@@ -485,9 +488,17 @@ async function encryptToBlob(o: EncryptedUploadOptions, master: CryptoKey): Prom
     return new Blob([blob, ...parts], { type: 'application/octet-stream' });
 }
 
-function xhrUpload(url: string, form: FormData, onProgress?: (fraction: number) => void): Promise<{ status: number; data: unknown }> {
+function abortError(): DOMException {
+    return new DOMException('Upload aborted', 'AbortError');
+}
+
+export function xhrUpload(url: string, form: FormData, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
     return new Promise((resolve, reject) => {
+        if (signal?.aborted) { reject(abortError()); return; }
         const xhr = new XMLHttpRequest();
+        const onAbort = () => xhr.abort();
+        signal?.addEventListener('abort', onAbort, { once: true });
+        xhr.onloadend = () => signal?.removeEventListener('abort', onAbort);
         xhr.open('POST', url);
         xhr.upload.onprogress = (ev) => {
             if (ev.lengthComputable) onProgress?.(ev.loaded / ev.total);
@@ -500,18 +511,19 @@ function xhrUpload(url: string, form: FormData, onProgress?: (fraction: number) 
             resolve({ status: xhr.status, data });
         };
         xhr.onerror = () => reject(new TypeError('Network error during upload'));
-        xhr.onabort = () => reject(new TypeError('Upload aborted'));
+        xhr.onabort = () => reject(abortError());
         xhr.send(form);
     });
 }
 
 async function uploadBlob(o: EncryptedUploadOptions, master: CryptoKey, fields: Array<[string, string]>): Promise<UploadResult> {
     const blob = await encryptToBlob(o, master);
+    if (o.signal?.aborted) throw abortError();
     if (blob.size !== encryptedSize(o.file.size, o.chunkSize)) throw new Error('Encrypted size mismatch');
     const form = new FormData();
     for (const [k, v] of fields) form.append(k, v);
     form.append('file', blob, o.file.name);
-    const res = await xhrUpload(o.url ?? '/api/ingest', form, (f) => o.onProgress?.(0.5 + 0.5 * f, 'uploading'));
+    const res = await xhrUpload(o.url ?? '/api/ingest', form, (f) => o.onProgress?.(0.5 + 0.5 * f, 'uploading'), o.signal);
     return { ...res, transport: 'blob' };
 }
 
@@ -530,6 +542,7 @@ export async function uploadEncryptedFile(o: EncryptedUploadOptions): Promise<Up
             requestStreamsWork = true;
             return result;
         } catch (err) {
+            if (o.signal?.aborted) throw abortError();
             // e.g. ERR_H2_OR_QUIC_REQUIRED behind an HTTP/1.1 proxy: remember and fall back for this session.
             if (requestStreamsWork === true) throw err;
             requestStreamsWork = false;

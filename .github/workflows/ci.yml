@@ -254,6 +254,61 @@ jobs:
         working-directory: diocom-app
         run: npm run build
 
+  # Playwright end-to-end suite (diocom-app/e2e): production build against ephemeral PostgreSQL + Redis
+  # containers (Docker on the runner) and the release reactor (STORAGE_BACKEND=reactor via REACTOR_BIN).
+  app-e2e:
+    name: diocom-app / e2e (playwright)
+    needs: reactor-bin
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REACTOR_BIN: ${{ github.workspace }}/reactor-bin/core-reactor
+      PW_CHANNEL: chromium
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-reactor-linux
+          path: reactor-bin
+      - run: chmod +x "$REACTOR_BIN"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            diocom-app/package-lock.json
+      - name: npm ci (root)
+        run: npm ci
+      - name: npm ci (diocom-app)
+        working-directory: diocom-app
+        run: npm ci
+      - name: install chromium
+        working-directory: diocom-app
+        run: npx playwright install --with-deps chromium
+      - name: pull service images
+        run: docker pull -q postgres:16-alpine && docker pull -q redis:7-alpine
+      - uses: actions/cache@v4
+        with:
+          path: diocom-app/.next/cache
+          key: next-e2e-${{ runner.os }}-${{ hashFiles('diocom-app/package-lock.json') }}-${{ hashFiles('diocom-app/src/**') }}
+          restore-keys: |
+            next-e2e-${{ runner.os }}-${{ hashFiles('diocom-app/package-lock.json') }}-
+      - name: playwright test
+        working-directory: diocom-app
+        run: npm run test:e2e
+      - name: upload playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            diocom-app/e2e/playwright-report
+            diocom-app/e2e/test-results
+            diocom-app/e2e/.cache/*.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   # ---------------------------------------------------------------- Tauri desktop shell
   tauri-check:
     name: src-tauri / cargo check

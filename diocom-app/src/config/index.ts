@@ -49,9 +49,24 @@ export const config = {
     },
 } as const;
 
+/**
+ * Public origin for absolute links: APP_URL / NEXTAUTH_URL when configured, else `requestOrigin`. Next.js builds
+ * `request.url` from its own bind address (http://localhost:<port>), never from the Host header, so the request
+ * origin is only right when the browser talks to the server directly.
+ */
+export function publicOrigin(requestOrigin?: string): string | undefined {
+    const configured = process.env.APP_URL || process.env.NEXTAUTH_URL;
+    if (configured) {
+        try {
+            return new URL(configured).origin;
+        } catch { /* invalid: fall through */ }
+    }
+    return requestOrigin;
+}
+
 // Helper to get base URL for share links
 export function getShareLinkUrl(shareId: string, baseUrl?: string): string {
-    return `${baseUrl || config.server.url}/v1/${shareId}`;
+    return `${publicOrigin(baseUrl) || config.server.url}/v1/${shareId}`;
 }
 
 // Helper to get storage path

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Lock, RotateCcw, ShieldCheck, X, Clock } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Lock, Pause, Play, RotateCcw, ShieldCheck, X, Clock } from 'lucide-react';
 import FileUploadZone from '@/components/features/FileUploadZone';
 import ShareLinkPanel from '@/components/features/ShareLinkPanel';
 import FileTypeIcon from '@/components/ui/FileTypeIcon';
@@ -12,7 +12,7 @@ import { cn, formatDurationShort, formatFileSize, formatHours, formatSpeed } fro
 import { detectFileType } from '@/lib/fileUtils';
 import { addToHistory } from '@/lib/history';
 import * as Encryption from '@/lib/crypto/Encryption';
-import { uploadEncryptedResumable } from '@/lib/upload/resumableClient';
+import { discardResumableUpload, isAbortError, uploadEncryptedResumable } from '@/lib/upload/resumableClient';
 import { CognitiveLens } from '@/lib/CognitiveLens';
 
 /** The plan fields the upload UI needs (subset of PlanLimits, serialisable from the server page). */
@@ -62,6 +62,9 @@ function expiryOptions(plan: UploadPlanLimits): number[] {
 
 const fileKey = (f: File) => `${f.name}|${f.size}|${f.lastModified}`;
 
+/** Only transport failures (no HTTP status) and server errors are worth retrying; 4xx (402 quota, 413...) are final. */
+const isRetryable = (status: number | null) => status === null || status >= 500;
+
 export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits['id'], UploadPlanLimits> }) {
   const { status: authStatus } = useSession();
   const isAuthenticated = authStatus === 'authenticated';
@@ -76,11 +79,17 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
   const [failure, setFailure] = useState<UploadFailure | null>(null);
   const [rate, setRate] = useState<{ speed: number; eta: number } | null>(null);
   const [announce, setAnnounce] = useState('');
+  const [paused, setPaused] = useState(false);
 
   const samples = useRef<Array<{ t: number; bytes: number }>>([]);
   const lastRateUpdate = useRef(0);
   const lastAnnounced = useRef(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  /** Aborts the running batch; `stopReason` tells the loop whether that was Pause or Cancel. */
+  const abortRef = useRef<AbortController | null>(null);
+  const stopReason = useRef<'pause' | 'cancel' | null>(null);
+  /** Link key of the current batch, kept across Pause/Resume so resumed files keep their key. */
+  const batchKeyRef = useRef<string | null>(null);
   const passwordId = useId();
   const expiryId = useId();
 
@@ -132,6 +141,8 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
   const reset = () => {
+    batchKeyRef.current = null;
+    setPaused(false);
     setRows([]);
     setPassword('');
     setFailure(null);
@@ -163,33 +174,40 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
 
   const handleUploadStart = async () => {
     const batch = rows.filter((r) => r.status !== 'done');
-    if (phase === 'uploading' || batch.length === 0) return;
+    if ((phase === 'uploading' && !paused) || batch.length === 0) return;
+    const resuming = paused;
 
+    const ac = new AbortController();
+    abortRef.current = ac;
+    stopReason.current = null;
+    setPaused(false);
     setPhase('uploading');
     setFailure(null);
     setRate(null);
     samples.current = [];
     lastAnnounced.current = 0;
-    setAnnounce(`Uploading ${batch.length} file${batch.length > 1 ? 's' : ''}`);
-    setRows((prev) => prev.map((r) => (r.status === 'done' ? r : { ...r, status: 'pending', progress: 0, error: undefined })));
+    setAnnounce(resuming ? 'Upload resumed' : `Uploading ${batch.length} file${batch.length > 1 ? 's' : ''}`);
+    // A resumed batch keeps the progress shown so far (the transfer continues from the server's offset).
+    setRows((prev) => prev.map((r) => (r.status === 'done' ? r : { ...r, status: 'pending', progress: resuming ? r.progress : 0, error: undefined })));
 
     const total = batch.reduce((a, r) => a + r.file.size, 0);
     let completedBytes = 0;
     let lastFailure: UploadFailure | null = null;
 
     // One encryption key per batch; it travels only in the link fragment (#key=...).
-    const batchKey = await Encryption.generateKey();
-    const batchKeyStr = await Encryption.exportKey(batchKey);
+    if (!batchKeyRef.current) batchKeyRef.current = await Encryption.exportKey(await Encryption.generateKey());
+    const batchKeyStr = batchKeyRef.current;
 
     for (const row of batch) {
+      if (ac.signal.aborted) break;
       const file = row.file;
-      updateRow(row.id, { status: 'uploading', progress: 0 });
+      updateRow(row.id, { status: 'uploading', ...(resuming ? {} : { progress: 0 }) });
 
       let attempts = 0;
       const maxAttempts = 3;
       let success = false;
 
-      while (attempts < maxAttempts && !success) {
+      while (attempts < maxAttempts && !success && !ac.signal.aborted) {
         attempts++;
         try {
           const aiMeta = await CognitiveLens.analyze(file);
@@ -209,6 +227,7 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
             file,
             keyStr: batchKeyStr,
             fields,
+            signal: ac.signal,
             onProgress: (fraction) => {
               const f = Math.max(0, Math.min(1, fraction));
               if (f - lastFraction < 0.005 && f < 1) return;
@@ -239,23 +258,59 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
           updateRow(row.id, { status: 'done', progress: 1, link, resumed: !!result.resumedFrom });
           success = true;
         } catch (e) {
+          if (ac.signal.aborted || isAbortError(e)) break; // paused or cancelled
           const info: UploadFailure = e instanceof UploadError ? e.info : { status: null, message: e instanceof Error ? e.message : String(e) };
-          if (attempts === maxAttempts) {
+          if (attempts === maxAttempts || !isRetryable(info.status)) {
             lastFailure = info;
             updateRow(row.id, { status: 'error', error: info.message });
-          } else {
-            await new Promise((r) => setTimeout(r, 1000));
+            break;
           }
+          await new Promise((r) => setTimeout(r, 1000));
         }
       }
+      if (ac.signal.aborted) break;
       completedBytes += file.size;
     }
 
+    if (abortRef.current === ac) abortRef.current = null;
+    if (ac.signal.aborted) {
+      setRate(null);
+      if (stopReason.current === 'pause') {
+        setPaused(true);
+        setAnnounce('Upload paused');
+        return;
+      }
+      // Cancelled: forget the unfinished uploads (server + resume state) and go back to the selection.
+      await Promise.all(batch.map((r) => discardResumableUpload(r.file).catch(() => undefined)));
+      cancelled();
+      return;
+    }
+
+    batchKeyRef.current = null;
     setRate(null);
     setFailure(lastFailure);
     setPhase('done');
     setAnnounce(lastFailure ? `Upload finished with errors: ${lastFailure.message}` : 'Upload complete. Your share link is ready.');
     requestAnimationFrame(() => headingRef.current?.focus());
+  };
+
+  const cancelled = () => {
+    batchKeyRef.current = null;
+    setPaused(false);
+    setRows((prev) => prev.map((r) => (r.status === 'done' ? r : { ...r, status: 'pending', progress: 0, error: undefined })));
+    setPhase('select');
+    setAnnounce('Upload cancelled');
+  };
+
+  const stopUpload = (reason: 'pause' | 'cancel') => {
+    stopReason.current = reason;
+    if (abortRef.current) {
+      abortRef.current.abort();
+    } else if (reason === 'cancel' && paused) {
+      // Cancel while paused: nothing is running, discard right away.
+      void Promise.all(rows.filter((r) => r.status !== 'done').map((r) => discardResumableUpload(r.file).catch(() => undefined)));
+      cancelled();
+    }
   };
 
   const retryFailed = () => {
@@ -277,7 +332,7 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
             ? doneRows.length
               ? doneRows.length > 1 ? `${doneRows.length} links ready` : 'Your link is ready'
               : 'Upload failed'
-            : phase === 'uploading' ? 'Uploading…' : rows.length ? `${rows.length} file${rows.length > 1 ? 's' : ''} selected` : 'Send files'}
+            : phase === 'uploading' ? (paused ? 'Paused' : 'Uploading…') : rows.length ? `${rows.length} file${rows.length > 1 ? 's' : ''} selected` : 'Send files'}
         </h2>
         <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
           <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> End-to-end encrypted
@@ -442,7 +497,7 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
                     <CheckCircle2 className="ml-auto h-4 w-4 text-emerald-400" aria-label="Done" />
                   ) : r.status === 'error' ? (
                     <AlertCircle className="ml-auto h-4 w-4 text-red-400" aria-label="Failed" />
-                  ) : r.status === 'pending' ? (
+                  ) : r.status === 'pending' && !(paused && r.progress > 0) ? (
                     'Waiting'
                   ) : (
                     `${Math.round(r.progress * 100)}%`
@@ -452,11 +507,33 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
             ))}
           </ul>
 
-          <p className="flex items-start gap-2 text-xs text-gray-400">
-            <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" />
-            Encrypting in your browser and uploading. If your connection drops the upload retries automatically; if you
-            close this tab, select the same file again later to resume.
-          </p>
+          {paused ? (
+            <p className="flex items-start gap-2 text-xs text-gray-400">
+              <Pause className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+              Paused. Resume continues from where the upload stopped.
+            </p>
+          ) : (
+            <p className="flex items-start gap-2 text-xs text-gray-400">
+              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" />
+              Encrypting in your browser and uploading. If your connection drops the upload retries automatically; if you
+              close this tab, select the same file again later to resume.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 border-t border-white/10 pt-4">
+            <Button variant="ghost" onClick={() => stopUpload('cancel')}>
+              <X className="h-4 w-4" aria-hidden="true" /> Cancel
+            </Button>
+            {paused ? (
+              <Button variant="secondary" onClick={handleUploadStart}>
+                <Play className="h-4 w-4" aria-hidden="true" /> Resume
+              </Button>
+            ) : (
+              <Button variant="secondary" onClick={() => stopUpload('pause')}>
+                <Pause className="h-4 w-4" aria-hidden="true" /> Pause
+              </Button>
+            )}
+          </div>
         </div>
       )}
 
