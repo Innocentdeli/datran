@@ -127,6 +127,8 @@ pub struct ClusterConfig {
     pub pull_concurrency: usize,
     /// Counters of this node's QUIC listener (reported in `/cluster/status`).
     pub quic_server: Option<Arc<quic::QuicServerStats>>,
+    /// Wait before a failed gravity pull is retried by the maintenance loop (5 x interval, min 5 s).
+    pub pull_retry_backoff: Duration,
 }
 
 /// Loads `<state_dir>/node_id` or creates it (16 random bytes, hex).
@@ -145,9 +147,16 @@ pub fn load_or_create_node_id(state_dir: &Path) -> std::io::Result<String> {
     Ok(s)
 }
 
+/// Writes `path` atomically (temp file, fsync, rename). The temp name is unique per call: with a
+/// per-process name, two concurrent writers shared one temp file and the second rename failed with
+/// ENOENT ("failed to persist leases: No such file or directory").
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("tmp{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -186,6 +195,7 @@ impl ClusterConfig {
             fallback_retry: Duration::from_secs(60),
             pull_concurrency: 8,
             quic_server: None,
+            pull_retry_backoff: interval * 5,
         })
     }
 
@@ -197,6 +207,7 @@ impl ClusterConfig {
         if let Some(ms) = env_parse::<u64>("REACTOR_GOSSIP_INTERVAL_MS") {
             c.interval = Duration::from_millis(ms.max(100));
             c.peer_timeout = c.interval * 3;
+            c.pull_retry_backoff = (c.interval * 5).max(Duration::from_secs(5));
         }
         if let Some(ms) = env_parse::<u64>("REACTOR_DEMAND_HALFLIFE_MS").filter(|v| *v > 0) {
             c.demand_half_life = Duration::from_millis(ms);
@@ -501,6 +512,12 @@ pub struct Cluster {
     cache: Mutex<remote::ObjCache>,
     pulling: Mutex<HashSet<Id>>,
     repairing: Mutex<HashSet<Id>>,
+    /// Peer URLs whose inventory sync is still running (a slow peer is not synced twice at once).
+    syncing: Mutex<HashSet<String>>,
+    /// Serializes writes of `cluster-leases.json`.
+    lease_persist: Mutex<()>,
+    /// Failed gravity pulls: file → earliest retry (ms), see [`Cluster::gravity_retry_pass`].
+    pull_retry_after: Mutex<HashMap<Id, u64>>,
     pub metrics: Metrics,
     me: Weak<Cluster>,
 }
@@ -532,6 +549,9 @@ impl Cluster {
             cache: Mutex::new(cache),
             pulling: Mutex::new(HashSet::new()),
             repairing: Mutex::new(HashSet::new()),
+            syncing: Mutex::new(HashSet::new()),
+            lease_persist: Mutex::new(()),
+            pull_retry_after: Mutex::new(HashMap::new()),
             metrics: Metrics::default(),
             me: me.clone(),
         });
@@ -728,31 +748,45 @@ impl Cluster {
         Ok(inv)
     }
 
-    /// One inventory gossip round with every peer (concurrently).
+    /// One inventory gossip round with every peer (concurrently). Each peer's result is recorded as
+    /// soon as its own sync finishes, and the round waits at most one gossip interval: an unreachable
+    /// peer (request timeout 30 s) must not hold back the others' `last_ok_ms` and make every peer
+    /// look unhealthy. A sync still running from an earlier round is not started again.
     pub async fn gossip_round(&self) {
-        let urls = self.all_peer_urls();
-        let futs = urls.iter().map(|u| self.sync_peer(u));
-        let results = futures_util::future::join_all(futs).await;
+        let Some(me) = self.arc() else { return };
+        let mut handles = Vec::new();
+        for url in self.all_peer_urls() {
+            if !lock(&self.syncing).insert(url.clone()) {
+                continue;
+            }
+            let me = me.clone();
+            handles.push(tokio::spawn(async move {
+                let r = me.sync_peer(&url).await;
+                me.record_sync(&url, r);
+                lock(&me.syncing).remove(&url);
+            }));
+        }
+        let _ = tokio::time::timeout(self.cfg.interval, futures_util::future::join_all(handles)).await;
+        self.metrics.gossip_rounds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_sync(&self, url: &str, r: Result<(), String>) {
         let now = now_ms();
         let mut peers = lock(&self.peers);
-        for (url, r) in urls.iter().zip(results) {
-            if let Some(p) = peers.iter_mut().find(|p| &p.url == url) {
-                match r {
-                    Ok(()) => {
-                        p.last_ok_ms = Some(now);
-                        p.failures = 0;
-                        p.last_error = None;
-                    }
-                    Err(e) => {
-                        p.failures += 1;
-                        p.last_error = Some(e.chars().take(300).collect());
-                        p.last_error_ms = Some(now);
-                    }
+        if let Some(p) = peers.iter_mut().find(|p| p.url == url) {
+            match r {
+                Ok(()) => {
+                    p.last_ok_ms = Some(now);
+                    p.failures = 0;
+                    p.last_error = None;
+                }
+                Err(e) => {
+                    p.failures += 1;
+                    p.last_error = Some(e.chars().take(300).collect());
+                    p.last_error_ms = Some(now);
                 }
             }
         }
-        drop(peers);
-        self.metrics.gossip_rounds.fetch_add(1, Ordering::Relaxed);
     }
 
     async fn sync_peer(&self, url: &str) -> Result<(), String> {
@@ -942,10 +976,45 @@ impl Cluster {
             return;
         }
         tokio::spawn(async move {
-            if let Err(e) = me.pull(&file, reason).await {
-                tracing::warn!("pull of {} failed: {}", id_hex(&file), e);
+            match me.pull(&file, reason).await {
+                Ok(_) => {
+                    lock(&me.pull_retry_after).remove(&file);
+                }
+                Err(e) => {
+                    tracing::warn!("pull of {} failed: {}", id_hex(&file), e);
+                    lock(&me.pull_retry_after).insert(file, now_ms() + me.cfg.pull_retry_backoff.as_millis() as u64);
+                }
             }
         });
+    }
+
+    /// Restarts gravity pulls that failed (transient peer errors, timeouts under loss): a pull is
+    /// otherwise started only by the remote read that crosses `REACTOR_GRAVITY_PULL`, so one failure
+    /// left a file with enough demand un-replicated until it was read again. Retries non-held,
+    /// non-tombstoned files whose decayed local demand still meets the threshold, waiting
+    /// `pull_retry_backoff` after a failure. Returns the number of pulls started.
+    pub async fn gravity_retry_pass(&self) -> usize {
+        let wanted: Vec<Id> = self.demand_top(256, self.cfg.gravity_pull - 0.005).into_iter().map(|(id, _)| id).collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+        let now = now_ms();
+        let due: Vec<Id> = {
+            let mut retry = lock(&self.pull_retry_after);
+            retry.retain(|_, t| *t + 3_600_000 > now);
+            let pulling = lock(&self.pulling);
+            wanted.into_iter().filter(|f| !pulling.contains(f) && retry.get(f).is_none_or(|t| *t <= now)).collect()
+        };
+        let store = self.store.clone();
+        let todo: Vec<Id> = tokio::task::spawn_blocking(move || {
+            due.into_iter().filter(|f| !store.contains_file(f).unwrap_or(true) && store.tombstone(f).ok().flatten().is_none()).collect()
+        })
+        .await
+        .unwrap_or_default();
+        for f in &todo {
+            self.spawn_pull(*f, PullReason::Gravity);
+        }
+        todo.len()
     }
 
     /// Pulls a full replica of `file` from its holders (manifest + missing objects; chunks
@@ -1065,6 +1134,7 @@ impl Cluster {
     pub async fn maintenance_round(&self) {
         self.gossip_round().await;
         self.repair_pass().await;
+        self.gravity_retry_pass().await;
         self.drop_pass().await;
         self.housekeeping();
     }
@@ -1268,6 +1338,8 @@ impl Cluster {
             self.metrics.leases_refused.fetch_add(1, Ordering::Relaxed);
             return resp;
         }
+        // Concurrent grants (parallel hold requests) persist one at a time, newest snapshot last.
+        let _persist = lock(&self.lease_persist);
         let snapshot = {
             let mut l = lock(&self.leases);
             if l.dropping.contains_key(file) {
@@ -1396,19 +1468,36 @@ impl Cluster {
 
     // ---- background loop -------------------------------------------------------------------
 
-    /// Spawns the maintenance loop (every `interval`).
-    pub fn spawn_loop(self: Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(self.cfg.interval) => {}
-                    _ = shutdown.changed() => break,
-                }
-                if *shutdown.borrow() {
-                    break;
-                }
-                self.maintenance_round().await;
+    /// Spawns the background loops (every `interval`): inventory gossip on its own timer, and
+    /// repair / gravity drops / housekeeping. Same work as [`Cluster::maintenance_round`], but a long
+    /// repair pass (up to 32 sequential pulls) cannot stop gossip and let healthy peers' last
+    /// successful sync age past the 3 x interval health window.
+    pub fn spawn_loop(self: Arc<Self>, shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+        async fn tick(interval: Duration, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = shutdown.changed() => return false,
             }
+            !*shutdown.borrow()
+        }
+        let gossip = {
+            let me = self.clone();
+            let mut sd = shutdown.clone();
+            tokio::spawn(async move {
+                while tick(me.cfg.interval, &mut sd).await {
+                    me.gossip_round().await;
+                }
+            })
+        };
+        let mut sd = shutdown;
+        tokio::spawn(async move {
+            while tick(self.cfg.interval, &mut sd).await {
+                self.repair_pass().await;
+                self.gravity_retry_pass().await;
+                self.drop_pass().await;
+                self.housekeeping();
+            }
+            let _ = gossip.await;
         })
     }
 
@@ -1539,3 +1628,35 @@ fn load_leases(state_dir: &Path) -> LeaseBook {
     book
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::write_atomic;
+
+    /// Concurrent writers of one file (parallel lease grants) must all succeed and leave one
+    /// complete version (they used to share a temp file; the losing rename failed with ENOENT).
+    #[test]
+    fn write_atomic_concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("cluster-leases.json");
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let p = path.clone();
+                std::thread::spawn(move || {
+                    for j in 0..20 {
+                        write_atomic(&p, format!("{{\"writer\":{},\"n\":{}}}", i, j).repeat(64).as_bytes()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(got.len() % 64, 0);
+        let unit = &got[..got.len() / 64];
+        assert_eq!(got, unit.repeat(64), "torn write");
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1, "temp files left behind");
+    }
+}

@@ -1,0 +1,138 @@
+# Datran reactor multi-node cluster test: three reactors in separate containers (one host).
+#
+#   python deploy/cluster-test/run_cluster_test.py          # builds, starts, runs every scenario, tears down
+#
+# Manual use:
+#   docker compose -f deploy/cluster-test/docker-compose.cluster.yml up -d --build
+#   docker compose -f deploy/cluster-test/docker-compose.cluster.yml down -v
+#
+# TEST ONLY: tokens and master keys below are fixed, public test values. Never reuse them.
+# Ports are published on 127.0.0.1 only (34431..34433 -> node-a..node-c HTTPS).
+
+name: datran-ct
+
+x-reactor-env: &reactor-env
+  REACTOR_PORT: "4433"                     # HTTPS (TCP) ...
+  REACTOR_QUIC_PORT: "4433"                # ... and QUIC (UDP) on the same number (quic:// falls back to https://)
+  REACTOR_QUIC_MTLS: "true"
+  REACTOR_BIND: 0.0.0.0
+  REACTOR_TOKEN: ${CT_REACTOR_TOKEN:-cluster-test-reactor-token}
+  REACTOR_CLUSTER_TOKEN: ${CT_CLUSTER_TOKEN:-cluster-test-cluster-token}
+  REACTOR_TLS_CA: /certs/ca.pem
+  REACTOR_STATE_DIR: /data/reactor-state
+  REACTOR_REQUIRE_ENCRYPTION: "true"
+  REACTOR_MIN_REPLICAS: "2"
+  REACTOR_GRAVITY_PULL: "3"
+  # short intervals for test speed (production defaults: 60 s gossip, 1 h demand half-life, 60 s scrub)
+  REACTOR_GOSSIP_INTERVAL_MS: "1000"
+  REACTOR_DEMAND_HALFLIFE_MS: "600000"
+  REACTOR_SCRUB_INTERVAL_MS: "3000"
+  REACTOR_SCRUB_BYTES: "268435456"
+  REACTOR_GC_GRACE_MS: "5000"
+  REACTOR_REMOTE_CACHE_BYTES: "67108864"
+  REACTOR_BACKUP_DIR: /backups
+  REACTOR_PROFILE: balanced
+  REACTOR_LOG: ${CT_REACTOR_LOG:-warn}     # info logs every 1 s gossip request
+
+x-reactor: &reactor
+  image: datran-reactor-cluster-test:local
+  build:
+    context: ../..
+    dockerfile: deploy/cluster-test/Dockerfile.cluster-test
+    additional_contexts:
+      reactor-base: service:reactor-base
+  restart: "no"
+  cap_add: [NET_ADMIN]                     # tc netem / iptables inside the node's own network namespace
+  depends_on:
+    certgen:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "--cacert", "/certs/ca.pem", "https://localhost:4433/health"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+  networks: [cluster]
+
+services:
+  # Production image, built from deploy/Dockerfile.reactor unchanged (the test image extends it).
+  reactor-base:
+    image: datran-reactor:cluster-base
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.reactor
+    scale: 0
+
+  certgen:
+    image: datran-reactor-cluster-test:local
+    build:
+      context: ../..
+      dockerfile: deploy/cluster-test/Dockerfile.cluster-test
+      additional_contexts:
+        reactor-base: service:reactor-base
+    user: "0"
+    entrypoint: ["sh", "/certgen.sh"]
+    volumes:
+      - ./certgen.sh:/certgen.sh:ro
+      - certs:/certs
+    network_mode: none
+
+  node-a:
+    <<: *reactor
+    hostname: node-a
+    environment:
+      <<: *reactor-env
+      REACTOR_TLS_CERT: /certs/node-a.pem
+      REACTOR_TLS_KEY: /certs/node-a.key
+      REACTOR_PEERS: ${NODE_A_PEERS:-quic://node-b:4433,quic://node-c:4433}
+      REACTOR_PEER_TRANSPORT: ${NODE_A_TRANSPORT:-http}
+      REACTOR_MASTER_KEY: ${NODE_A_MASTER_KEY:-a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1}
+    ports: ["127.0.0.1:34431:4433/tcp"]
+    volumes:
+      - certs:/certs:ro
+      - node-a-data:/data/reactor-state
+      - backups:/backups
+
+  node-b:
+    <<: *reactor
+    hostname: node-b
+    environment:
+      <<: *reactor-env
+      REACTOR_TLS_CERT: /certs/node-b.pem
+      REACTOR_TLS_KEY: /certs/node-b.key
+      REACTOR_PEERS: ${NODE_B_PEERS:-quic://node-a:4433,quic://node-c:4433}
+      REACTOR_PEER_TRANSPORT: ${NODE_B_TRANSPORT:-http}
+      REACTOR_MASTER_KEY: ${NODE_B_MASTER_KEY:-b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2}
+    ports: ["127.0.0.1:34432:4433/tcp"]
+    volumes:
+      - certs:/certs:ro
+      - node-b-data:/data/reactor-state
+      - backups:/backups
+
+  node-c:
+    <<: *reactor
+    hostname: node-c
+    environment:
+      <<: *reactor-env
+      REACTOR_TLS_CERT: /certs/node-c.pem
+      REACTOR_TLS_KEY: /certs/node-c.key
+      REACTOR_PEERS: ${NODE_C_PEERS:-quic://node-a:4433,quic://node-b:4433}
+      REACTOR_PEER_TRANSPORT: ${NODE_C_TRANSPORT:-http}
+      REACTOR_MASTER_KEY: ${NODE_C_MASTER_KEY:-c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3}
+      # A capacity limit makes node-b (unlimited) the deterministic repair target while all nodes are up
+      # (repair leader = most free capacity), so node-c is the "remote reader" in the scenarios.
+      REACTOR_STORE_MAX_BYTES: "8589934592"
+    ports: ["127.0.0.1:34433:4433/tcp"]
+    volumes:
+      - certs:/certs:ro
+      - node-c-data:/data/reactor-state
+      - backups:/backups
+
+networks:
+  cluster: {}
+
+volumes:
+  certs: {}
+  node-a-data: {}
+  node-b-data: {}
+  node-c-data: {}
+  backups: {}

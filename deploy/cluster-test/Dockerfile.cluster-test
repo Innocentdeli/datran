@@ -1,0 +1,22 @@
+# Test-only image for the multi-node cluster test (deploy/cluster-test). NOT for production.
+#
+# It extends the production reactor image (deploy/Dockerfile.reactor, passed in as the `reactor-base`
+# build context by docker-compose.cluster.yml) with:
+#   - iproute2 (tc netem), iptables (partitions), openssl (test CA) - chaos/certificate tooling
+#   - reactor-admin (offline restore), built in a stage whose first steps are identical to
+#     Dockerfile.reactor, so BuildKit reuses that build's cached `cargo build` layer.
+#   - /backups owned by the reactor user (named volumes inherit it on first mount)
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY core-reactor/ ./
+RUN cargo build --release --locked --bin core-reactor
+RUN cargo build --release --locked --bin reactor-admin
+
+FROM reactor-base
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 iptables openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /backups && chown reactor /backups
+COPY --from=build /src/target/release/reactor-admin /usr/local/bin/reactor-admin
+USER reactor

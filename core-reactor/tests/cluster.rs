@@ -145,6 +145,7 @@ async fn start(p: Pending, peers: Vec<String>, o: Opts) -> Node {
     cc.interval = Duration::from_secs(3600);
     cc.peer_timeout = Duration::from_secs(3600);
     cc.request_timeout = Duration::from_secs(10);
+    cc.pull_retry_backoff = Duration::from_millis(300);
     cc.min_replicas = o.min_replicas.unwrap_or(2);
     cc.tls_ca = o.tls_ca.clone();
     cc.tls_server = o.tls.is_some();
@@ -1114,4 +1115,34 @@ async fn quic_bench() {
             println!("{:<40} dropped {} datagrams", "", dropped.load(Ordering::Relaxed));
         }
     }
+}
+
+/// A gravity pull that failed (holder unavailable) is retried by the maintenance loop after
+/// `pull_retry_backoff` while local demand still meets `REACTOR_GRAVITY_PULL` (it used to be
+/// started only by the remote read crossing the threshold); undemanded or held files are not pulled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_gravity_pull_is_retried() {
+    let nodes = cluster_t(Transport::Http, 2, &[]).await;
+    let (a, b) = (&nodes[0], &nodes[1]);
+    let data = random_bytes(600_000, 11);
+    let fid = put_ok(a, &data).await;
+    gossip_all(&[a, b]).await;
+    assert_eq!(b.cluster.gravity_retry_pass().await, 0, "no demand, no pull");
+    for _ in 0..3 {
+        b.cluster.record_demand(&fid);
+    }
+    a.down.store(true, Ordering::SeqCst);
+    assert_eq!(b.cluster.gravity_retry_pass().await, 1);
+    wait_for("failed pull", || metric(b, "pull_failures") == 1).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(b.cluster.gravity_retry_pass().await, 0, "backoff after a failure");
+    assert!(!holds(b, &fid));
+    a.down.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(b.cluster.gravity_retry_pass().await, 1, "retried after the backoff");
+    wait_for("retried pull", || holds(b, &fid)).await;
+    assert_eq!(metric(b, "pulls"), 1);
+    let (status, body, _) = get(b, &fid, None).await;
+    assert_eq!((status, body == data), (200, true));
+    assert_eq!(b.cluster.gravity_retry_pass().await, 0, "held files are not pulled again");
 }

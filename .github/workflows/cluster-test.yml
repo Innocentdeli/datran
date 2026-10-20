@@ -1,0 +1,55 @@
+name: cluster-test
+
+# Multi-node reactor cluster test (deploy/cluster-test): three reactor containers with QUIC + mTLS,
+# encryption at rest, failure / netem / partition / corruption / backup scenarios.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "17 3 * * 1"   # weekly, Monday 03:17 UTC
+  push:
+    paths:
+      - "core-reactor/**"
+      - "deploy/Dockerfile.reactor"
+      - "deploy/cluster-test/**"
+      - "clients/python/**"
+      - ".github/workflows/cluster-test.yml"
+  pull_request:
+    paths:
+      - "core-reactor/**"
+      - "deploy/Dockerfile.reactor"
+      - "deploy/cluster-test/**"
+      - "clients/python/**"
+      - ".github/workflows/cluster-test.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cluster-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cluster-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Run cluster test
+        run: python -u deploy/cluster-test/run_cluster_test.py
+
+      - name: Docker state on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker compose -f deploy/cluster-test/docker-compose.cluster.yml -p datran-ct logs --no-color --tail 200 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f deploy/cluster-test/docker-compose.cluster.yml -p datran-ct down -v --remove-orphans || true
