@@ -5,7 +5,9 @@ mod common;
 
 use common::*;
 use core_reactor::classify::TEXT_JSON;
-use core_reactor::codec::{self, crc32, decode_any, decode_v2, Codec, DecodeError, DictId, Filter, HEADER_LEN, STRIDES};
+use core_reactor::codec::{
+    self, crc32, decode_any, decode_v2, Codec, DecodeError, DictId, Filter, HEADER_LEN, STRIDES,
+};
 use core_reactor::procedural::{self, write_varint, OP_ARITH, OP_FILL, OP_LITERAL, OP_REPEAT};
 use core_reactor::recipe::Recipe;
 use std::sync::Arc;
@@ -69,7 +71,15 @@ fn noise(n: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-const ARITH_CASES: [(usize, bool); 7] = [(1, false), (2, false), (2, true), (4, false), (4, true), (8, false), (8, true)];
+const ARITH_CASES: [(usize, bool); 7] = [
+    (1, false),
+    (2, false),
+    (2, true),
+    (4, false),
+    (4, true),
+    (8, false),
+    (8, true),
+];
 
 fn mixed(seed: u64) -> Vec<u8> {
     let mut d = text(3_000, seed);
@@ -100,7 +110,10 @@ fn datasets() -> Vec<(String, Vec<u8>)> {
             d
         }),
         ("periodic3".into(), periodic(b"xyz", 50_000)),
-        ("periodic4000".into(), periodic(&random_bytes(4_000, 9), 120_000)),
+        (
+            "periodic4000".into(),
+            periodic(&random_bytes(4_000, 9), 120_000),
+        ),
         ("mixed".into(), mixed(1)),
         ("random".into(), random_bytes(50_000, 3)),
         ("text".into(), text(20_000, 4)),
@@ -111,8 +124,14 @@ fn datasets() -> Vec<(String, Vec<u8>)> {
         // wrapping start and delta (delta > half the range = "negative")
         let start = mask(w) - 2;
         let delta = mask(w) - (w as u64) * 3;
-        v.push((format!("arith{}{}_wrap", w, if be { "be" } else { "le" }), arith(w, be, 3_001, start, delta)));
-        v.push((format!("arith{}{}_up", w, if be { "be" } else { "le" }), arith(w, be, 2_000, 0, 1)));
+        v.push((
+            format!("arith{}{}_wrap", w, if be { "be" } else { "le" }),
+            arith(w, be, 3_001, start, delta),
+        ));
+        v.push((
+            format!("arith{}{}_up", w, if be { "be" } else { "le" }),
+            arith(w, be, 2_000, 0, 1),
+        ));
     }
     v
 }
@@ -137,7 +156,8 @@ fn roundtrip_datasets_filters_levels() {
                 r.validate().unwrap();
                 let blob = r.encode(&data, None).unwrap();
                 assert_eq!(blob[2], 5, "codec id");
-                let out = decode_v2(&blob, LIMIT, &no_dict).unwrap_or_else(|e| panic!("{} {}: {}", name, r.label(), e));
+                let out = decode_v2(&blob, LIMIT, &no_dict)
+                    .unwrap_or_else(|e| panic!("{} {}: {}", name, r.label(), e));
                 assert_eq!(out, data, "{} {}", name, r.label());
                 assert_eq!(decode_any(&blob, LIMIT, &no_dict).unwrap(), data);
                 count += 1;
@@ -158,26 +178,54 @@ fn encoder_uses_the_expected_ops() {
     for (w, be) in ARITH_CASES {
         let d = arith(w, be, 1_000, mask(w) - 1, mask(w) / 3 + 5);
         let o = ops(&encode(&d));
-        assert_eq!(o, vec![(OP_ARITH, (1_000 * w) as u64, w as u64 + if be { 100 } else { 0 })], "w{} be{}", w, be);
+        assert_eq!(
+            o,
+            vec![(
+                OP_ARITH,
+                (1_000 * w) as u64,
+                w as u64 + if be { 100 } else { 0 }
+            )],
+            "w{} be{}",
+            w,
+            be
+        );
     }
     // periodic: first period literal, then one REPEAT
     let pat = noise(1_000, 11);
     let o = ops(&encode(&periodic(&pat, 50_000)));
     assert_eq!(o, vec![(OP_LITERAL, 1_000, 0), (OP_REPEAT, 49_000, 1_000)]);
     // random: a single LITERAL
-    assert_eq!(ops(&encode(&random_bytes(10_000, 1))), vec![(OP_LITERAL, 10_000, 0)]);
+    assert_eq!(
+        ops(&encode(&random_bytes(10_000, 1))),
+        vec![(OP_LITERAL, 10_000, 0)]
+    );
     // mixed: adjacent literals merged (never two LITERAL ops in a row)
     let o = ops(&encode(&mixed(2)));
-    assert!(o.windows(2).all(|w| !(w[0].0 == OP_LITERAL && w[1].0 == OP_LITERAL)), "{:?}", o);
+    assert!(
+        o.windows(2)
+            .all(|w| !(w[0].0 == OP_LITERAL && w[1].0 == OP_LITERAL)),
+        "{:?}",
+        o
+    );
     for code in [OP_LITERAL, OP_FILL, OP_REPEAT, OP_ARITH] {
-        assert!(o.iter().any(|x| x.0 == code), "op {} missing in {:?}", code, o);
+        assert!(
+            o.iter().any(|x| x.0 == code),
+            "op {} missing in {:?}",
+            code,
+            o
+        );
     }
 }
 
 /// `core` between noise whose boundary bytes differ from the core's ends (no accidental extension).
 fn surrounded(core: &[u8], seed: u64) -> Vec<u8> {
     let (first, last) = (core[0], core[core.len() - 1]);
-    let pick = |b: u8| (0..=255u8).map(|d| b.wrapping_add(d)).find(|c| *c != first && *c != last).unwrap();
+    let pick = |b: u8| {
+        (0..=255u8)
+            .map(|d| b.wrapping_add(d))
+            .find(|c| *c != first && *c != last)
+            .unwrap()
+    };
     let mut d = noise(40, seed);
     let l = d.len() - 1;
     d[l] = pick(d[l]);
@@ -193,7 +241,13 @@ fn thresholds_are_exact() {
     // FILL >= 32 (a 16..31 run is still an ARITH w=1 delta 0 run, never a FILL)
     for (n, expect) in [(32usize, true), (31, false), (33, true)] {
         let o = ops(&encode(&surrounded(&vec![0x00; n], 100)));
-        assert_eq!(o.iter().any(|x| x.0 == OP_FILL && x.1 == n as u64), expect, "fill {}: {:?}", n, o);
+        assert_eq!(
+            o.iter().any(|x| x.0 == OP_FILL && x.1 == n as u64),
+            expect,
+            "fill {}: {:?}",
+            n,
+            o
+        );
     }
     let o = ops(&encode(&surrounded(&[0x55; 15], 100)));
     assert!(o.iter().all(|x| x.0 == OP_LITERAL), "{:?}", o);
@@ -201,12 +255,28 @@ fn thresholds_are_exact() {
     // ARITH >= 16 elements, each width and endian
     for (w, be) in ARITH_CASES {
         for (k, expect) in [(16usize, true), (15, false)] {
-            let d = surrounded(&arith(w, be, k, 0x1357_9bdf_0246_8ace & mask(w), 0x0f1e_2d3c_4b5a_6978 & mask(w)), 7);
+            let d = surrounded(
+                &arith(
+                    w,
+                    be,
+                    k,
+                    0x1357_9bdf_0246_8ace & mask(w),
+                    0x0f1e_2d3c_4b5a_6978 & mask(w),
+                ),
+                7,
+            );
             let o = ops(&encode(&d));
             let found = o.iter().any(|x| x.0 == OP_ARITH && x.1 == (k * w) as u64);
             assert_eq!(found, expect, "arith w{} be{} k{}: {:?}", w, be, k, o);
             if !expect {
-                assert!(o.iter().all(|x| x.0 == OP_LITERAL), "w{} be{} k{}: {:?}", w, be, k, o);
+                assert!(
+                    o.iter().all(|x| x.0 == OP_LITERAL),
+                    "w{} be{} k{}: {:?}",
+                    w,
+                    be,
+                    k,
+                    o
+                );
             }
         }
     }
@@ -225,10 +295,18 @@ fn thresholds_are_exact() {
         let pat = noise(p, p as u64);
         let core = periodic(&pat, p + copy);
         let o = ops(&encode(&surrounded(&core, 3)));
-        let found = o.iter().any(|x| x.0 == OP_REPEAT && x.2 == p as u64 && x.1 == copy as u64);
+        let found = o
+            .iter()
+            .any(|x| x.0 == OP_REPEAT && x.2 == p as u64 && x.1 == copy as u64);
         assert_eq!(found, expect, "repeat p{} copy{}: {:?}", p, copy, o);
         if !expect {
-            assert!(!o.iter().any(|x| x.0 == OP_REPEAT), "p{} copy{}: {:?}", p, copy, o);
+            assert!(
+                !o.iter().any(|x| x.0 == OP_REPEAT),
+                "p{} copy{}: {:?}",
+                p,
+                copy,
+                o
+            );
         }
         assert_eq!(decode_v2(&encode(&core), LIMIT, &no_dict).unwrap(), core);
     }
@@ -270,14 +348,23 @@ fn blob(original_len: usize, payload: &[u8]) -> Vec<u8> {
 
 fn rejects(b: &[u8], needle: &str) {
     match decode_v2(b, LIMIT, &no_dict) {
-        Err(DecodeError::Invalid(m)) => assert!(m.contains(needle), "expected '{}', got '{}'", needle, m),
-        other => panic!("expected rejection '{}', got {:?}", needle, other.map(|v| v.len())),
+        Err(DecodeError::Invalid(m)) => {
+            assert!(m.contains(needle), "expected '{}', got '{}'", needle, m)
+        }
+        other => panic!(
+            "expected rejection '{}', got {:?}",
+            needle,
+            other.map(|v| v.len())
+        ),
     }
 }
 
 /// The spec example: every op once, ARITH wrapping and big-endian.
 fn spec_program() -> (Vec<u8>, Vec<u8>) {
-    let mut prog = vec![OP_FILL, 10, b'a', OP_LITERAL, 3, OP_REPEAT, 4, 8, OP_ARITH, 2, 1, 3, 0x02, 0x01, 0x01, 0x00];
+    let mut prog = vec![
+        OP_FILL, 10, b'a', OP_LITERAL, 3, OP_REPEAT, 4, 8, OP_ARITH, 2, 1, 3, 0x02, 0x01, 0x01,
+        0x00,
+    ];
     prog.extend([OP_ARITH, 4, 0, 2, 0xFE, 0xFF, 0xFF, 0xFF, 3, 0, 0, 0]);
     let mut expected = b"aaaaaaaaaaxyzaxyzaxyz".to_vec();
     expected.extend([0x01, 0x02, 0x01, 0x03, 0x01, 0x04]);
@@ -295,7 +382,6 @@ fn spec_program_decodes() {
     let b = blob_for(&unfiltered, Filter::Delta, 1, &p);
     assert_eq!(decode_v2(&b, LIMIT, &no_dict).unwrap(), unfiltered);
 }
-
 
 #[test]
 fn decoder_rejects_every_rule() {
@@ -321,8 +407,14 @@ fn decoder_rejects_every_rule() {
     // op would exceed the original length (each op kind)
     rejects(&lit(&[OP_FILL, 5, 1], b"", 4), "FILL op exceeds");
     rejects(&lit(&[OP_LITERAL, 5], b"abcde", 4), "LITERAL op exceeds");
-    rejects(&lit(&[OP_FILL, 2, 1, OP_REPEAT, 1, 3], b"", 4), "REPEAT op exceeds");
-    rejects(&lit(&[OP_ARITH, 2, 0, 3, 0, 0, 1, 0], b"", 5), "ARITH op exceeds");
+    rejects(
+        &lit(&[OP_FILL, 2, 1, OP_REPEAT, 1, 3], b"", 4),
+        "REPEAT op exceeds",
+    );
+    rejects(
+        &lit(&[OP_ARITH, 2, 0, 3, 0, 0, 1, 0], b"", 5),
+        "ARITH op exceeds",
+    );
     let mut huge_k = vec![OP_ARITH, 2, 0];
     huge_k.extend(varint(1 << 62));
     huge_k.extend([0, 0, 1, 0]);
@@ -331,20 +423,32 @@ fn decoder_rejects_every_rule() {
     rejects(&lit(&[OP_FILL, 3, 1], b"", 4), "produces 3");
     rejects(&lit(&[], b"", 4), "produces 0");
     // LITERAL beyond the literal stream
-    rejects(&lit(&[OP_LITERAL, 5], b"abc", 5), "beyond the literal stream");
+    rejects(
+        &lit(&[OP_LITERAL, 5], b"abc", 5),
+        "beyond the literal stream",
+    );
     rejects(&lit(&[OP_LITERAL, 5], b"", 5), "beyond the literal stream");
     // literal stream with unused trailing bytes
     rejects(&lit(&[OP_LITERAL, 3], b"abcde", 3), "unused");
     rejects(&lit(&[OP_FILL, 3, 1], b"abc", 3), "unused");
     let mut trailing = payload(&[OP_LITERAL, 3], b"abc");
     trailing.push(0);
-    rejects(&blob(3, &trailing), "trailing bytes after the literal stream");
+    rejects(
+        &blob(3, &trailing),
+        "trailing bytes after the literal stream",
+    );
     let mut junk_only = payload(&[OP_FILL, 3, 1], b"");
     junk_only.push(0x99);
     rejects(&blob(3, &junk_only), "unused");
     // REPEAT p invalid: 0, beyond output, > 16 MiB
-    rejects(&lit(&[OP_FILL, 2, 1, OP_REPEAT, 0, 2], b"", 4), "invalid REPEAT period 0");
-    rejects(&lit(&[OP_FILL, 2, 1, OP_REPEAT, 3, 2], b"", 4), "invalid REPEAT period 3");
+    rejects(
+        &lit(&[OP_FILL, 2, 1, OP_REPEAT, 0, 2], b"", 4),
+        "invalid REPEAT period 0",
+    );
+    rejects(
+        &lit(&[OP_FILL, 2, 1, OP_REPEAT, 3, 2], b"", 4),
+        "invalid REPEAT period 3",
+    );
     rejects(&lit(&[OP_REPEAT, 1, 1], b"", 1), "invalid REPEAT period 1");
     let big = (16usize << 20) + 1;
     let mut prog = vec![OP_FILL];
@@ -360,19 +464,36 @@ fn decoder_rejects_every_rule() {
     ok.extend(varint(16 << 20));
     ok.push(1);
     let original = vec![9u8; big + 1];
-    assert_eq!(decode_v2(&blob_for(&original, Filter::None, 0, &payload(&ok, b"")), LIMIT, &no_dict).unwrap(), original);
+    assert_eq!(
+        decode_v2(
+            &blob_for(&original, Filter::None, 0, &payload(&ok, b"")),
+            LIMIT,
+            &no_dict
+        )
+        .unwrap(),
+        original
+    );
     // ARITH width / endian invalid, k*w overflow, truncated start/delta
     for w in [0u8, 3, 5, 7, 16, 255] {
-        rejects(&lit(&[OP_ARITH, w, 0, 1, 0, 0], b"", 1), "invalid ARITH width");
+        rejects(
+            &lit(&[OP_ARITH, w, 0, 1, 0, 0], b"", 1),
+            "invalid ARITH width",
+        );
     }
     for e in [2u8, 255] {
-        rejects(&lit(&[OP_ARITH, 1, e, 1, 0, 0], b"", 1), "invalid ARITH endian");
+        rejects(
+            &lit(&[OP_ARITH, 1, e, 1, 0, 0], b"", 1),
+            "invalid ARITH endian",
+        );
     }
     let mut ovf = vec![OP_ARITH, 8, 0];
     ovf.extend(varint(u64::MAX / 4));
     ovf.extend([0u8; 16]);
     rejects(&lit(&ovf, b"", 8), "ARITH length overflows");
-    rejects(&lit(&[OP_ARITH, 4, 0, 1, 0, 0, 0, 0, 1, 0], b"", 4), "truncated op");
+    rejects(
+        &lit(&[OP_ARITH, 4, 0, 1, 0, 0, 0, 0, 1, 0], b"", 4),
+        "truncated op",
+    );
     rejects(&lit(&[OP_ARITH, 4], b"", 4), "truncated op");
     rejects(&lit(&[OP_FILL, 4], b"", 4), "truncated");
     // program_len beyond payload
@@ -414,13 +535,26 @@ fn programs_cannot_become_bombs() {
 #[test]
 fn fuzz_corruptions_never_panic() {
     let mut seeds: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (i, (f, s)) in [(Filter::None, 0u8), (Filter::Delta, 4), (Filter::Shuffle, 2), (Filter::Delta, 1)].into_iter().enumerate() {
+    for (i, (f, s)) in [
+        (Filter::None, 0u8),
+        (Filter::Delta, 4),
+        (Filter::Shuffle, 2),
+        (Filter::Delta, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let data = mixed(10 + i as u64)[..20_000 + i * 3_000].to_vec();
         seeds.push((proc_recipe(3, f, s).encode(&data, None).unwrap(), data));
     }
     let (p, expected) = spec_program();
     seeds.push((blob_for(&expected, Filter::None, 0, &p), expected));
-    let small: Vec<u8> = [vec![1u8; 40], arith(4, true, 20, 5, 9), periodic(b"hello", 80)].concat();
+    let small: Vec<u8> = [
+        vec![1u8; 40],
+        arith(4, true, 20, 5, 9),
+        periodic(b"hello", 80),
+    ]
+    .concat();
     seeds.push((encode(&small), small));
 
     let mut rng = Lcg(0x5EED_0005);
@@ -428,7 +562,8 @@ fn fuzz_corruptions_never_panic() {
     for i in 0..2000 {
         let (blob, original) = &seeds[i % seeds.len()];
         let mut b = blob.clone();
-        let prog_end = HEADER_LEN + 1 + procedural::read_varint(&b[HEADER_LEN..], &mut 0).unwrap() as usize;
+        let prog_end =
+            HEADER_LEN + 1 + procedural::read_varint(&b[HEADER_LEN..], &mut 0).unwrap() as usize;
         match rng.below(7) {
             0 => {
                 for _ in 0..=rng.below(4) {
@@ -468,7 +603,11 @@ fn fuzz_corruptions_never_panic() {
         }
         match decode_v2(&b, 32 << 20, &no_dict) {
             Ok(out) => {
-                assert_eq!(&out, original, "corruption {} decoded to different bytes", i);
+                assert_eq!(
+                    &out, original,
+                    "corruption {} decoded to different bytes",
+                    i
+                );
                 exact += 1;
             }
             Err(_) => errors += 1,
@@ -537,7 +676,10 @@ fn random_data_costs_only_a_few_bytes() {
         // program (~6 bytes) + zstd frame header and 3 bytes per raw 128 KiB block
         let overhead = p.len() as i64 - raw.len() as i64;
         let allowed = 16 + 3 * n.div_ceil(128 << 10) as i64;
-        println!("random {} bytes: procedural overhead over raw v2 = {} bytes", n, overhead);
+        println!(
+            "random {} bytes: procedural overhead over raw v2 = {} bytes",
+            n, overhead
+        );
         assert!(overhead <= allowed, "n {} overhead {}", n, overhead);
     }
     // /compress never stores more than legacy raw (high entropy is not evolved at all)
@@ -561,7 +703,13 @@ fn procedural_doc(seed: u64) -> Vec<u8> {
     d.extend(vec![0u8; 20_000 + seed as usize * 100]);
     d.extend(arith(2, true, 6_000, seed, 0x0101));
     d.extend(periodic(&noise(48, seed), 30_000));
-    d.extend(arith(8, false, 3_000, u64::MAX - seed, 0x0001_0000_0001_0003));
+    d.extend(arith(
+        8,
+        false,
+        3_000,
+        u64::MAX - seed,
+        0x0001_0000_0001_0003,
+    ));
     d.extend(vec![0xFFu8; 10_000]);
     d
 }
@@ -578,8 +726,17 @@ fn evolution_picks_procedural_only_where_it_wins() {
         assert_eq!(decode_any(&out.blob, LIMIT, &no_dict).unwrap(), *d);
     }
     let first = engine.run_generation(class).unwrap();
-    let proc_member = first.scored.iter().find(|m| m.recipe.codec == Codec::Procedural).expect("procedural seeded");
-    let best_other = first.scored.iter().filter(|m| m.recipe.codec != Codec::Procedural).find_map(|m| m.score.clone()).unwrap();
+    let proc_member = first
+        .scored
+        .iter()
+        .find(|m| m.recipe.codec == Codec::Procedural)
+        .expect("procedural seeded");
+    let best_other = first
+        .scored
+        .iter()
+        .filter(|m| m.recipe.codec != Codec::Procedural)
+        .find_map(|m| m.score.clone())
+        .unwrap();
     let champ = first.champion.unwrap();
     println!(
         "{}: procedural ratio {:.0}x vs best other {:.0}x; champion {}",
@@ -588,11 +745,19 @@ fn evolution_picks_procedural_only_where_it_wins() {
         best_other.ratio,
         champ.recipe.label()
     );
-    assert_eq!(champ.recipe.codec, Codec::Procedural, "champion {}", champ.recipe.label());
+    assert_eq!(
+        champ.recipe.codec,
+        Codec::Procedural,
+        "champion {}",
+        champ.recipe.label()
+    );
     // /compress now emits codec 5 blobs that decode exactly
     let fresh = procedural_doc(99);
     let out = engine.compress(&fresh, None, false);
-    assert_eq!(out.recipe.as_ref().map(|r| r.codec), Some(Codec::Procedural));
+    assert_eq!(
+        out.recipe.as_ref().map(|r| r.codec),
+        Some(Codec::Procedural)
+    );
     assert_eq!(out.blob[2], 5);
     assert_eq!(decode_any(&out.blob, LIMIT, &no_dict).unwrap(), fresh);
 
@@ -602,7 +767,10 @@ fn evolution_picks_procedural_only_where_it_wins() {
         engine.compress(d, None, true);
     }
     let r = engine.run_generation(TEXT_JSON).unwrap();
-    assert!(r.scored.iter().any(|m| m.recipe.codec == Codec::Procedural && m.score.is_some()));
+    assert!(r
+        .scored
+        .iter()
+        .any(|m| m.recipe.codec == Codec::Procedural && m.score.is_some()));
     assert_ne!(r.champion.unwrap().recipe.codec, Codec::Procedural);
 }
 
@@ -629,7 +797,11 @@ fn bench_procedural_64mib() {
     let rnd = random_bytes(64 << 20, 1);
     let t = Instant::now();
     let z = zstd::bulk::compress(&rnd, 3).unwrap();
-    println!("(reference) zstd-3 alone on random: {:.0} MiB/s, {} bytes", mib / t.elapsed().as_secs_f64(), z.len());
+    println!(
+        "(reference) zstd-3 alone on random: {:.0} MiB/s, {} bytes",
+        mib / t.elapsed().as_secs_f64(),
+        z.len()
+    );
     for (name, data) in [("random", rnd), ("procedural", procedural_sample())] {
         let r = Recipe::new(Codec::Procedural, 3);
         let t = Instant::now();

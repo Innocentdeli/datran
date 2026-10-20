@@ -8,7 +8,8 @@ use redb::{ReadableTable, Table, TableDefinition, WriteTransaction};
 /// `file_id → FileRec` (manifest header; the chunk list lives in `manifest_chunks`).
 pub const MANIFESTS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("manifests");
 /// `file_id ‖ offset(u64 BE) → chunk_id ‖ len(u32)`: the manifest chunk list, range-addressable.
-pub const MANIFEST_CHUNKS: TableDefinition<&[u8; 40], &[u8; 36]> = TableDefinition::new("manifest_chunks");
+pub const MANIFEST_CHUNKS: TableDefinition<&[u8; 40], &[u8; 36]> =
+    TableDefinition::new("manifest_chunks");
 /// `chunk_id → ChunkLoc` (object, offset, len, manifest reference count).
 pub const CHUNK_LOC: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("chunk_loc");
 /// `object_id → ObjectRec`.
@@ -120,7 +121,13 @@ impl FileRec {
         if b.len() != 26 {
             return Err(corrupt("manifest"));
         }
-        Ok(FileRec { size: u64_at(b, 0), chunk_count: u64_at(b, 8), created_ms: u64_at(b, 16), origin: b[24] != 0, class: b[25] })
+        Ok(FileRec {
+            size: u64_at(b, 0),
+            chunk_count: u64_at(b, 8),
+            created_ms: u64_at(b, 16),
+            origin: b[24] != 0,
+            class: b[25],
+        })
     }
 }
 
@@ -146,7 +153,12 @@ impl ChunkLoc {
         if b.len() != 48 {
             return Err(corrupt("chunk_loc"));
         }
-        Ok(ChunkLoc { object: id_at(b, 0), offset: u32_at(b, 32), len: u32_at(b, 36), refs: u64_at(b, 40) })
+        Ok(ChunkLoc {
+            object: id_at(b, 0),
+            offset: u32_at(b, 32),
+            len: u32_at(b, 36),
+            refs: u64_at(b, 40),
+        })
     }
 }
 
@@ -221,7 +233,10 @@ impl ObjectRec {
             flags: flags & !FLAG_PACKED,
             members: (0..n).map(|i| id_at(b, 38 + 36 * i)).collect(),
             lens: (0..n).map(|i| u32_at(b, 38 + 36 * i + 32)).collect(),
-            pack: packed.then(|| PackLoc { pack: u64_at(b, body), offset: u64_at(b, body + 8) }),
+            pack: packed.then(|| PackLoc {
+                pack: u64_at(b, body),
+                offset: u64_at(b, body + 8),
+            }),
         })
     }
     pub fn quarantined(&self) -> bool {
@@ -275,7 +290,11 @@ impl PackRec {
         if b.len() != 24 {
             return Err(corrupt("pack"));
         }
-        Ok(PackRec { end: u64_at(b, 0), live_bytes: u64_at(b, 8), live_objects: u64_at(b, 16) })
+        Ok(PackRec {
+            end: u64_at(b, 0),
+            live_bytes: u64_at(b, 8),
+            live_objects: u64_at(b, 16),
+        })
     }
 }
 
@@ -309,7 +328,11 @@ impl AccessRec {
     /// Counters decayed to `now` with half-life `half_life_ms`.
     pub fn decayed(&self, now: u64, half_life_ms: u64) -> AccessRec {
         let f = decay_factor(self.last_ms, now, half_life_ms);
-        AccessRec { co: self.co * f, solo: self.solo * f, last_ms: now.max(self.last_ms) }
+        AccessRec {
+            co: self.co * f,
+            solo: self.solo * f,
+            last_ms: now.max(self.last_ms),
+        }
     }
 }
 
@@ -385,13 +408,20 @@ impl<'t> Tables<'t> {
 
     pub fn meta_add(&mut self, key: &str, delta: i64) -> Result<u64> {
         let cur = self.meta_get(key)?;
-        let next = if delta >= 0 { cur.saturating_add(delta as u64) } else { cur.saturating_sub(delta.unsigned_abs()) };
+        let next = if delta >= 0 {
+            cur.saturating_add(delta as u64)
+        } else {
+            cur.saturating_sub(delta.unsigned_abs())
+        };
         self.meta.insert(key, next)?;
         Ok(next)
     }
 
     pub fn get_loc(&self, id: &Id) -> Result<Option<ChunkLoc>> {
-        self.chunk_loc.get(id)?.map(|g| ChunkLoc::decode(g.value())).transpose()
+        self.chunk_loc
+            .get(id)?
+            .map(|g| ChunkLoc::decode(g.value()))
+            .transpose()
     }
 
     pub fn put_loc(&mut self, id: &Id, loc: &ChunkLoc) -> Result<()> {
@@ -400,7 +430,10 @@ impl<'t> Tables<'t> {
     }
 
     pub fn get_obj(&self, id: &Id) -> Result<Option<ObjectRec>> {
-        self.objects.get(id)?.map(|g| ObjectRec::decode(g.value())).transpose()
+        self.objects
+            .get(id)?
+            .map(|g| ObjectRec::decode(g.value()))
+            .transpose()
     }
 
     pub fn put_obj(&mut self, id: &Id, rec: &ObjectRec) -> Result<()> {
@@ -409,11 +442,17 @@ impl<'t> Tables<'t> {
     }
 
     pub fn get_file(&self, id: &Id) -> Result<Option<FileRec>> {
-        self.manifests.get(id)?.map(|g| FileRec::decode(g.value())).transpose()
+        self.manifests
+            .get(id)?
+            .map(|g| FileRec::decode(g.value()))
+            .transpose()
     }
 
     pub fn get_pack(&self, pack: u64) -> Result<Option<PackRec>> {
-        self.packs.get(pack)?.map(|g| PackRec::decode(g.value())).transpose()
+        self.packs
+            .get(pack)?
+            .map(|g| PackRec::decode(g.value()))
+            .transpose()
     }
 
     /// An indexed object now lives at `loc` (record of `stored_len` payload bytes). Also raises the
@@ -433,7 +472,10 @@ impl<'t> Tables<'t> {
     pub fn pack_unlink(&mut self, loc: PackLoc, stored_len: u64) -> Result<()> {
         let size = super::pack::record_size(stored_len);
         let Some(mut p) = self.get_pack(loc.pack)? else {
-            return Err(StoreError::Corrupt(format!("pack {} missing from index", loc.pack)));
+            return Err(StoreError::Corrupt(format!(
+                "pack {} missing from index",
+                loc.pack
+            )));
         };
         p.live_bytes = p.live_bytes.saturating_sub(size);
         p.live_objects = p.live_objects.saturating_sub(1);
@@ -459,7 +501,9 @@ impl<'t> Tables<'t> {
 
     /// One more live chunk_loc entry points at `obj`.
     pub fn obj_ref_inc(&mut self, obj: &Id) -> Result<()> {
-        let mut rec = self.get_obj(obj)?.ok_or_else(|| StoreError::Corrupt(format!("object {} missing from index", hex::encode(obj))))?;
+        let mut rec = self.get_obj(obj)?.ok_or_else(|| {
+            StoreError::Corrupt(format!("object {} missing from index", hex::encode(obj)))
+        })?;
         if rec.refcount == 0 {
             self.gc.remove(obj)?;
             self.meta_add(meta::LIVE, rec.stored_len as i64)?;
@@ -472,10 +516,16 @@ impl<'t> Tables<'t> {
     /// One fewer live chunk_loc entry points at `obj`; at zero it is queued for GC.
     pub fn obj_ref_dec(&mut self, obj: &Id, now: u64) -> Result<()> {
         let Some(mut rec) = self.get_obj(obj)? else {
-            return Err(StoreError::Corrupt(format!("object {} missing from index", hex::encode(obj))));
+            return Err(StoreError::Corrupt(format!(
+                "object {} missing from index",
+                hex::encode(obj)
+            )));
         };
         if rec.refcount == 0 {
-            return Err(StoreError::Corrupt(format!("object {} refcount underflow", hex::encode(obj))));
+            return Err(StoreError::Corrupt(format!(
+                "object {} refcount underflow",
+                hex::encode(obj)
+            )));
         }
         rec.refcount -= 1;
         if rec.refcount == 0 {
@@ -498,10 +548,16 @@ impl<'t> Tables<'t> {
     /// Removes `k` manifest references from a chunk.
     pub fn chunk_ref_sub(&mut self, id: &Id, k: u64, now: u64) -> Result<()> {
         let Some(mut loc) = self.get_loc(id)? else {
-            return Err(StoreError::Corrupt(format!("chunk {} missing from index", hex::encode(id))));
+            return Err(StoreError::Corrupt(format!(
+                "chunk {} missing from index",
+                hex::encode(id)
+            )));
         };
         if loc.refs < k {
-            return Err(StoreError::Corrupt(format!("chunk {} refcount underflow", hex::encode(id))));
+            return Err(StoreError::Corrupt(format!(
+                "chunk {} refcount underflow",
+                hex::encode(id)
+            )));
         }
         loc.refs -= k;
         self.put_loc(id, &loc)?;
@@ -532,23 +588,62 @@ mod tests {
 
     #[test]
     fn records_roundtrip() {
-        let f = FileRec { size: 1 << 40, chunk_count: 7, created_ms: 123, origin: true, class: 3 };
+        let f = FileRec {
+            size: 1 << 40,
+            chunk_count: 7,
+            created_ms: 123,
+            origin: true,
+            class: 3,
+        };
         assert_eq!(FileRec::decode(&f.encode()).unwrap(), f);
-        let l = ChunkLoc { object: [7; 32], offset: 99, len: 65536, refs: 5 };
+        let l = ChunkLoc {
+            object: [7; 32],
+            offset: 99,
+            len: 65536,
+            refs: 5,
+        };
         assert_eq!(ChunkLoc::decode(&l.encode()).unwrap(), l);
-        let o = ObjectRec { stored_len: 1, plain_len: 2, refcount: 3, created_ms: 4, class: 5, flags: 1, members: vec![[1; 32], [2; 32]], lens: vec![7, 9], pack: None };
+        let o = ObjectRec {
+            stored_len: 1,
+            plain_len: 2,
+            refcount: 3,
+            created_ms: 4,
+            class: 5,
+            flags: 1,
+            members: vec![[1; 32], [2; 32]],
+            lens: vec![7, 9],
+            pack: None,
+        };
         assert_eq!(ObjectRec::decode(&o.encode()).unwrap(), o);
         assert!(o.quarantined() && o.is_super());
         // packed records carry their location; pre-pack records (no trailer) decode as file objects
-        let p = ObjectRec { pack: Some(PackLoc { pack: 3, offset: 1 << 33 }), flags: 0, ..o.clone() };
+        let p = ObjectRec {
+            pack: Some(PackLoc {
+                pack: 3,
+                offset: 1 << 33,
+            }),
+            flags: 0,
+            ..o.clone()
+        };
         let enc = p.encode();
         assert_eq!(enc.len(), o.encode().len() + 16);
         assert_eq!(ObjectRec::decode(&enc).unwrap(), p);
-        assert!(ObjectRec::decode(&enc[..enc.len() - 16]).is_err(), "flag without trailer");
-        let pr = PackRec { end: 99, live_bytes: 50, live_objects: 2 };
+        assert!(
+            ObjectRec::decode(&enc[..enc.len() - 16]).is_err(),
+            "flag without trailer"
+        );
+        let pr = PackRec {
+            end: 99,
+            live_bytes: 50,
+            live_objects: 2,
+        };
         assert_eq!(PackRec::decode(&pr.encode()).unwrap(), pr);
         assert_eq!(o.member_span(&[2; 32]), Some((7, 9)));
-        let a = AccessRec { co: 1.5, solo: 0.25, last_ms: 9 };
+        let a = AccessRec {
+            co: 1.5,
+            solo: 0.25,
+            last_ms: 9,
+        };
         assert_eq!(AccessRec::decode(&a.encode()).unwrap(), a);
         assert!(ObjectRec::decode(&[0u8; 10]).is_err());
         let k = mchunk_key(&[9; 32], 0x0102_0304_0506);

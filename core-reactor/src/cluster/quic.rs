@@ -53,7 +53,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 fn env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    std::env::var(name).ok().map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -121,18 +126,29 @@ impl QuicTuning {
     pub fn from_env() -> Result<QuicTuning, String> {
         let mut t = QuicTuning::default();
         if let Ok(v) = std::env::var("REACTOR_QUIC_MAX_STREAMS") {
-            t.max_streams = v.trim().parse::<u32>().ok().filter(|n| (1..=4096).contains(n)).ok_or("REACTOR_QUIC_MAX_STREAMS must be 1..=4096")?;
+            t.max_streams = v
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (1..=4096).contains(n))
+                .ok_or("REACTOR_QUIC_MAX_STREAMS must be 1..=4096")?;
         }
         if let Some(b) = env_bool("REACTOR_QUIC_0RTT") {
             t.zero_rtt = b;
         }
         if let Ok(v) = std::env::var("REACTOR_QUIC_CONGESTION") {
             if !v.trim().is_empty() {
-                t.congestion = Congestion::parse(&v).ok_or("REACTOR_QUIC_CONGESTION must be cubic, bbr or newreno")?;
+                t.congestion = Congestion::parse(&v)
+                    .ok_or("REACTOR_QUIC_CONGESTION must be cubic, bbr or newreno")?;
             }
         }
         if let Ok(v) = std::env::var("REACTOR_QUIC_IDLE_TIMEOUT_MS") {
-            let ms = v.trim().parse::<u64>().ok().filter(|n| (1_000..=600_000).contains(n)).ok_or("REACTOR_QUIC_IDLE_TIMEOUT_MS must be 1000..=600000")?;
+            let ms = v
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| (1_000..=600_000).contains(n))
+                .ok_or("REACTOR_QUIC_IDLE_TIMEOUT_MS must be 1000..=600000")?;
             t.idle_timeout = Duration::from_millis(ms);
         }
         Ok(t)
@@ -143,10 +159,16 @@ impl QuicTuning {
         // the server accepts request streams; the client accepts none (no server push)
         tc.max_concurrent_bidi_streams(VarInt::from_u32(if server { self.max_streams } else { 0 }));
         tc.max_concurrent_uni_streams(VarInt::from_u32(16));
-        tc.stream_receive_window(VarInt::from_u64(self.stream_window).map_err(|_| "stream window too large")?);
-        tc.receive_window(VarInt::from_u64(self.conn_window).map_err(|_| "connection window too large")?);
+        tc.stream_receive_window(
+            VarInt::from_u64(self.stream_window).map_err(|_| "stream window too large")?,
+        );
+        tc.receive_window(
+            VarInt::from_u64(self.conn_window).map_err(|_| "connection window too large")?,
+        );
         tc.send_window(self.conn_window);
-        tc.max_idle_timeout(Some(IdleTimeout::try_from(self.idle_timeout).map_err(|_| "idle timeout out of range")?));
+        tc.max_idle_timeout(Some(
+            IdleTimeout::try_from(self.idle_timeout).map_err(|_| "idle timeout out of range")?,
+        ));
         tc.keep_alive_interval(Some(self.idle_timeout / 3));
         match self.congestion {
             Congestion::Cubic => {}
@@ -154,7 +176,9 @@ impl QuicTuning {
                 tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
             }
             Congestion::NewReno => {
-                tc.congestion_controller_factory(Arc::new(quinn::congestion::NewRenoConfig::default()));
+                tc.congestion_controller_factory(Arc::new(
+                    quinn::congestion::NewRenoConfig::default(),
+                ));
             }
         }
         Ok(tc)
@@ -187,22 +211,33 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, String> {
 fn load_roots(path: &Path) -> Result<rustls::RootCertStore, String> {
     let mut roots = rustls::RootCertStore::empty();
     for c in load_certs(path)? {
-        roots.add(c).map_err(|e| format!("{}: {}", path.display(), e))?;
+        roots
+            .add(c)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
     }
     Ok(roots)
 }
 
 fn server_crypto(s: &QuicServerSettings) -> Result<rustls::ServerConfig, String> {
     let p = provider();
-    let b = rustls::ServerConfig::builder_with_provider(p.clone()).with_protocol_versions(&[&rustls::version::TLS13]).map_err(|e| e.to_string())?;
+    let b = rustls::ServerConfig::builder_with_provider(p.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?;
     let b = match &s.client_ca {
         Some(ca) => {
-            let v = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(load_roots(ca)?), p).build().map_err(|e| format!("client verifier: {}", e))?;
+            let v = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(load_roots(ca)?),
+                p,
+            )
+            .build()
+            .map_err(|e| format!("client verifier: {}", e))?;
             b.with_client_cert_verifier(v)
         }
         None => b.with_no_client_auth(),
     };
-    let mut cfg = b.with_single_cert(load_certs(&s.cert)?, load_key(&s.key)?).map_err(|e| format!("REACTOR_TLS_CERT/KEY: {}", e))?;
+    let mut cfg = b
+        .with_single_cert(load_certs(&s.cert)?, load_key(&s.key)?)
+        .map_err(|e| format!("REACTOR_TLS_CERT/KEY: {}", e))?;
     cfg.alpn_protocols = vec![ALPN_H3.to_vec()];
     // QUIC requires exactly 0 or u32::MAX; tickets from the (stateful, single-use) in-memory
     // store carry the 0-RTT permission
@@ -210,15 +245,26 @@ fn server_crypto(s: &QuicServerSettings) -> Result<rustls::ServerConfig, String>
     Ok(cfg)
 }
 
-fn client_crypto(ca: Option<&Path>, identity: Option<&TlsSettings>, zero_rtt: bool) -> Result<rustls::ClientConfig, String> {
+fn client_crypto(
+    ca: Option<&Path>,
+    identity: Option<&TlsSettings>,
+    zero_rtt: bool,
+) -> Result<rustls::ClientConfig, String> {
     let p = provider();
-    let b = rustls::ClientConfig::builder_with_provider(p.clone()).with_protocol_versions(&[&rustls::version::TLS13]).map_err(|e| e.to_string())?;
+    let b = rustls::ClientConfig::builder_with_provider(p.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?;
     let b = match ca {
         Some(ca) => b.with_root_certificates(load_roots(ca)?),
-        None => b.dangerous().with_custom_certificate_verifier(Arc::new(rustls_platform_verifier::Verifier::new(p).map_err(|e| format!("platform verifier: {}", e))?)),
+        None => b.dangerous().with_custom_certificate_verifier(Arc::new(
+            rustls_platform_verifier::Verifier::new(p)
+                .map_err(|e| format!("platform verifier: {}", e))?,
+        )),
     };
     let mut cfg = match identity {
-        Some(id) => b.with_client_auth_cert(load_certs(&id.cert)?, load_key(&id.key)?).map_err(|e| format!("client certificate: {}", e))?,
+        Some(id) => b
+            .with_client_auth_cert(load_certs(&id.cert)?, load_key(&id.key)?)
+            .map_err(|e| format!("client certificate: {}", e))?,
         None => b.with_no_client_auth(),
     };
     cfg.alpn_protocols = vec![ALPN_H3.to_vec()];
@@ -230,7 +276,8 @@ fn client_crypto(ca: Option<&Path>, identity: Option<&TlsSettings>, zero_rtt: bo
 /// states, never while the handshake (and 0-RTT) is still in progress.
 fn handshake_complete(conn: &quinn::Connection) -> bool {
     let mut out = [0u8; 8];
-    conn.export_keying_material(&mut out, b"datran-quic-handshake-probe", b"").is_ok()
+    conn.export_keying_material(&mut out, b"datran-quic-handshake-probe", b"")
+        .is_ok()
 }
 
 fn udp_socket(addr: SocketAddr, buffer: usize) -> std::io::Result<std::net::UdpSocket> {
@@ -245,9 +292,19 @@ fn udp_socket(addr: SocketAddr, buffer: usize) -> std::io::Result<std::net::UdpS
     Ok(s.into())
 }
 
-fn endpoint(addr: SocketAddr, server: Option<quinn::ServerConfig>, buffer: usize) -> Result<quinn::Endpoint, String> {
+fn endpoint(
+    addr: SocketAddr,
+    server: Option<quinn::ServerConfig>,
+    buffer: usize,
+) -> Result<quinn::Endpoint, String> {
     let sock = udp_socket(addr, buffer).map_err(|e| format!("UDP bind {}: {}", addr, e))?;
-    quinn::Endpoint::new(quinn::EndpointConfig::default(), server, sock, Arc::new(quinn::TokioRuntime)).map_err(|e| format!("QUIC endpoint {}: {}", addr, e))
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        server,
+        sock,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .map_err(|e| format!("QUIC endpoint {}: {}", addr, e))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -267,24 +324,39 @@ pub struct QuicServerSettings {
 
 impl QuicServerSettings {
     pub fn new(tls: &TlsSettings) -> QuicServerSettings {
-        QuicServerSettings { cert: tls.cert.clone(), key: tls.key.clone(), client_ca: None, tuning: QuicTuning::default() }
+        QuicServerSettings {
+            cert: tls.cert.clone(),
+            key: tls.key.clone(),
+            client_ca: None,
+            tuning: QuicTuning::default(),
+        }
     }
 
     /// `Ok(None)` when `REACTOR_QUIC_PORT` is unset or 0. QUIC without a certificate, or mTLS
     /// without a CA, is a configuration error (the reactor refuses to start).
-    pub fn from_env(tls: Option<&TlsSettings>) -> Result<Option<(u16, QuicServerSettings)>, String> {
+    pub fn from_env(
+        tls: Option<&TlsSettings>,
+    ) -> Result<Option<(u16, QuicServerSettings)>, String> {
         let port = match std::env::var("REACTOR_QUIC_PORT") {
-            Ok(v) if !v.trim().is_empty() => v.trim().parse::<u16>().map_err(|_| format!("invalid REACTOR_QUIC_PORT {:?}", v))?,
+            Ok(v) if !v.trim().is_empty() => v
+                .trim()
+                .parse::<u16>()
+                .map_err(|_| format!("invalid REACTOR_QUIC_PORT {:?}", v))?,
             _ => 0,
         };
         if port == 0 {
             return Ok(None);
         }
-        let tls = tls.ok_or("REACTOR_QUIC_PORT needs REACTOR_TLS_CERT and REACTOR_TLS_KEY (QUIC is TLS 1.3 only)")?;
+        let tls = tls.ok_or(
+            "REACTOR_QUIC_PORT needs REACTOR_TLS_CERT and REACTOR_TLS_KEY (QUIC is TLS 1.3 only)",
+        )?;
         let mut s = QuicServerSettings::new(tls);
         s.tuning = QuicTuning::from_env()?;
         if env_bool("REACTOR_QUIC_MTLS").unwrap_or(false) {
-            let ca = std::env::var("REACTOR_TLS_CA").ok().filter(|v| !v.trim().is_empty()).ok_or("REACTOR_QUIC_MTLS=true needs REACTOR_TLS_CA")?;
+            let ca = std::env::var("REACTOR_TLS_CA")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or("REACTOR_QUIC_MTLS=true needs REACTOR_TLS_CA")?;
             s.client_ca = Some(PathBuf::from(ca));
         }
         Ok(Some((port, s)))
@@ -335,13 +407,23 @@ pub struct QuicServer {
 impl QuicServer {
     /// Binds `addr` (UDP) and serves `app` (the peer router) over HTTP/3. Must be called inside
     /// a tokio runtime.
-    pub fn start(addr: SocketAddr, app: Router, s: &QuicServerSettings) -> Result<QuicServer, String> {
+    pub fn start(
+        addr: SocketAddr,
+        app: Router,
+        s: &QuicServerSettings,
+    ) -> Result<QuicServer, String> {
         QuicServer::start_with_stats(addr, app, s, Arc::new(QuicServerStats::default()))
     }
 
     /// [`QuicServer::start`] recording into existing counters (shared with `/cluster/status`).
-    pub fn start_with_stats(addr: SocketAddr, app: Router, s: &QuicServerSettings, stats: Arc<QuicServerStats>) -> Result<QuicServer, String> {
-        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto(s)?).map_err(|e| format!("QUIC TLS config: {}", e))?;
+    pub fn start_with_stats(
+        addr: SocketAddr,
+        app: Router,
+        s: &QuicServerSettings,
+        stats: Arc<QuicServerStats>,
+    ) -> Result<QuicServer, String> {
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto(s)?)
+            .map_err(|e| format!("QUIC TLS config: {}", e))?;
         let mut sc = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         sc.transport_config(Arc::new(s.tuning.transport(true)?));
         let endpoint = endpoint(addr, Some(sc), s.tuning.udp_buffer)?;
@@ -353,7 +435,11 @@ impl QuicServer {
                 tokio::spawn(serve_connection(incoming, app.clone(), st.clone()));
             }
         });
-        Ok(QuicServer { endpoint, local, stats })
+        Ok(QuicServer {
+            endpoint,
+            local,
+            stats,
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -382,11 +468,17 @@ impl h3q::Connection<Bytes> for EarlyTrack {
     type RecvStream = h3_quinn::RecvStream;
     type OpenStreams = h3_quinn::OpenStreams;
 
-    fn poll_accept_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
+    fn poll_accept_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
         h3q::Connection::<Bytes>::poll_accept_recv(&mut self.inner, cx)
     }
 
-    fn poll_accept_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
+    fn poll_accept_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
         let s = match h3q::Connection::<Bytes>::poll_accept_bidi(&mut self.inner, cx) {
             Poll::Ready(Ok(s)) => s,
             other => return other,
@@ -406,11 +498,17 @@ impl h3q::OpenStreams<Bytes> for EarlyTrack {
     type BidiStream = h3_quinn::BidiStream<Bytes>;
     type SendStream = h3_quinn::SendStream<Bytes>;
 
-    fn poll_open_bidi(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
+    fn poll_open_bidi(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::BidiStream, StreamErrorIncoming>> {
         h3q::OpenStreams::<Bytes>::poll_open_bidi(&mut self.inner, cx)
     }
 
-    fn poll_open_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, StreamErrorIncoming>> {
+    fn poll_open_send(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::SendStream, StreamErrorIncoming>> {
         h3q::OpenStreams::<Bytes>::poll_open_send(&mut self.inner, cx)
     }
 
@@ -446,7 +544,10 @@ async fn serve_connection(incoming: quinn::Incoming, app: Router, stats: Arc<Qui
     };
     // Servers always "accept" 0.5-RTT (`into_0rtt` cannot fail on the server side); whether a
     // request really arrived early is decided per stream by `EarlyTrack`.
-    let (conn, zrtt): (quinn::Connection, Pin<Box<dyn std::future::Future<Output = bool> + Send>>) = match connecting.into_0rtt() {
+    let (conn, zrtt): (
+        quinn::Connection,
+        Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    ) = match connecting.into_0rtt() {
         Ok((c, z)) => (c, Box::pin(z)),
         Err(connecting) => match connecting.await {
             Ok(c) => (c, Box::pin(std::future::ready(true))),
@@ -478,8 +579,16 @@ async fn serve_connection(incoming: quinn::Incoming, app: Router, stats: Arc<Qui
         });
     }
     let early = Arc::new(Mutex::new(HashMap::new()));
-    let tracked = EarlyTrack { inner: h3_quinn::Connection::new(conn.clone()), quic: conn.clone(), early: early.clone() };
-    let mut h3c = match h3::server::builder().max_field_section_size(MAX_FIELD_SECTION).build::<_, Bytes>(tracked).await {
+    let tracked = EarlyTrack {
+        inner: h3_quinn::Connection::new(conn.clone()),
+        quic: conn.clone(),
+        early: early.clone(),
+    };
+    let mut h3c = match h3::server::builder()
+        .max_field_section_size(MAX_FIELD_SECTION)
+        .build::<_, Bytes>(tracked)
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::debug!("HTTP/3 setup failed: {}", e);
@@ -548,7 +657,10 @@ async fn serve_request(
             }
             if !handshake_complete(conn) {
                 stats.early_unsafe_refused.fetch_add(1, Ordering::Relaxed);
-                let resp = http::Response::builder().status(StatusCode::TOO_EARLY).body(()).unwrap_or_default();
+                let resp = http::Response::builder()
+                    .status(StatusCode::TOO_EARLY)
+                    .body(())
+                    .unwrap_or_default();
                 let _ = send.send_response(resp).await;
                 let _ = send.finish().await;
                 crate::metrics::quic_server_request(method.as_str(), 425, 0);
@@ -564,7 +676,10 @@ async fn serve_request(
             Ok(Some(mut chunk)) => {
                 if body.len() + chunk.remaining() > MAX_REQUEST_BODY {
                     recv.stop_sending(h3::error::Code::H3_REQUEST_REJECTED);
-                    let resp = http::Response::builder().status(StatusCode::PAYLOAD_TOO_LARGE).body(()).unwrap_or_default();
+                    let resp = http::Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(())
+                        .unwrap_or_default();
                     let _ = send.send_response(resp).await;
                     let _ = send.finish().await;
                     crate::metrics::quic_server_request(method.as_str(), 413, 0);
@@ -585,16 +700,29 @@ async fn serve_request(
         }
     }
     let (parts, ()) = req.into_parts();
-    let resp = match app.oneshot(http::Request::from_parts(parts, Body::from(body))).await {
+    let resp = match app
+        .oneshot(http::Request::from_parts(parts, Body::from(body)))
+        .await
+    {
         Ok(r) => r,
         Err(never) => match never {},
     };
     let (mut head, body) = resp.into_parts();
-    for h in ["connection", "transfer-encoding", "keep-alive", "upgrade", "proxy-connection"] {
+    for h in [
+        "connection",
+        "transfer-encoding",
+        "keep-alive",
+        "upgrade",
+        "proxy-connection",
+    ] {
         head.headers.remove(h);
     }
     let status = head.status.as_u16();
-    if send.send_response(http::Response::from_parts(head, ())).await.is_err() {
+    if send
+        .send_response(http::Response::from_parts(head, ()))
+        .await
+        .is_err()
+    {
         return;
     }
     let mut sent = 0u64;
@@ -622,7 +750,6 @@ async fn serve_request(
 // ---------------------------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------------------------
-
 
 /// Why a QUIC request failed.
 #[derive(Debug)]
@@ -698,7 +825,9 @@ struct PeerConn {
 
 impl PeerConn {
     fn usable(&self) -> bool {
-        !self.dead.load(Ordering::Relaxed) && self.quic.close_reason().is_none() && matches!(*self.hs.borrow(), Hs::Pending | Hs::Confirmed)
+        !self.dead.load(Ordering::Relaxed)
+            && self.quic.close_reason().is_none()
+            && matches!(*self.hs.borrow(), Hs::Pending | Hs::Confirmed)
     }
 }
 
@@ -760,9 +889,14 @@ fn describe(conn: &quinn::Connection, msg: &str) -> String {
 
 impl QuicClient {
     pub fn new(cfg: QuicClientSettings) -> Result<QuicClient, String> {
-        let crypto = client_crypto(cfg.tls_ca.as_deref(), cfg.identity.as_ref(), cfg.tuning.zero_rtt)?;
+        let crypto = client_crypto(
+            cfg.tls_ca.as_deref(),
+            cfg.identity.as_ref(),
+            cfg.tuning.zero_rtt,
+        )?;
         // validate once (TLS 1.3 initial suite present)
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto.clone()).map_err(|e| format!("QUIC client TLS config: {}", e))?;
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto.clone())
+            .map_err(|e| format!("QUIC client TLS config: {}", e))?;
         let transport = Arc::new(cfg.tuning.transport(false)?);
         Ok(QuicClient {
             cfg,
@@ -783,7 +917,8 @@ impl QuicClient {
         }
         let mut crypto = self.crypto.clone();
         crypto.resumption = rustls::client::Resumption::in_memory_sessions(8);
-        let qc = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| format!("QUIC client TLS config: {}", e))?;
+        let qc = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| format!("QUIC client TLS config: {}", e))?;
         let mut c = quinn::ClientConfig::new(Arc::new(qc));
         c.transport_config(self.transport.clone());
         configs.insert(authority.to_string(), c.clone());
@@ -796,7 +931,11 @@ impl QuicClient {
         if let Some(e) = &eps[i] {
             return Ok(e.clone());
         }
-        let bind = if addr.is_ipv6() { SocketAddr::from(([0u16; 8], 0)) } else { SocketAddr::from(([0u8; 4], 0)) };
+        let bind = if addr.is_ipv6() {
+            SocketAddr::from(([0u16; 8], 0))
+        } else {
+            SocketAddr::from(([0u8; 4], 0))
+        };
         let e = endpoint(bind, None, self.cfg.tuning.udp_buffer)?;
         eps[i] = Some(e.clone());
         Ok(e)
@@ -818,11 +957,21 @@ impl QuicClient {
 
     /// Open, usable pooled connections.
     pub fn open_connections(&self) -> usize {
-        lock(&self.conns).values().filter(|s| s.try_lock().ok().is_some_and(|g| g.as_ref().is_some_and(|pc| pc.usable()))).count()
+        lock(&self.conns)
+            .values()
+            .filter(|s| {
+                s.try_lock()
+                    .ok()
+                    .is_some_and(|g| g.as_ref().is_some_and(|pc| pc.usable()))
+            })
+            .count()
     }
 
     async fn connection(&self, authority: &str, allow_0rtt: bool) -> Result<Arc<PeerConn>, String> {
-        let slot = lock(&self.conns).entry(authority.to_string()).or_default().clone();
+        let slot = lock(&self.conns)
+            .entry(authority.to_string())
+            .or_default()
+            .clone();
         let mut g = slot.lock().await;
         if let Some(pc) = g.as_ref() {
             if pc.usable() {
@@ -831,12 +980,17 @@ impl QuicClient {
             self.stats.reconnects.fetch_add(1, Ordering::Relaxed);
         }
         *g = None;
-        let early = allow_0rtt && self.cfg.tuning.zero_rtt && !lock(&self.no_0rtt).contains(authority);
+        let early =
+            allow_0rtt && self.cfg.tuning.zero_rtt && !lock(&self.no_0rtt).contains(authority);
         let pc = match self.connect(authority, early).await {
             Ok(pc) => pc,
             Err(e) if early => {
                 // the early connection broke during HTTP/3 setup (0-RTT rejected right away)
-                tracing::debug!("0-RTT connection to {} failed ({}); retrying with a full handshake", authority, e);
+                tracing::debug!(
+                    "0-RTT connection to {} failed ({}); retrying with a full handshake",
+                    authority,
+                    e
+                );
                 lock(&self.no_0rtt).insert(authority.to_string());
                 self.connect(authority, false).await?
             }
@@ -854,20 +1008,37 @@ impl QuicClient {
             .next()
             .ok_or_else(|| format!("resolve {}: no address", authority))?;
         let ep = self.endpoint_for(&addr)?;
-        let connecting = ep.connect_with(self.client_config(authority)?, addr, server_name(authority)).map_err(|e| format!("QUIC connect {}: {}", authority, e))?;
-        let attempt = if allow_0rtt { connecting.into_0rtt() } else { Err(connecting) };
+        let connecting = ep
+            .connect_with(self.client_config(authority)?, addr, server_name(authority))
+            .map_err(|e| format!("QUIC connect {}: {}", authority, e))?;
+        let attempt = if allow_0rtt {
+            connecting.into_0rtt()
+        } else {
+            Err(connecting)
+        };
         let (conn, zrtt) = match attempt {
             Ok((c, z)) => (c, Some(z)),
-            Err(connecting) => match tokio::time::timeout(self.cfg.connect_timeout, connecting).await {
-                Ok(Ok(c)) => {
-                    lock(&self.no_0rtt).remove(authority);
-                    (c, None)
+            Err(connecting) => {
+                match tokio::time::timeout(self.cfg.connect_timeout, connecting).await {
+                    Ok(Ok(c)) => {
+                        lock(&self.no_0rtt).remove(authority);
+                        (c, None)
+                    }
+                    Ok(Err(e)) => return Err(format!("QUIC handshake with {}: {}", authority, e)),
+                    Err(_) => {
+                        return Err(format!(
+                            "QUIC handshake with {} timed out after {:?}",
+                            authority, self.cfg.connect_timeout
+                        ))
+                    }
                 }
-                Ok(Err(e)) => return Err(format!("QUIC handshake with {}: {}", authority, e)),
-                Err(_) => return Err(format!("QUIC handshake with {} timed out after {:?}", authority, self.cfg.connect_timeout)),
-            },
+            }
         };
-        let (hs_tx, hs_rx) = watch::channel(if zrtt.is_some() { Hs::Pending } else { Hs::Confirmed });
+        let (hs_tx, hs_rx) = watch::channel(if zrtt.is_some() {
+            Hs::Pending
+        } else {
+            Hs::Confirmed
+        });
         let dead = Arc::new(AtomicBool::new(false));
         if let Some(z) = zrtt {
             let conn = conn.clone();
@@ -925,7 +1096,9 @@ impl QuicClient {
     }
 
     fn handshake_failed(&self, msg: String) -> QuicError {
-        self.stats.handshake_failures.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .handshake_failures
+            .fetch_add(1, Ordering::Relaxed);
         crate::metrics::quic_handshake_failure("client");
         QuicError::Handshake(msg)
     }
@@ -933,7 +1106,14 @@ impl QuicClient {
     /// One request on the peer's pooled connection; the body is read up to `cap` bytes, the
     /// whole exchange bounded by the request timeout. A connection that never got through its
     /// handshake (or was refused by a TLS alert) yields [`QuicError::Handshake`].
-    pub async fn request(&self, method: Method, authority: &str, path_and_query: &str, token: &str, cap: usize) -> Result<Vec<u8>, QuicError> {
+    pub async fn request(
+        &self,
+        method: Method,
+        authority: &str,
+        path_and_query: &str,
+        token: &str,
+        cap: usize,
+    ) -> Result<Vec<u8>, QuicError> {
         let safe = is_safe(&method);
         let mut allow_0rtt = true;
         let mut reconnected = false;
@@ -942,9 +1122,17 @@ impl QuicClient {
                 Ok(pc) => pc,
                 Err(e) => return Err(self.handshake_failed(e)),
             };
-            let r = match tokio::time::timeout(self.cfg.request_timeout, self.on_conn(&pc, method.clone(), authority, path_and_query, token, cap)).await {
+            let r = match tokio::time::timeout(
+                self.cfg.request_timeout,
+                self.on_conn(&pc, method.clone(), authority, path_and_query, token, cap),
+            )
+            .await
+            {
                 Ok(r) => r,
-                Err(_) => Err(QuicError::Request(format!("request timed out after {:?}", self.cfg.request_timeout))),
+                Err(_) => Err(QuicError::Request(format!(
+                    "request timed out after {:?}",
+                    self.cfg.request_timeout
+                ))),
             };
             let e = match r {
                 Ok(b) => return Ok(b),
@@ -954,8 +1142,12 @@ impl QuicClient {
             // an early connection's stream may fail before the 0-RTT verdict is published
             let mut hs_rx = pc.hs.clone();
             if *hs_rx.borrow() == Hs::Pending {
-                let remaining = self.cfg.connect_timeout.saturating_sub(pc.created.elapsed());
-                let _ = tokio::time::timeout(remaining, hs_rx.wait_for(|s| *s != Hs::Pending)).await;
+                let remaining = self
+                    .cfg
+                    .connect_timeout
+                    .saturating_sub(pc.created.elapsed());
+                let _ =
+                    tokio::time::timeout(remaining, hs_rx.wait_for(|s| *s != Hs::Pending)).await;
             }
             let hs = *pc.hs.borrow();
             let msg = describe(&pc.quic, &e.to_string());
@@ -966,7 +1158,9 @@ impl QuicClient {
             }
             if (hs != Hs::Confirmed && !handshake_complete(&pc.quic)) || tls_refused(&pc.quic) {
                 pc.dead.store(true, Ordering::Relaxed);
-                return Err(self.handshake_failed(format!("QUIC handshake with {}: {}", authority, msg)));
+                return Err(
+                    self.handshake_failed(format!("QUIC handshake with {}: {}", authority, msg))
+                );
             }
             if pc.quic.close_reason().is_some() || pc.dead.load(Ordering::Relaxed) {
                 pc.dead.store(true, Ordering::Relaxed);
@@ -978,20 +1172,42 @@ impl QuicClient {
             }
             return Err(QuicError::Request(msg));
         }
-        Err(QuicError::Request("QUIC request failed after reconnecting".into()))
+        Err(QuicError::Request(
+            "QUIC request failed after reconnecting".into(),
+        ))
     }
 
-    async fn on_conn(&self, pc: &PeerConn, method: Method, authority: &str, pq: &str, token: &str, cap: usize) -> Result<Vec<u8>, QuicError> {
-        let _permit = pc.streams.acquire().await.map_err(|_| QuicError::Request("connection closed".into()))?;
+    async fn on_conn(
+        &self,
+        pc: &PeerConn,
+        method: Method,
+        authority: &str,
+        pq: &str,
+        token: &str,
+        cap: usize,
+    ) -> Result<Vec<u8>, QuicError> {
+        let _permit = pc
+            .streams
+            .acquire()
+            .await
+            .map_err(|_| QuicError::Request("connection closed".into()))?;
         let safe = is_safe(&method);
         let mut hs = pc.hs.clone();
         let state = *hs.borrow();
         match state {
-            Hs::Rejected | Hs::Failed => return Err(QuicError::Handshake("handshake failed".into())),
+            Hs::Rejected | Hs::Failed => {
+                return Err(QuicError::Handshake("handshake failed".into()))
+            }
             Hs::Pending if !safe && !self.cfg.tuning.unsafe_0rtt_for_tests => {
                 // never send a non-idempotent request in 0-RTT: wait for the handshake
-                let remaining = self.cfg.connect_timeout.saturating_sub(pc.created.elapsed());
-                match tokio::time::timeout(remaining, hs.wait_for(|s| *s != Hs::Pending)).await.map(|r| r.map(|s| *s)) {
+                let remaining = self
+                    .cfg
+                    .connect_timeout
+                    .saturating_sub(pc.created.elapsed());
+                match tokio::time::timeout(remaining, hs.wait_for(|s| *s != Hs::Pending))
+                    .await
+                    .map(|r| r.map(|s| *s))
+                {
                     Ok(Ok(Hs::Confirmed)) => {}
                     _ => return Err(QuicError::Handshake("handshake not confirmed".into())),
                 }
@@ -1012,23 +1228,45 @@ impl QuicClient {
             .map_err(|e| QuicError::Request(format!("bad request: {}", e)))?;
         let exchange = async {
             let mut send = pc.send.clone();
-            let mut s = send.send_request(req).await.map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
-            s.finish().await.map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
-            let resp = s.recv_response().await.map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
+            let mut s = send
+                .send_request(req)
+                .await
+                .map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
+            s.finish()
+                .await
+                .map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
+            let resp = s
+                .recv_response()
+                .await
+                .map_err(|e| QuicError::Request(format!("request failed: {}", e)))?;
             if !resp.status().is_success() {
                 s.stop_sending(h3::error::Code::H3_NO_ERROR);
                 return Err(QuicError::Status(resp.status().as_u16()));
             }
-            let cl = resp.headers().get(http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+            let cl = resp
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             if cl.is_some_and(|l| l > cap as u64) {
                 s.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
-                return Err(QuicError::Request(format!("response larger than {} bytes", cap)));
+                return Err(QuicError::Request(format!(
+                    "response larger than {} bytes",
+                    cap
+                )));
             }
             let mut buf = Vec::with_capacity(cl.unwrap_or(0).min(cap as u64) as usize);
-            while let Some(mut chunk) = s.recv_data().await.map_err(|e| QuicError::Request(format!("read failed: {}", e)))? {
+            while let Some(mut chunk) = s
+                .recv_data()
+                .await
+                .map_err(|e| QuicError::Request(format!("read failed: {}", e)))?
+            {
                 if buf.len() + chunk.remaining() > cap {
                     s.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
-                    return Err(QuicError::Request(format!("response larger than {} bytes", cap)));
+                    return Err(QuicError::Request(format!(
+                        "response larger than {} bytes",
+                        cap
+                    )));
                 }
                 while chunk.has_remaining() {
                     let c = chunk.chunk();
@@ -1044,11 +1282,20 @@ impl QuicClient {
         }
         // early request: the handshake must still finish within the connect timeout
         let deadline = async {
-            let remaining = self.cfg.connect_timeout.saturating_sub(pc.created.elapsed());
-            match tokio::time::timeout(remaining, hs.wait_for(|s| *s != Hs::Pending)).await.map(|r| r.map(|s| *s)) {
+            let remaining = self
+                .cfg
+                .connect_timeout
+                .saturating_sub(pc.created.elapsed());
+            match tokio::time::timeout(remaining, hs.wait_for(|s| *s != Hs::Pending))
+                .await
+                .map(|r| r.map(|s| *s))
+            {
                 Ok(Ok(Hs::Confirmed)) => std::future::pending::<QuicError>().await,
                 Ok(Ok(_)) => QuicError::Handshake("0-RTT rejected or handshake failed".into()),
-                _ => QuicError::Handshake(format!("handshake not confirmed within {:?}", self.cfg.connect_timeout)),
+                _ => QuicError::Handshake(format!(
+                    "handshake not confirmed within {:?}",
+                    self.cfg.connect_timeout
+                )),
             }
         };
         tokio::select! {

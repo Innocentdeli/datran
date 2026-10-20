@@ -9,7 +9,10 @@ pub struct Lcg(pub u64);
 
 impl Lcg {
     pub fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     pub fn below(&mut self, n: u64) -> u64 {
@@ -23,7 +26,9 @@ pub fn random_bytes(n: usize, seed: u64) -> Vec<u8> {
 }
 
 pub fn text(n: usize, seed: u64) -> Vec<u8> {
-    let words = ["alpha", "beta", "gamma", "delta", "reactor", "datran", "chunk", "the", "of", "and"];
+    let words = [
+        "alpha", "beta", "gamma", "delta", "reactor", "datran", "chunk", "the", "of", "and",
+    ];
     let mut r = Lcg(seed);
     let mut out = Vec::with_capacity(n + 16);
     while out.len() < n {
@@ -38,7 +43,13 @@ pub fn text(n: usize, seed: u64) -> Vec<u8> {
 pub fn json_log_line(r: &mut Lcg, i: u64) -> String {
     let levels = ["INFO", "INFO", "INFO", "WARN", "DEBUG", "ERROR"];
     let services = ["ingest", "stream", "auth", "lobby", "thumbnail"];
-    let msgs = ["upload complete", "chunk stored", "token refreshed", "cache miss", "session joined"];
+    let msgs = [
+        "upload complete",
+        "chunk stored",
+        "token refreshed",
+        "cache miss",
+        "session joined",
+    ];
     format!(
         "{{\"ts\":\"2026-10-16T12:{:02}:{:02}.{:03}Z\",\"level\":\"{}\",\"service\":\"{}\",\"msg\":\"{}\",\"bytes\":{},\"user\":\"u{}\",\"latency_ms\":{}.{}}}\n",
         (i / 60) % 60,

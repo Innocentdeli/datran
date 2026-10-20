@@ -35,7 +35,14 @@ async fn serve(app: axum::Router) -> String {
 }
 
 async fn start(engine: Arc<Engine>, cfg: GossipConfig) -> (String, AppState) {
-    let state = AppState { engine, gossip: Arc::new(Gossip::new(cfg)), reactor_token: None, max_output: 64 << 20, store: None, cluster: None };
+    let state = AppState {
+        engine,
+        gossip: Arc::new(Gossip::new(cfg)),
+        reactor_token: None,
+        max_output: 64 << 20,
+        store: None,
+        cluster: None,
+    };
     (serve(router(state.clone())).await, state)
 }
 
@@ -73,7 +80,11 @@ async fn node_b_adopts_immigrant_from_a_and_scores_locally() {
     let a_champ = a.champion(BINARY_NUMERIC).unwrap();
 
     let (a_url, _) = start(a.clone(), gossip_cfg(vec![], Some(TOKEN), false)).await;
-    let (_, b_state) = start(b.clone(), gossip_cfg(vec![a_url.clone()], Some(TOKEN), false)).await;
+    let (_, b_state) = start(
+        b.clone(),
+        gossip_cfg(vec![a_url.clone()], Some(TOKEN), false),
+    )
+    .await;
 
     // champions endpoint
     let client = reqwest::Client::new();
@@ -87,21 +98,42 @@ async fn node_b_adopts_immigrant_from_a_and_scores_locally() {
         .await
         .unwrap();
     assert_eq!(list[0]["class"], BINARY_NUMERIC);
-    assert_eq!(Recipe::from_json_value(&list[0]["recipe"]).unwrap(), a_champ.recipe);
+    assert_eq!(
+        Recipe::from_json_value(&list[0]["recipe"]).unwrap(),
+        a_champ.recipe
+    );
 
     let added = b_state.gossip.pull_once(&b).await;
-    let in_b_pop = b.population(BINARY_NUMERIC).iter().any(|m| m.recipe == a_champ.recipe);
+    let in_b_pop = b
+        .population(BINARY_NUMERIC)
+        .iter()
+        .any(|m| m.recipe == a_champ.recipe);
     assert!(added == 1 || in_b_pop, "added {}", added);
-    assert_eq!(b.pending_immigrants(BINARY_NUMERIC).contains(&a_champ.recipe), added == 1);
+    assert_eq!(
+        b.pending_immigrants(BINARY_NUMERIC)
+            .contains(&a_champ.recipe),
+        added == 1
+    );
     let peers = b_state.gossip.peer_status();
     assert!(peers[0].last_ok.is_some() && peers[0].last_error.is_none());
 
     let eb = b.clone();
-    let report = tokio::task::spawn_blocking(move || eb.run_generation(BINARY_NUMERIC).unwrap()).await.unwrap();
-    let scored = report.scored.iter().find(|m| m.recipe == a_champ.recipe).expect("immigrant scored");
+    let report = tokio::task::spawn_blocking(move || eb.run_generation(BINARY_NUMERIC).unwrap())
+        .await
+        .unwrap();
+    let scored = report
+        .scored
+        .iter()
+        .find(|m| m.recipe == a_champ.recipe)
+        .expect("immigrant scored");
     let local = score_recipe(
         &a_champ.recipe,
-        &b_docs.iter().skip(1).step_by(2).map(|d| Arc::new(d.clone())).collect::<Vec<_>>(),
+        &b_docs
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|d| Arc::new(d.clone()))
+            .collect::<Vec<_>>(),
         None,
         0.0,
         0.0,
@@ -109,7 +141,10 @@ async fn node_b_adopts_immigrant_from_a_and_scores_locally() {
     )
     .unwrap();
     assert!((scored.score.as_ref().unwrap().fitness - local.fitness).abs() < 1e-12);
-    assert!((local.fitness - a_champ.score.fitness).abs() > 1e-9, "B must use its own samples");
+    assert!(
+        (local.fitness - a_champ.score.fitness).abs() > 1e-9,
+        "B must use its own samples"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -130,14 +165,23 @@ async fn peer_scores_are_not_trusted_and_invalid_recipes_dropped() {
     let fake_url = serve(fake).await;
     let d = tempfile::tempdir().unwrap();
     let b = Arc::new(ratio_only_engine(d.path(), 3));
-    feed(&b, &(0..4).map(|i| f32_sensor(8_000, i)).collect::<Vec<_>>());
+    feed(
+        &b,
+        &(0..4).map(|i| f32_sensor(8_000, i)).collect::<Vec<_>>(),
+    );
     let g = Gossip::new(gossip_cfg(vec![fake_url], Some(TOKEN), false));
     assert_eq!(g.pull_once(&b).await, 1);
     let imm = Recipe::new(Codec::Lz4, 0).with_filter(Filter::Delta, 8);
     assert_eq!(b.pending_immigrants(BINARY_NUMERIC), vec![imm.clone()]);
     let eb = b.clone();
-    let r = tokio::task::spawn_blocking(move || eb.run_generation(BINARY_NUMERIC).unwrap()).await.unwrap();
-    assert_ne!(r.champion.unwrap().recipe, imm, "a weak immigrant must not win on reported fitness");
+    let r = tokio::task::spawn_blocking(move || eb.run_generation(BINARY_NUMERIC).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(
+        r.champion.unwrap().recipe,
+        imm,
+        "a weak immigrant must not win on reported fitness"
+    );
     let m = r.scored.iter().find(|m| m.recipe == imm).unwrap();
     assert!(m.score.as_ref().unwrap().fitness < 10.0);
 }
@@ -160,13 +204,29 @@ async fn wrong_or_missing_cluster_token_rejected() {
     let g = Gossip::new(gossip_cfg(vec![a_url.clone()], Some("wrong"), false));
     assert_eq!(g.pull_once(&b).await, 0);
     let st = g.peer_status();
-    assert!(st[0].last_error.as_deref().unwrap_or("").contains("401"), "{:?}", st);
+    assert!(
+        st[0].last_error.as_deref().unwrap_or("").contains("401"),
+        "{:?}",
+        st
+    );
     assert!(st[0].last_ok.is_none());
 
     // gossip disabled without a cluster token
     let dc = tempfile::tempdir().unwrap();
-    let (c_url, _) = start(Arc::new(ratio_only_engine(dc.path(), 3)), gossip_cfg(vec![], None, false)).await;
-    assert_eq!(get_status(&client, &format!("{}/evolution/champions", c_url), Some(TOKEN)).await, 404);
+    let (c_url, _) = start(
+        Arc::new(ratio_only_engine(dc.path(), 3)),
+        gossip_cfg(vec![], None, false),
+    )
+    .await;
+    assert_eq!(
+        get_status(
+            &client,
+            &format!("{}/evolution/champions", c_url),
+            Some(TOKEN)
+        )
+        .await,
+        404
+    );
     let g = Gossip::new(gossip_cfg(vec![a_url], None, false));
     assert!(!g.enabled());
     assert_eq!(g.pull_once(&b).await, 0);
@@ -179,7 +239,9 @@ async fn dictionaries_shared_only_when_enabled() {
     let a = Arc::new(ratio_only_engine(da.path(), 5));
     feed(&a, &(0..40).map(small_json).collect::<Vec<_>>());
     let ea = a.clone();
-    tokio::task::spawn_blocking(move || ea.run_generation(TEXT_JSON).unwrap()).await.unwrap();
+    tokio::task::spawn_blocking(move || ea.run_generation(TEXT_JSON).unwrap())
+        .await
+        .unwrap();
     let champ = a.champion(TEXT_JSON).unwrap().recipe;
     let dict_hex = champ.dict.clone().expect("dict champion");
     let blob = a.compress(&small_json(777), None, false).blob;
@@ -190,7 +252,15 @@ async fn dictionaries_shared_only_when_enabled() {
     let client = reqwest::Client::new();
 
     // sharing disabled: no dict endpoint, champion offered without dict
-    assert_eq!(get_status(&client, &format!("{}/evolution/dict/{}", a_private, dict_hex), Some(TOKEN)).await, 404);
+    assert_eq!(
+        get_status(
+            &client,
+            &format!("{}/evolution/dict/{}", a_private, dict_hex),
+            Some(TOKEN)
+        )
+        .await,
+        404
+    );
     let list: Value = client
         .get(format!("{}/evolution/champions", a_private))
         .header("x-cluster-token", TOKEN)
@@ -200,28 +270,64 @@ async fn dictionaries_shared_only_when_enabled() {
         .json()
         .await
         .unwrap();
-    assert!(list.as_array().unwrap().iter().all(|e| e["recipe"]["dict"].is_null()), "{}", list);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["recipe"]["dict"].is_null()),
+        "{}",
+        list
+    );
 
     // B with sharing disabled cannot decode the dict blob, even from a sharing peer
     let db = tempfile::tempdir().unwrap();
     let b = Arc::new(ratio_only_engine(db.path(), 6));
-    let (b_url, b_state) = start(b.clone(), gossip_cfg(vec![a_shared.clone()], Some(TOKEN), false)).await;
+    let (b_url, b_state) = start(
+        b.clone(),
+        gossip_cfg(vec![a_shared.clone()], Some(TOKEN), false),
+    )
+    .await;
     b_state.gossip.pull_once(&b).await;
-    assert!(b.pending_immigrants(TEXT_JSON).iter().all(|r| r.dict.is_none()));
-    let resp = client.post(format!("{}/decompress", b_url)).body(blob.clone()).send().await.unwrap();
+    assert!(b
+        .pending_immigrants(TEXT_JSON)
+        .iter()
+        .all(|r| r.dict.is_none()));
+    let resp = client
+        .post(format!("{}/decompress", b_url))
+        .body(blob.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
     let err: Value = resp.json().await.unwrap();
     assert_eq!(err["unknown_dict"], dict_hex);
-    assert!(!db.path().join("dicts").join(format!("{}.dict", dict_hex)).exists());
+    assert!(!db
+        .path()
+        .join("dicts")
+        .join(format!("{}.dict", dict_hex))
+        .exists());
 
     // C with sharing enabled: /decompress fetches the dict from A, verifies and stores it
     let dc = tempfile::tempdir().unwrap();
     let c = Arc::new(ratio_only_engine(dc.path(), 7));
-    let (c_url, _) = start(c.clone(), gossip_cfg(vec![a_shared.clone()], Some(TOKEN), true)).await;
-    let resp = client.post(format!("{}/decompress", c_url)).body(blob.clone()).send().await.unwrap();
+    let (c_url, _) = start(
+        c.clone(),
+        gossip_cfg(vec![a_shared.clone()], Some(TOKEN), true),
+    )
+    .await;
+    let resp = client
+        .post(format!("{}/decompress", c_url))
+        .body(blob.clone())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.bytes().await.unwrap().to_vec(), small_json(777));
-    assert!(dc.path().join("dicts").join(format!("{}.dict", dict_hex)).exists());
+    assert!(dc
+        .path()
+        .join("dicts")
+        .join(format!("{}.dict", dict_hex))
+        .exists());
 
     // D with sharing enabled pulls the dict champion and its dictionary via gossip
     let dd = tempfile::tempdir().unwrap();

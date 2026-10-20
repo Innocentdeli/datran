@@ -23,7 +23,12 @@ pub trait EvictionPolicy: Send + Sync {
         let _ = need_bytes;
         store
             .list_files(None, 10_000)
-            .map(|v| v.into_iter().filter(|m| self.can_evict(m)).map(|m| m.file_id).collect())
+            .map(|v| {
+                v.into_iter()
+                    .filter(|m| self.can_evict(m))
+                    .map(|m| m.file_id)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -56,8 +61,15 @@ const GC_BATCH: usize = 512;
 const FILE_LOG_KEEP: u64 = 100_000;
 
 /// Removes a manifest and its references inside a write transaction.
-fn remove_file_txn(t: &mut Tables<'_>, file_id: &Id, tombstone: Option<u64>, ts: u64) -> Result<bool> {
-    let Some(rec) = t.get_file(file_id)? else { return Ok(false) };
+fn remove_file_txn(
+    t: &mut Tables<'_>,
+    file_id: &Id,
+    tombstone: Option<u64>,
+    ts: u64,
+) -> Result<bool> {
+    let Some(rec) = t.get_file(file_id)? else {
+        return Ok(false);
+    };
     let lo = index::mchunk_key(file_id, 0);
     let hi = index::mchunk_key(file_id, u64::MAX);
     let mut occ: std::collections::HashMap<Id, u64> = std::collections::HashMap::new();
@@ -66,7 +78,8 @@ fn remove_file_txn(t: &mut Tables<'_>, file_id: &Id, tombstone: Option<u64>, ts:
         let (cid, _) = index::mchunk_val_decode(v.value());
         *occ.entry(cid).or_insert(0) += 1;
     }
-    t.mchunks.retain_in::<&[u8; 40], _>(&lo..=&hi, |_, _| false)?;
+    t.mchunks
+        .retain_in::<&[u8; 40], _>(&lo..=&hi, |_, _| false)?;
     for (cid, k) in occ {
         t.chunk_ref_sub(&cid, k, ts)?;
     }
@@ -94,10 +107,16 @@ impl Store {
             let pins = t.pins.get(file_id)?.map(|g| g.value()).unwrap_or(0);
             if pins > 1 {
                 t.pins.insert(file_id, pins - 1)?;
-                return Ok(Some(DeleteOutcome { pins: pins - 1, deleted: false }));
+                return Ok(Some(DeleteOutcome {
+                    pins: pins - 1,
+                    deleted: false,
+                }));
             }
             remove_file_txn(t, file_id, Some(ts), ts)?;
-            Ok(Some(DeleteOutcome { pins: 0, deleted: true }))
+            Ok(Some(DeleteOutcome {
+                pins: 0,
+                deleted: true,
+            }))
         })?;
         self.fail("delete.after_commit")?;
         Ok(out)
@@ -130,7 +149,9 @@ impl Store {
     /// Marks a file as origin (or not) — used for origin transfer between nodes.
     pub fn set_origin(&self, file_id: &Id, origin: bool) -> Result<bool> {
         with_write(self, |t| {
-            let Some(mut rec) = t.get_file(file_id)? else { return Ok(false) };
+            let Some(mut rec) = t.get_file(file_id)? else {
+                return Ok(false);
+            };
             rec.origin = origin;
             t.manifests.insert(file_id, rec.encode().as_slice())?;
             Ok(true)
@@ -144,7 +165,11 @@ impl Store {
                 return Ok(None);
             }
             let cur = t.pins.get(file_id)?.map(|g| g.value()).unwrap_or(0);
-            let next = if delta >= 0 { cur.saturating_add(delta as u64) } else { cur.saturating_sub(delta.unsigned_abs()) };
+            let next = if delta >= 0 {
+                cur.saturating_add(delta as u64)
+            } else {
+                cur.saturating_sub(delta.unsigned_abs())
+            };
             if next == 0 {
                 t.pins.remove(file_id)?;
             } else {
@@ -161,7 +186,9 @@ impl Store {
         let policy = self.eviction_policy();
         let before = self.meta_value(meta::LIVE)?;
         for fid in policy.candidates(self, need) {
-            let Some(m) = self.file_meta(&fid)? else { continue };
+            let Some(m) = self.file_meta(&fid)? else {
+                continue;
+            };
             if !policy.can_evict(&m) {
                 continue;
             }
@@ -185,7 +212,9 @@ impl Store {
     pub fn gc_with_grace(&self, grace_ms: u64) -> Result<GcReport> {
         let mut report = GcReport::default();
         // an online backup is copying the files of its snapshot: collect after it finished
-        let Ok(_gate) = self.maint_gate.try_read() else { return Ok(report) };
+        let Ok(_gate) = self.maint_gate.try_read() else {
+            return Ok(report);
+        };
         loop {
             let ts = now();
             let due: Vec<Id> = {
@@ -250,7 +279,9 @@ impl Store {
         let deleted: Vec<(Id, ObjectRec)> = with_write(self, |t| {
             let mut out = Vec::new();
             for id in ids {
-                let Some(enq) = t.gc.get(id)?.map(|g| g.value()) else { continue };
+                let Some(enq) = t.gc.get(id)?.map(|g| g.value()) else {
+                    continue;
+                };
                 if enq.saturating_add(grace_ms) > ts {
                     continue;
                 }
@@ -270,7 +301,10 @@ impl Store {
                     if let Some(loc) = t.get_loc(m)? {
                         if loc.object == *id {
                             if loc.refs != 0 {
-                                return Err(StoreError::Corrupt(format!("live chunk {} in unreferenced object", hex::encode(m))));
+                                return Err(StoreError::Corrupt(format!(
+                                    "live chunk {} in unreferenced object",
+                                    hex::encode(m)
+                                )));
                             }
                             t.chunk_loc.remove(m)?;
                             t.access.remove(m)?;

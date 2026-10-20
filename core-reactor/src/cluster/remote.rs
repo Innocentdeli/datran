@@ -28,7 +28,13 @@ pub struct ObjCache {
 
 impl ObjCache {
     pub fn new(cap: u64) -> ObjCache {
-        ObjCache { cap, bytes: 0, tick: 0, map: HashMap::new(), order: BTreeMap::new() }
+        ObjCache {
+            cap,
+            bytes: 0,
+            tick: 0,
+            map: HashMap::new(),
+            order: BTreeMap::new(),
+        }
     }
 
     pub fn get(&mut self, id: &Id) -> Option<Arc<Vec<u8>>> {
@@ -47,7 +53,9 @@ impl ObjCache {
             return;
         }
         while self.bytes + len > self.cap {
-            let Some((&t, &old)) = self.order.iter().next() else { break };
+            let Some((&t, &old)) = self.order.iter().next() else {
+                break;
+            };
             self.order.remove(&t);
             if let Some((ov, _)) = self.map.remove(&old) {
                 self.bytes -= ov.len() as u64;
@@ -74,14 +82,28 @@ pub async fn serve(cluster: Arc<Cluster>, id: Id, method: Method, headers: &Head
     let (pm, holders) = match cluster.fetch_manifest(&id).await {
         Ok(Some(x)) => x,
         Ok(None) => return error(StatusCode::NOT_FOUND, "not found"),
-        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("remote read failed: {}", e)),
+        Err(e) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("remote read failed: {}", e),
+            )
+        }
     };
     let size = pm.size;
-    let range = parse_range(headers.get(header::RANGE).and_then(|v| v.to_str().ok()), size);
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        size,
+    );
     let mut h = HeaderMap::new();
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
-    h.insert(HeaderName::from_static("x-reactor-remote"), HeaderValue::from_static("1"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(
+        HeaderName::from_static("x-reactor-remote"),
+        HeaderValue::from_static("1"),
+    );
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", id_hex(&id))) {
         h.insert(header::ETAG, v);
     }
@@ -137,20 +159,37 @@ pub async fn serve(cluster: Arc<Cluster>, id: Id, method: Method, headers: &Head
                     return;
                 }
             };
-            let (os, oe) = (c.object_offset as usize, c.object_offset as usize + c.len as usize);
+            let (os, oe) = (
+                c.object_offset as usize,
+                c.object_offset as usize + c.len as usize,
+            );
             if oe > plain.len() || sha256(&plain[os..oe]) != c.id {
-                let _ = tx.send(Err(std::io::Error::other(format!("chunk {} failed SHA-256 verification", id_hex(&c.id))))).await;
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "chunk {} failed SHA-256 verification",
+                        id_hex(&c.id)
+                    ))))
+                    .await;
                 return;
             }
             let a = os + (start.max(cs) - cs) as usize;
             let b = os + (end.min(ce) - cs) as usize;
-            if tx.send(Ok(Bytes::copy_from_slice(&plain[a..b]))).await.is_err() {
+            if tx
+                .send(Ok(Bytes::copy_from_slice(&plain[a..b])))
+                .await
+                .is_err()
+            {
                 break;
             }
             sent += (b - a) as u64;
         }
-        cluster.metrics.remote_read_bytes.fetch_add(sent, Ordering::Relaxed);
+        cluster
+            .metrics
+            .remote_read_bytes
+            .fetch_add(sent, Ordering::Relaxed);
     });
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
     (status, h, Body::from_stream(stream)).into_response()
 }

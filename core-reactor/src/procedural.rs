@@ -43,7 +43,9 @@ pub fn write_varint(out: &mut Vec<u8>, mut v: u64) {
 pub fn read_varint(buf: &[u8], pos: &mut usize) -> Result<u64, String> {
     let mut v = 0u64;
     for i in 0..10 {
-        let Some(&b) = buf.get(*pos) else { return Err("procedural: truncated varint".into()) };
+        let Some(&b) = buf.get(*pos) else {
+            return Err("procedural: truncated varint".into());
+        };
         *pos += 1;
         if i == 9 && b > 1 {
             return Err("procedural: varint overflows u64".into());
@@ -72,8 +74,17 @@ fn mask(w: usize) -> u64 {
 enum Op {
     Literal(usize),
     Fill(usize, u8),
-    Repeat { p: usize, n: usize },
-    Arith { w: usize, be: bool, k: usize, start: u64, delta: u64 },
+    Repeat {
+        p: usize,
+        n: usize,
+    },
+    Arith {
+        w: usize,
+        be: bool,
+        k: usize,
+        start: u64,
+        delta: u64,
+    },
 }
 
 /// Validating op reader: tracks output position against the original length.
@@ -88,7 +99,9 @@ struct OpReader<'a> {
 impl<'a> OpReader<'a> {
     fn take(&mut self, len: usize) -> Result<&'a [u8], String> {
         let end = self.pos.checked_add(len).filter(|e| *e <= self.prog.len());
-        let Some(end) = end else { return Err("procedural: truncated op".into()) };
+        let Some(end) = end else {
+            return Err("procedural: truncated op".into());
+        };
         let s = &self.prog[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -96,7 +109,10 @@ impl<'a> OpReader<'a> {
 
     fn advance(&mut self, len: u64, what: &str) -> Result<usize, String> {
         if len > self.limit - self.out {
-            return Err(format!("procedural: {} op exceeds the original length", what));
+            return Err(format!(
+                "procedural: {} op exceeds the original length",
+                what
+            ));
         }
         self.out += len;
         Ok(len as usize)
@@ -129,7 +145,10 @@ impl<'a> OpReader<'a> {
                 let p = read_varint(self.prog, &mut self.pos)?;
                 let n = read_varint(self.prog, &mut self.pos)?;
                 if p == 0 || p > self.out || p > MAX_REPEAT_PERIOD {
-                    return Err(format!("procedural: invalid REPEAT period {} at output position {}", p, self.out));
+                    return Err(format!(
+                        "procedural: invalid REPEAT period {} at output position {}",
+                        p, self.out
+                    ));
                 }
                 let n = self.advance(n, "REPEAT")?;
                 Ok(Op::Repeat { p: p as usize, n })
@@ -144,12 +163,24 @@ impl<'a> OpReader<'a> {
                     return Err(format!("procedural: invalid ARITH endian {}", endian));
                 }
                 let k = read_varint(self.prog, &mut self.pos)?;
-                let bytes = k.checked_mul(w as u64).ok_or("procedural: ARITH length overflows")?;
-                let le = |s: &[u8]| s.iter().rev().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+                let bytes = k
+                    .checked_mul(w as u64)
+                    .ok_or("procedural: ARITH length overflows")?;
+                let le = |s: &[u8]| {
+                    s.iter()
+                        .rev()
+                        .fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+                };
                 let start = le(self.take(w)?);
                 let delta = le(self.take(w)?);
                 self.advance(bytes, "ARITH")?;
-                Ok(Op::Arith { w, be: endian == 1, k: k as usize, start, delta })
+                Ok(Op::Arith {
+                    w,
+                    be: endian == 1,
+                    k: k as usize,
+                    start,
+                    delta,
+                })
             }
             other => Err(format!("procedural: unknown op 0x{:02x}", other)),
         }
@@ -157,13 +188,22 @@ impl<'a> OpReader<'a> {
 }
 
 fn reader(prog: &[u8], limit: u64) -> OpReader<'_> {
-    OpReader { prog, pos: 0, out: 0, limit, literals: 0 }
+    OpReader {
+        prog,
+        pos: 0,
+        out: 0,
+        limit,
+        literals: 0,
+    }
 }
 
 fn decode_literals(stream: &[u8], expected: u64) -> Result<Vec<u8>, String> {
     if expected == 0 {
         if !stream.is_empty() {
-            return Err(format!("procedural: literal stream has {} unused bytes", stream.len()));
+            return Err(format!(
+                "procedural: literal stream has {} unused bytes",
+                stream.len()
+            ));
         }
         return Ok(Vec::new());
     }
@@ -180,15 +220,23 @@ fn decode_literals(stream: &[u8], expected: u64) -> Result<Vec<u8>, String> {
         .read_to_end(&mut out)
         .map_err(|e| format!("procedural: literal stream decode failed: {}", e))?;
     if out.len() < expected {
-        return Err(format!("procedural: LITERAL beyond the literal stream ({} of {} bytes)", out.len(), expected));
+        return Err(format!(
+            "procedural: LITERAL beyond the literal stream ({} of {} bytes)",
+            out.len(),
+            expected
+        ));
     }
     if out.len() > expected {
         return Err("procedural: literal stream has unused trailing bytes".into());
     }
-    dec.finish_frame().map_err(|e| format!("procedural: literal stream decode failed: {}", e))?;
+    dec.finish_frame()
+        .map_err(|e| format!("procedural: literal stream decode failed: {}", e))?;
     let rest = dec.into_inner();
     if !rest.is_empty() {
-        return Err(format!("procedural: {} trailing bytes after the literal stream", rest.len()));
+        return Err(format!(
+            "procedural: {} trailing bytes after the literal stream",
+            rest.len()
+        ));
     }
     Ok(out)
 }
@@ -220,7 +268,10 @@ pub fn decode(payload: &[u8], original_len: usize) -> Result<Vec<u8>, String> {
     let mut pos = 0;
     let prog_len = read_varint(payload, &mut pos)?;
     if prog_len > (payload.len() - pos) as u64 {
-        return Err(format!("procedural: program length {} beyond payload", prog_len));
+        return Err(format!(
+            "procedural: program length {} beyond payload",
+            prog_len
+        ));
     }
     let prog = &payload[pos..pos + prog_len as usize];
     let stream = &payload[pos + prog_len as usize..];
@@ -232,7 +283,10 @@ pub fn decode(payload: &[u8], original_len: usize) -> Result<Vec<u8>, String> {
         op?;
     }
     if r.out != limit {
-        return Err(format!("procedural: program produces {} bytes, original length is {}", r.out, limit));
+        return Err(format!(
+            "procedural: program produces {} bytes, original length is {}",
+            r.out, limit
+        ));
     }
     let literals = decode_literals(stream, r.literals)?;
 
@@ -258,7 +312,13 @@ pub fn decode(payload: &[u8], original_len: usize) -> Result<Vec<u8>, String> {
                     left -= c;
                 }
             }
-            Op::Arith { w, be, k, start, delta } => write_arith(&mut out, w, be, k, start, delta),
+            Op::Arith {
+                w,
+                be,
+                k,
+                start,
+                delta,
+            } => write_arith(&mut out, w, be, k, start, delta),
         }
     }
     debug_assert_eq!(out.len(), original_len);
@@ -281,7 +341,11 @@ pub fn program_summary(payload: &[u8]) -> Result<Vec<(u8, u64, u64)>, String> {
             Op::Literal(n) => (OP_LITERAL, n as u64, 0),
             Op::Fill(n, v) => (OP_FILL, n as u64, u64::from(v)),
             Op::Repeat { p, n } => (OP_REPEAT, n as u64, p as u64),
-            Op::Arith { w, be, k, .. } => (OP_ARITH, (k * w) as u64, w as u64 + if be { 100 } else { 0 }),
+            Op::Arith { w, be, k, .. } => (
+                OP_ARITH,
+                (k * w) as u64,
+                w as u64 + if be { 100 } else { 0 },
+            ),
         });
     }
     Ok(out)
@@ -336,8 +400,15 @@ fn read_elem(x: &[u8], p: usize, w: usize, be: bool) -> u64 {
 }
 
 /// (width, big-endian) pairs tried for ARITH; width 1 has no endianness.
-const ARITH_CANDIDATES: [(usize, bool); 7] =
-    [(1, false), (2, false), (2, true), (4, false), (4, true), (8, false), (8, true)];
+const ARITH_CANDIDATES: [(usize, bool); 7] = [
+    (1, false),
+    (2, false),
+    (2, true),
+    (4, false),
+    (4, true),
+    (8, false),
+    (8, true),
+];
 
 /// `x[j], x[j+w], x[j+2w]` have a zero second difference (mod 256).
 #[inline]
@@ -390,7 +461,8 @@ fn quiet_lanes(x: &[u8], i: usize) -> u64 {
     let mut m = zero_lanes(l(0) ^ l(1));
     for w in [1usize, 2, 4, 8] {
         // second difference at stride w is zero for byte lanes starting at offset o
-        let sd = |o: usize| zero_lanes(sub_lanes(l(o + w), l(o)) ^ sub_lanes(l(o + 2 * w), l(o + w)));
+        let sd =
+            |o: usize| zero_lanes(sub_lanes(l(o + w), l(o)) ^ sub_lanes(l(o + 2 * w), l(o + w)));
         m |= sd(0) & sd(w);
         if w > 1 {
             m |= sd(w - 1) & sd(2 * w - 1);
@@ -425,9 +497,18 @@ fn arith_run(x: &[u8], i: usize, w: usize, be: bool) -> Option<(usize, u64, u64)
 #[derive(Clone, Copy)]
 enum Cand {
     Fill(u8),
-    Arith { w: usize, be: bool, k: usize, start: u64, delta: u64 },
+    Arith {
+        w: usize,
+        be: bool,
+        k: usize,
+        start: u64,
+        delta: u64,
+    },
     /// Period and how many bytes the copy extends *before* the probe position.
-    Repeat { p: usize, back: usize },
+    Repeat {
+        p: usize,
+        back: usize,
+    },
 }
 
 struct Encoder<'a> {
@@ -494,7 +575,11 @@ impl<'a> Encoder<'a> {
         let quiet = i < self.quiet_until
             || (i + QUIET_SPAN <= n && {
                 let m = quiet_lanes(x, i);
-                self.quiet_until = i + if m == 0 { 8 } else { (m.trailing_zeros() / 8) as usize };
+                self.quiet_until = i + if m == 0 {
+                    8
+                } else {
+                    (m.trailing_zeros() / 8) as usize
+                };
                 m & 0x80 == 0
             });
         if !quiet && i + MIN_FILL <= n && x[i + 1] == x[i] && x[i + MIN_FILL - 1] == x[i] {
@@ -510,7 +595,16 @@ impl<'a> Encoder<'a> {
                 }
                 if let Some((k, start, delta)) = arith_run(x, i, w, be) {
                     if best.map(|(l, _)| k * w > l).unwrap_or(true) {
-                        best = Some((k * w, Cand::Arith { w, be, k, start, delta }));
+                        best = Some((
+                            k * w,
+                            Cand::Arith {
+                                w,
+                                be,
+                                k,
+                                start,
+                                delta,
+                            },
+                        ));
                     }
                 }
             }
@@ -518,7 +612,11 @@ impl<'a> Encoder<'a> {
         if i + 8 <= n {
             let covered = best.map(|(l, _)| l).unwrap_or(0);
             let lp = self.last_period;
-            let mut rep = if lp != 0 { self.try_period(i, lit_start, lp).map(|(b, f)| (lp, b, f)) } else { None };
+            let mut rep = if lp != 0 {
+                self.try_period(i, lit_start, lp).map(|(b, f)| (lp, b, f))
+            } else {
+                None
+            };
             let v = load8(x, i);
             let h = hash8(v);
             let (tag, pos) = self.table[h];
@@ -558,8 +656,15 @@ impl<'a> Encoder<'a> {
                 write_varint(&mut self.prog, len as u64);
                 self.prog.push(v);
             }
-            Cand::Arith { w, be, k, start, delta } => {
-                self.prog.extend_from_slice(&[OP_ARITH, w as u8, u8::from(be)]);
+            Cand::Arith {
+                w,
+                be,
+                k,
+                start,
+                delta,
+            } => {
+                self.prog
+                    .extend_from_slice(&[OP_ARITH, w as u8, u8::from(be)]);
                 write_varint(&mut self.prog, k as u64);
                 self.prog.extend_from_slice(&start.to_le_bytes()[..w]);
                 self.prog.extend_from_slice(&delta.to_le_bytes()[..w]);
@@ -589,7 +694,10 @@ pub fn encode(x: &[u8], level: i32) -> Result<Vec<u8>, String> {
         x,
         prog: Vec::new(),
         lits: Vec::new(),
-        table: vec![(0u32, 0u32); 1 << HASH_BITS].into_boxed_slice().try_into().map_err(|_| "procedural: table")?,
+        table: vec![(0u32, 0u32); 1 << HASH_BITS]
+            .into_boxed_slice()
+            .try_into()
+            .map_err(|_| "procedural: table")?,
         last_period: 0,
         failed: [(0, 0); 4],
         failed_next: 0,
@@ -647,7 +755,11 @@ mod tests {
         }
         // 10th byte > 1 overflows; 11 bytes overflows
         let mut p = 0;
-        assert!(read_varint(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02], &mut p).is_err());
+        assert!(read_varint(
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02],
+            &mut p
+        )
+        .is_err());
         let mut p = 0;
         assert!(read_varint(&[0x80; 11], &mut p).is_err());
     }

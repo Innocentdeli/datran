@@ -20,14 +20,19 @@ const MAX_FILE: usize = 16 << 20;
 const MAX_FILES: usize = 5000;
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
         if out.len() >= MAX_FILES {
             return;
         }
-        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         if p.is_dir() {
             if !matches!(name.as_str(), ".git" | "target" | "node_modules" | ".next") {
                 collect(&p, out);
@@ -50,7 +55,9 @@ fn measure(recipe: &Recipe, files: &[Arc<Vec<u8>>], dict: Option<Arc<Vec<u8>>>) 
     let (mut orig, mut comp, mut enc, mut dec) = (0usize, 0usize, 0f64, 0f64);
     for f in files {
         let t = Instant::now();
-        let blob = recipe.encode(f, dict.as_deref().map(|d| d.as_slice())).ok()?;
+        let blob = recipe
+            .encode(f, dict.as_deref().map(|d| d.as_slice()))
+            .ok()?;
         enc += t.elapsed().as_secs_f64();
         let t = Instant::now();
         let out = decode_v2(&blob, usize::MAX, &lookup).ok()?;
@@ -63,7 +70,11 @@ fn measure(recipe: &Recipe, files: &[Arc<Vec<u8>>], dict: Option<Arc<Vec<u8>>>) 
         comp += blob.len().min(f.len() + 1);
     }
     let mib = orig as f64 / (1024.0 * 1024.0);
-    Some(Measure { ratio: orig as f64 / comp.max(1) as f64, enc_mib_s: mib / enc.max(1e-9), dec_mib_s: mib / dec.max(1e-9) })
+    Some(Measure {
+        ratio: orig as f64 / comp.max(1) as f64,
+        enc_mib_s: mib / enc.max(1e-9),
+        dec_mib_s: mib / dec.max(1e-9),
+    })
 }
 
 fn main() {
@@ -75,7 +86,10 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--generations" => {
-                generations = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(generations);
+                generations = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(generations);
                 i += 1;
             }
             "--seed" => {
@@ -99,7 +113,10 @@ fn main() {
         if data.is_empty() || data.len() > MAX_FILE {
             continue;
         }
-        by_class.entry(classify::classify(&data, None)).or_default().push(Arc::new(data));
+        by_class
+            .entry(classify::classify(&data, None))
+            .or_default()
+            .push(Arc::new(data));
     }
 
     let state_dir = std::env::temp_dir().join(format!("core-reactor-bench-{}", std::process::id()));
@@ -121,14 +138,29 @@ fn main() {
     );
     println!(
         "{:<18} {:>11} {:>9} | {:>7} {:>8} {:>8} {:>7} | {:<28} {:>7} {:>8} {:>8} {:>7} {:>6}",
-        "class", "train/held", "held MiB", "zstd3 x", "enc MB/s", "dec MB/s", "fit", "champion", "ratio x", "enc MB/s", "dec MB/s", "fit", "evo s"
+        "class",
+        "train/held",
+        "held MiB",
+        "zstd3 x",
+        "enc MB/s",
+        "dec MB/s",
+        "fit",
+        "champion",
+        "ratio x",
+        "enc MB/s",
+        "dec MB/s",
+        "fit",
+        "evo s"
     );
     for (class, files) in &by_class {
         let held: Vec<Arc<Vec<u8>>> = files.iter().skip(1).step_by(2).cloned().collect();
         let split = format!("{}/{}", files.len() - held.len(), held.len());
         let mib = held.iter().map(|f| f.len()).sum::<usize>() as f64 / (1024.0 * 1024.0);
         if !classify::is_evolvable(class) {
-            println!("{:<18} {:>11} {:>9.2} | not evolved (stored as legacy raw)", class, split, mib);
+            println!(
+                "{:<18} {:>11} {:>9.2} | not evolved (stored as legacy raw)",
+                class, split, mib
+            );
             continue;
         }
         for f in files {
@@ -139,16 +171,31 @@ fn main() {
             engine.run_generation(class);
         }
         let evo_s = t.elapsed().as_secs_f64();
-        let Some(champ) = engine.champion(class) else { continue };
+        let Some(champ) = engine.champion(class) else {
+            continue;
+        };
         let dict = champ.recipe.dict_id().and_then(|id| engine.dicts.get(&id));
         if held.is_empty() {
-            println!("{:<18} {:>11} {:>9} | no held-out file; not measured (champion {})", class, split, "-", champ.recipe.label());
+            println!(
+                "{:<18} {:>11} {:>9} | no held-out file; not measured (champion {})",
+                class,
+                split,
+                "-",
+                champ.recipe.label()
+            );
             continue;
         }
         // baseline fitness on the same held-out reservoir samples the champion was scored on
-        let base_fit = score_recipe(&Recipe::baseline(), &engine.held_out(class), None, engine.cfg.w_enc, engine.cfg.w_dec, usize::MAX)
-            .map(|s| s.fitness)
-            .unwrap_or(f64::NAN);
+        let base_fit = score_recipe(
+            &Recipe::baseline(),
+            &engine.held_out(class),
+            None,
+            engine.cfg.w_enc,
+            engine.cfg.w_dec,
+            usize::MAX,
+        )
+        .map(|s| s.fitness)
+        .unwrap_or(f64::NAN);
         let base = measure(&Recipe::baseline(), &held, None);
         let ch = measure(&champ.recipe, &held, dict);
         match (base, ch) {

@@ -19,7 +19,11 @@ const K1: [u8; 32] = [0x11; 32];
 const K2: [u8; 32] = [0x22; 32];
 
 fn ring(keys: &[(&str, [u8; 32])], active: &str) -> KeyRing {
-    KeyRing::new(keys.iter().map(|(i, k)| (i.to_string(), *k)).collect(), active).unwrap()
+    KeyRing::new(
+        keys.iter().map(|(i, k)| (i.to_string(), *k)).collect(),
+        active,
+    )
+    .unwrap()
 }
 
 /// Opens engine + store under `dir` (state dir layout: `dicts/`, `store/`).
@@ -72,7 +76,10 @@ fn files_containing(dir: &Path, needle: &[u8]) -> Vec<String> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if std::fs::read(&p).map(|b| contains(&b, needle)).unwrap_or(false) {
+            } else if std::fs::read(&p)
+                .map(|b| contains(&b, needle))
+                .unwrap_or(false)
+            {
                 out.push(p.display().to_string());
             }
         }
@@ -81,7 +88,16 @@ fn files_containing(dir: &Path, needle: &[u8]) -> Vec<String> {
 }
 
 fn put(store: &Store, data: &[u8]) -> Id {
-    store.put_bytes(data, &PutOptions { content_type: None, sample: false }).unwrap().file_id
+    store
+        .put_bytes(
+            data,
+            &PutOptions {
+                content_type: None,
+                sample: false,
+            },
+        )
+        .unwrap()
+        .file_id
 }
 
 fn enc_stats(store: &Store) -> serde_json::Value {
@@ -99,13 +115,26 @@ fn encrypted_roundtrip_files_and_packs_ranges_and_no_plaintext_on_disk() {
     assert_eq!(store.read_to_vec(&fs, None).unwrap(), small);
     assert_eq!(store.read_to_vec(&fl, None).unwrap(), large);
     for (fid, data) in [(fs, &small), (fl, &large)] {
-        for (s, e) in [(0u64, 1u64), (70_000, 333_333), (data.len() as u64 - 10, data.len() as u64)] {
-            assert_eq!(store.read_to_vec(&fid, Some((s, e))).unwrap(), &data[s as usize..e as usize]);
+        for (s, e) in [
+            (0u64, 1u64),
+            (70_000, 333_333),
+            (data.len() as u64 - 10, data.len() as u64),
+        ] {
+            assert_eq!(
+                store.read_to_vec(&fid, Some((s, e))).unwrap(),
+                &data[s as usize..e as usize]
+            );
         }
     }
     let st = store.stats().unwrap();
-    assert!(st["packs"]["packed_objects"].as_u64().unwrap() > 0, "some objects are packed");
-    assert!(st["packs"]["packed_objects"].as_u64().unwrap() < st["objects"].as_u64().unwrap(), "some are files");
+    assert!(
+        st["packs"]["packed_objects"].as_u64().unwrap() > 0,
+        "some objects are packed"
+    );
+    assert!(
+        st["packs"]["packed_objects"].as_u64().unwrap() < st["objects"].as_u64().unwrap(),
+        "some are files"
+    );
     let enc = &st["encryption"];
     assert_eq!(enc["enabled"], true);
     assert_eq!(enc["active_key_id"], "k1");
@@ -139,13 +168,26 @@ fn packs_and_compaction_stay_encrypted() {
     let store = Store::open(sc, engine).unwrap();
     let docs: Vec<Vec<u8>> = (0..12).map(|i| secret_text(300_000, 100 + i)).collect();
     let ids: Vec<Id> = docs.iter().map(|d| put(&store, d)).collect();
-    assert!(store.stats().unwrap()["packs"]["sealed_packs"].as_u64().unwrap() >= 2);
+    assert!(
+        store.stats().unwrap()["packs"]["sealed_packs"]
+            .as_u64()
+            .unwrap()
+            >= 2
+    );
     for id in ids.iter().step_by(2).take(5) {
         store.delete(id).unwrap();
     }
     // GC compacts sealed packs right after collecting (live records are copied, still sealed)
     let g = store.gc().unwrap();
-    assert!(g.packs_compacted > 0 && store.stats().unwrap()["packs"]["compaction_moved_objects"].as_u64().unwrap() > 0, "{:?}", g);
+    assert!(
+        g.packs_compacted > 0
+            && store.stats().unwrap()["packs"]["compaction_moved_objects"]
+                .as_u64()
+                .unwrap()
+                > 0,
+        "{:?}",
+        g
+    );
     store.compact_packs_with(1.0, 0).unwrap();
     for (i, (id, d)) in ids.iter().zip(&docs).enumerate() {
         if i % 2 == 1 || i >= 10 {
@@ -168,7 +210,12 @@ fn dictionaries_and_state_are_encrypted_on_disk() {
     let engine = Arc::new(Engine::new(c));
     let docs: Vec<Vec<u8>> = (0..40)
         .map(|i| {
-            let mut d = format!("{{\"owner\":\"{}\",\"seq\":{},\"rows\":", String::from_utf8_lossy(MARKER), i).into_bytes();
+            let mut d = format!(
+                "{{\"owner\":\"{}\",\"seq\":{},\"rows\":",
+                String::from_utf8_lossy(MARKER),
+                i
+            )
+            .into_bytes();
             d.extend_from_slice(&small_json(1000 + i));
             d.push(b'}');
             d
@@ -180,8 +227,14 @@ fn dictionaries_and_state_are_encrypted_on_disk() {
     let r = engine.run_generation(TEXT_JSON).unwrap();
     let id = r.dict_trained.expect("dictionary trained");
     let did: [u8; 32] = hex::decode(&id).unwrap().try_into().unwrap();
-    let dict = engine.dicts.get(&did).expect("dictionary loads (decrypted)");
-    assert!(contains(&dict, MARKER), "the training data's marker is in the plaintext dictionary");
+    let dict = engine
+        .dicts
+        .get(&did)
+        .expect("dictionary loads (decrypted)");
+    assert!(
+        contains(&dict, MARKER),
+        "the training data's marker is in the plaintext dictionary"
+    );
     let file = std::fs::read(engine.dicts.path_for(&did)).unwrap();
     assert_eq!(crypto::sealed_key_id(&file), Some("k1"));
     engine.save().unwrap();
@@ -190,11 +243,22 @@ fn dictionaries_and_state_are_encrypted_on_disk() {
     sc.fusion = false;
     let store = Store::open(sc, engine.clone()).unwrap();
     for d in docs.iter().take(10) {
-        store.put_bytes(d, &PutOptions { content_type: Some("application/json".into()), sample: true }).unwrap();
+        store
+            .put_bytes(
+                d,
+                &PutOptions {
+                    content_type: Some("application/json".into()),
+                    sample: true,
+                },
+            )
+            .unwrap();
     }
     assert_eq!(files_containing(dir.path(), MARKER), Vec::<String>::new());
     let state = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
-    assert!(state.contains("\"population\"") && !state.contains("SECRET"), "state.json only holds recipes / scores / dict ids");
+    assert!(
+        state.contains("\"population\"") && !state.contains("SECRET"),
+        "state.json only holds recipes / scores / dict ids"
+    );
     let enc = enc_stats(&store);
     assert_eq!(enc["dictionaries"]["by_key"]["k1"], 1);
     assert_eq!(enc["dictionaries"]["plaintext"], 0);
@@ -205,7 +269,10 @@ fn dictionaries_and_state_are_encrypted_on_disk() {
     assert!(Engine::new(c2).dicts.get(&did).is_some());
     let mut c3 = test_config(dir.path(), 9);
     c3.keys = Arc::new(KeyRing::single("other", K2));
-    assert!(Engine::new(c3).dicts.get(&did).is_none(), "wrong key: never treated as plaintext");
+    assert!(
+        Engine::new(c3).dicts.get(&did).is_none(),
+        "wrong key: never treated as plaintext"
+    );
 }
 
 #[test]
@@ -217,17 +284,28 @@ fn swapped_or_tampered_objects_are_rejected() {
     let (fa, fb) = (put(&store, &a), put(&store, &b));
     let oa = store.chunk_refs(&fa).unwrap().unwrap().1[0].object_id;
     let ob = store.chunk_refs(&fb).unwrap().unwrap().1[0].object_id;
-    let (pa, pb) = (store.object_storage(&oa).unwrap().unwrap().path, store.object_storage(&ob).unwrap().unwrap().path);
+    let (pa, pb) = (
+        store.object_storage(&oa).unwrap().unwrap().path,
+        store.object_storage(&ob).unwrap().unwrap().path,
+    );
     let (ba, bb) = (std::fs::read(&pa).unwrap(), std::fs::read(&pb).unwrap());
     // swap the two sealed files between ids: the AAD binds each envelope to its id
     std::fs::write(&pa, &bb).unwrap();
     std::fs::write(&pb, &ba).unwrap();
     match store.read_to_vec(&fa, None) {
         Err(StoreError::Corrupt(m)) => assert!(m.contains("decryption failed"), "{}", m),
-        other => panic!("swapped object must be rejected, got {:?}", other.map(|v| v.len())),
+        other => panic!(
+            "swapped object must be rejected, got {:?}",
+            other.map(|v| v.len())
+        ),
     }
     assert!(store.read_to_vec(&fb, None).is_err());
-    let q: Vec<Id> = store.quarantined().unwrap().into_iter().map(|q| q.0).collect();
+    let q: Vec<Id> = store
+        .quarantined()
+        .unwrap()
+        .into_iter()
+        .map(|q| q.0)
+        .collect();
     assert!(q.contains(&oa) && q.contains(&ob));
     // an envelope relabelled with another key id fails too (key id is in the AAD)
     let c = secret_random(300_000, 5);
@@ -249,7 +327,11 @@ fn key_rotation_rekey_then_old_key_removed() {
         let store = open(dir.path(), KeyRing::single("k1", K1), None);
         let ids = datas.iter().map(|d| put(&store, d)).collect();
         // a dictionary under k1 as well
-        store.engine.dicts.put(b"dictionary bytes with SECRET-MARKER-7f3a9c inside".to_vec()).unwrap();
+        store
+            .engine
+            .dicts
+            .put(b"dictionary bytes with SECRET-MARKER-7f3a9c inside".to_vec())
+            .unwrap();
         ids
     };
     // rotate: k2 active, k1 still configured -> old objects readable, new writes under k2
@@ -260,13 +342,23 @@ fn key_rotation_rekey_then_old_key_removed() {
     let extra = secret_text(200_000, 9);
     let fx = put(&store, &extra);
     let enc = enc_stats(&store);
-    assert!(enc["objects_by_key"]["k1"].as_u64().unwrap() > 0 && enc["objects_by_key"]["k2"].as_u64().unwrap() > 0, "{}", enc);
+    assert!(
+        enc["objects_by_key"]["k1"].as_u64().unwrap() > 0
+            && enc["objects_by_key"]["k2"].as_u64().unwrap() > 0,
+        "{}",
+        enc
+    );
     let before = store.rekey_remaining().unwrap();
     assert!(before > 0);
     let mut calls = 0u64;
     let rep = store.rekey(0, &mut |_| calls += 1).unwrap();
     assert!(rep.failed.is_empty(), "{:?}", rep);
-    assert_eq!((rep.remaining, rep.rewrapped, rep.encrypted), (0, before, 0), "{:?}", rep);
+    assert_eq!(
+        (rep.remaining, rep.rewrapped, rep.encrypted),
+        (0, before, 0),
+        "{:?}",
+        rep
+    );
     assert_eq!(rep.dicts_rewrapped, 1);
     assert!(calls >= before);
     let enc = enc_stats(&store);
@@ -274,7 +366,10 @@ fn key_rotation_rekey_then_old_key_removed() {
     assert!(store.verify_index(true).unwrap().ok());
     // rerun is a no-op (idempotent)
     let rep2 = store.rekey(0, &mut |_| {}).unwrap();
-    assert_eq!((rep2.candidates, rep2.remaining, rep2.dicts_rewrapped), (0, 0, 0));
+    assert_eq!(
+        (rep2.candidates, rep2.remaining, rep2.dicts_rewrapped),
+        (0, 0, 0)
+    );
     drop(store);
     // k1 removed from the configuration: everything still reads
     let store = open(dir.path(), KeyRing::single("k2", K2), None);
@@ -282,12 +377,24 @@ fn key_rotation_rekey_then_old_key_removed() {
         assert_eq!(&store.read_to_vec(id, None).unwrap(), d);
     }
     assert_eq!(store.read_to_vec(&fx, None).unwrap(), extra);
-    assert_eq!(store.engine.dicts.list_ids().iter().filter(|d| store.engine.dicts.get(d).is_some()).count(), 1);
+    assert_eq!(
+        store
+            .engine
+            .dicts
+            .list_ids()
+            .iter()
+            .filter(|d| store.engine.dicts.get(d).is_some())
+            .count(),
+        1
+    );
     assert!(store.verify_index(true).unwrap().ok());
     let rep = store.scrub_step(u64::MAX).unwrap();
     assert!(rep.corrupt.is_empty() && rep.unverifiable == 0);
     // superseded k1 copies were compacted away: no k1 envelope is left in any pack or file
-    assert_eq!(files_containing(&dir.path().join("store"), b"DTE1\x01\x02k1"), Vec::<String>::new());
+    assert_eq!(
+        files_containing(&dir.path().join("store"), b"DTE1\x01\x02k1"),
+        Vec::<String>::new()
+    );
     assert_eq!(files_containing(dir.path(), MARKER), Vec::<String>::new());
 }
 
@@ -304,19 +411,31 @@ fn missing_key_is_an_error_never_plaintext() {
         Err(StoreError::KeyUnavailable(m)) => assert!(m.contains("\"k1\""), "{}", m),
         other => panic!("expected KeyUnavailable, got {:?}", other.map(|v| v.len())),
     }
-    assert!(store.quarantined().unwrap().is_empty(), "a missing key is configuration, not corruption");
+    assert!(
+        store.quarantined().unwrap().is_empty(),
+        "a missing key is configuration, not corruption"
+    );
     let rep = store.scrub_step(u64::MAX).unwrap();
     assert!(rep.corrupt.is_empty() && rep.unverifiable > 0);
     let oid = store.chunk_refs(&fid).unwrap().unwrap().1[0].object_id;
-    assert!(matches!(store.get_object_raw(&oid), Err(StoreError::KeyUnavailable(_))));
-    assert_eq!(enc_stats(&store)["missing_key_ids"], serde_json::json!(["k1"]));
+    assert!(matches!(
+        store.get_object_raw(&oid),
+        Err(StoreError::KeyUnavailable(_))
+    ));
+    assert_eq!(
+        enc_stats(&store)["missing_key_ids"],
+        serde_json::json!(["k1"])
+    );
     // rekey cannot rewrap it either and says so
     let rep = store.rekey(0, &mut |_| {}).unwrap();
     assert!(rep.remaining > 0 && !rep.failed.is_empty());
     drop(store);
     // with encryption disabled the envelope is still never served
     let store = open(dir.path(), KeyRing::disabled(), None);
-    assert!(matches!(store.read_to_vec(&fid, None), Err(StoreError::KeyUnavailable(_))));
+    assert!(matches!(
+        store.read_to_vec(&fid, None),
+        Err(StoreError::KeyUnavailable(_))
+    ));
 }
 
 #[test]
@@ -328,7 +447,10 @@ fn legacy_plaintext_store_mixed_then_rekeyed() {
         let store = open(dir.path(), KeyRing::disabled(), None);
         (put(&store, &old), put(&store, &old_big))
     };
-    assert!(!files_containing(dir.path(), MARKER).is_empty(), "the legacy store is plaintext");
+    assert!(
+        !files_containing(dir.path(), MARKER).is_empty(),
+        "the legacy store is plaintext"
+    );
     let store = open(dir.path(), KeyRing::single("k1", K1), None);
     let new = secret_text(300_000, 15);
     let f_new = put(&store, &new);
@@ -337,7 +459,11 @@ fn legacy_plaintext_store_mixed_then_rekeyed() {
     assert_eq!(store.read_to_vec(&f_new, None).unwrap(), new);
     let enc = enc_stats(&store);
     let plain = enc["plaintext_objects"].as_u64().unwrap();
-    assert!(plain > 0 && enc["objects_by_key"]["k1"].as_u64().unwrap() > 0, "{}", enc);
+    assert!(
+        plain > 0 && enc["objects_by_key"]["k1"].as_u64().unwrap() > 0,
+        "{}",
+        enc
+    );
     assert!(store.verify_index(true).unwrap().ok());
     let rep = store.rekey(0, &mut |_| {}).unwrap();
     assert_eq!((rep.encrypted, rep.remaining), (plain, 0), "{:?}", rep);
@@ -346,13 +472,20 @@ fn legacy_plaintext_store_mixed_then_rekeyed() {
         assert_eq!(&store.read_to_vec(&id, None).unwrap(), d);
     }
     assert!(store.verify_index(true).unwrap().ok());
-    assert_eq!(files_containing(dir.path(), MARKER), Vec::<String>::new(), "superseded plaintext copies are gone");
+    assert_eq!(
+        files_containing(dir.path(), MARKER),
+        Vec::<String>::new(),
+        "superseded plaintext copies are gone"
+    );
 }
 
 #[test]
 fn rekey_is_crash_safe_and_resumable() {
     let dir = tempfile::tempdir().unwrap();
-    let datas: Vec<Vec<u8>> = (0..3).map(|i| secret_random(400_000, 20 + i)).chain([secret_text(600_000, 30)]).collect();
+    let datas: Vec<Vec<u8>> = (0..3)
+        .map(|i| secret_random(400_000, 20 + i))
+        .chain([secret_text(600_000, 30)])
+        .collect();
     let ids: Vec<Id> = {
         let store = open(dir.path(), KeyRing::single("k1", K1), None);
         datas.iter().map(|d| put(&store, d)).collect()
@@ -363,12 +496,21 @@ fn rekey_is_crash_safe_and_resumable() {
         let store = open(dir.path(), ring(&[("k1", K1), ("k2", K2)], "k2"), None);
         let n = Arc::new(AtomicU32::new(0));
         let n2 = n.clone();
-        store.set_fail_hook(Some(Arc::new(move |p: &str| p == "install.after_place" && n2.fetch_add(1, Ordering::SeqCst) + 1 == crash_at)));
-        assert!(matches!(store.rekey(0, &mut |_| {}), Err(StoreError::Injected(_))));
+        store.set_fail_hook(Some(Arc::new(move |p: &str| {
+            p == "install.after_place" && n2.fetch_add(1, Ordering::SeqCst) + 1 == crash_at
+        })));
+        assert!(matches!(
+            store.rekey(0, &mut |_| {}),
+            Err(StoreError::Injected(_))
+        ));
         drop(store);
     }
     let store = open(dir.path(), ring(&[("k1", K1), ("k2", K2)], "k2"), None);
-    assert!(store.verify_index(true).unwrap().ok(), "{:?}", store.verify_index(true).unwrap().problems);
+    assert!(
+        store.verify_index(true).unwrap().ok(),
+        "{:?}",
+        store.verify_index(true).unwrap().problems
+    );
     for (id, d) in ids.iter().zip(&datas) {
         assert_eq!(&store.read_to_vec(id, None).unwrap(), d);
     }
@@ -401,9 +543,18 @@ fn reactor_admin_rekey_cli() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout,
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(stdout.contains("rekey: done"), "{}", stdout);
-    let store = open(dir.path(), KeyRing::single(crypto::DEFAULT_KEY_ID, K1), None);
+    let store = open(
+        dir.path(),
+        KeyRing::single(crypto::DEFAULT_KEY_ID, K1),
+        None,
+    );
     assert_eq!(store.read_to_vec(&fid, None).unwrap(), data);
     assert_eq!(enc_stats(&store)["plaintext_objects"], 0);
     assert_eq!(files_containing(dir.path(), MARKER), Vec::<String>::new());
@@ -414,14 +565,27 @@ fn require_encryption_refuses_to_start() {
     let dir = tempfile::tempdir().unwrap();
     let run = |envs: &[(&str, &str)]| {
         let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_core-reactor"));
-        c.env("REACTOR_STATE_DIR", dir.path()).env("REACTOR_PORT", "0").env("REACTOR_EVOLVE", "false");
-        for k in ["REACTOR_MASTER_KEY", "REACTOR_MASTER_KEYS", "REACTOR_MASTER_KEY_FILE", "REACTOR_ACTIVE_KEY_ID", "REACTOR_REQUIRE_ENCRYPTION", "REACTOR_TOKEN"] {
+        c.env("REACTOR_STATE_DIR", dir.path())
+            .env("REACTOR_PORT", "0")
+            .env("REACTOR_EVOLVE", "false");
+        for k in [
+            "REACTOR_MASTER_KEY",
+            "REACTOR_MASTER_KEYS",
+            "REACTOR_MASTER_KEY_FILE",
+            "REACTOR_ACTIVE_KEY_ID",
+            "REACTOR_REQUIRE_ENCRYPTION",
+            "REACTOR_TOKEN",
+        ] {
             c.env_remove(k);
         }
         for (k, v) in envs {
             c.env(k, v);
         }
-        let mut child = c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let mut child = c
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         for _ in 0..200 {
             if let Some(st) = child.try_wait().unwrap() {
                 let mut err = String::new();
@@ -442,5 +606,12 @@ fn require_encryption_refuses_to_start() {
     let (code, _) = run(&[("REACTOR_MASTER_KEYS", "a:0000000000000000000000000000000000000000000000000000000000000001,b:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=")]).expect("ambiguous active key must exit");
     assert_eq!(code, Some(2));
     // with a key (and REACTOR_REQUIRE_ENCRYPTION) it starts and keeps running
-    assert!(run(&[("REACTOR_REQUIRE_ENCRYPTION", "true"), ("REACTOR_MASTER_KEY", &hex::encode(K1))]).is_none(), "starts with a key");
+    assert!(
+        run(&[
+            ("REACTOR_REQUIRE_ENCRYPTION", "true"),
+            ("REACTOR_MASTER_KEY", &hex::encode(K1))
+        ])
+        .is_none(),
+        "starts with a key"
+    );
 }

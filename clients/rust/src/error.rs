@@ -67,7 +67,13 @@ impl ApiError {
                 .unwrap_or("error")
                 .to_owned();
         }
-        ApiError { status, kind: ErrorKind::from_status(status), message, body, content_range }
+        ApiError {
+            status,
+            kind: ErrorKind::from_status(status),
+            message,
+            body,
+            content_range,
+        }
     }
 
     /// SHA-256 of a dictionary the reactor does not have (400 from `/decompress`).
@@ -81,7 +87,13 @@ impl ApiError {
 
     /// File size from a 416 `Content-Range: bytes */size`.
     pub fn range_total(&self) -> Option<u64> {
-        self.content_range.as_deref()?.rsplit('/').next()?.trim().parse().ok()
+        self.content_range
+            .as_deref()?
+            .rsplit('/')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     /// `{error:"store full", needed, used, max}` of a 507 from `PUT /store/files`.

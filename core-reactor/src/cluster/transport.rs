@@ -93,9 +93,17 @@ impl TransportConfig {
     pub fn from_env() -> Result<TransportConfig, String> {
         let mut c = TransportConfig::default();
         if let Ok(v) = std::env::var("REACTOR_PEER_TRANSPORT") {
-            c.prefer = PeerTransport::parse(&v).ok_or_else(|| format!("invalid REACTOR_PEER_TRANSPORT {:?} (http, quic, quic-only)", v))?;
+            c.prefer = PeerTransport::parse(&v).ok_or_else(|| {
+                format!(
+                    "invalid REACTOR_PEER_TRANSPORT {:?} (http, quic, quic-only)",
+                    v
+                )
+            })?;
         }
-        c.tls_ca = std::env::var("REACTOR_TLS_CA").ok().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        c.tls_ca = std::env::var("REACTOR_TLS_CA")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         c.identity = TlsSettings::from_env();
         c.quic = QuicTuning::from_env()?;
         Ok(c)
@@ -165,7 +173,9 @@ pub struct PeerClient {
 
 /// `scheme://authority/rest` → (scheme, authority, rest).
 fn split_url(url: &str) -> Result<(&str, &str, &str), String> {
-    let (scheme, rest) = url.split_once("://").ok_or_else(|| format!("invalid peer URL {:?}", url))?;
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| format!("invalid peer URL {:?}", url))?;
     let i = rest.find(['/', '?']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(i);
     if authority.is_empty() {
@@ -175,24 +185,33 @@ fn split_url(url: &str) -> Result<(&str, &str, &str), String> {
 }
 
 fn build_http(cfg: &TransportConfig, pooled: bool) -> Result<reqwest::Client, String> {
-    let mut b = reqwest::Client::builder().timeout(cfg.request_timeout).connect_timeout(cfg.connect_timeout).redirect(reqwest::redirect::Policy::none());
+    let mut b = reqwest::Client::builder()
+        .timeout(cfg.request_timeout)
+        .connect_timeout(cfg.connect_timeout)
+        .redirect(reqwest::redirect::Policy::none());
     if !pooled {
         b = b.pool_max_idle_per_host(0);
     }
     if let Some(ca) = &cfg.tls_ca {
-        let pem = std::fs::read(ca).map_err(|e| format!("REACTOR_TLS_CA {}: {}", ca.display(), e))?;
-        let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| format!("REACTOR_TLS_CA: {}", e))?;
+        let pem =
+            std::fs::read(ca).map_err(|e| format!("REACTOR_TLS_CA {}: {}", ca.display(), e))?;
+        let certs = reqwest::Certificate::from_pem_bundle(&pem)
+            .map_err(|e| format!("REACTOR_TLS_CA: {}", e))?;
         if certs.is_empty() {
             return Err("REACTOR_TLS_CA contains no certificates".into());
         }
         b = b.tls_certs_only(certs);
     }
-    b.build().map_err(|e| format!("failed to build cluster HTTP client: {}", e))
+    b.build()
+        .map_err(|e| format!("failed to build cluster HTTP client: {}", e))
 }
 
 /// Sends a request and reads at most `cap` body bytes (content-length checked up front).
 async fn send_capped(req: reqwest::RequestBuilder, cap: usize) -> Result<Vec<u8>, String> {
-    let mut resp = req.send().await.map_err(|e| format!("request failed: {}", e))?;
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {}", e))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status().as_u16()));
     }
@@ -200,7 +219,11 @@ async fn send_capped(req: reqwest::RequestBuilder, cap: usize) -> Result<Vec<u8>
         return Err(format!("response larger than {} bytes", cap));
     }
     let mut buf = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read failed: {}", e))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("read failed: {}", e))?
+    {
         if buf.len() + chunk.len() > cap {
             return Err(format!("response larger than {} bytes", cap));
         }
@@ -217,13 +240,25 @@ impl PeerClient {
         let http_unpooled = build_http(&cfg, false)?;
         let rt = tokio::runtime::Handle::try_current().ok();
         Ok(PeerClient {
-            inner: Arc::new(Inner { cfg, http, http_unpooled, rt, quic: OnceLock::new(), peers: Mutex::new(HashMap::new()), stats: TransportStats::default() }),
+            inner: Arc::new(Inner {
+                cfg,
+                http,
+                http_unpooled,
+                rt,
+                quic: OnceLock::new(),
+                peers: Mutex::new(HashMap::new()),
+                stats: TransportStats::default(),
+            }),
         })
     }
 
     /// Plain HTTP(S) client with the given timeout (gossip without a cluster).
     pub fn http_only(timeout: Duration) -> PeerClient {
-        let cfg = TransportConfig { request_timeout: timeout, connect_timeout: timeout.min(Duration::from_secs(5)), ..TransportConfig::default() };
+        let cfg = TransportConfig {
+            request_timeout: timeout,
+            connect_timeout: timeout.min(Duration::from_secs(5)),
+            ..TransportConfig::default()
+        };
         PeerClient::new(cfg).expect("failed to build HTTP client")
     }
 
@@ -278,7 +313,14 @@ impl PeerClient {
 
     /// One peer request with `x-cluster-token`. `pooled = false` uses an HTTP client without
     /// idle connections (for callers on short-lived private runtimes).
-    pub async fn request(&self, method: Method, url: &str, token: &str, cap: usize, pooled: bool) -> Result<Vec<u8>, String> {
+    pub async fn request(
+        &self,
+        method: Method,
+        url: &str,
+        token: &str,
+        cap: usize,
+        pooled: bool,
+    ) -> Result<Vec<u8>, String> {
         let (scheme, authority, rest) = split_url(url)?;
         let quic_only = self.inner.cfg.prefer == PeerTransport::QuicOnly;
         if self.wants_quic(scheme) {
@@ -288,7 +330,10 @@ impl PeerClient {
                 .is_some_and(|t| t.elapsed() < self.inner.cfg.fallback_retry);
             if !backoff || quic_only {
                 let t = Instant::now();
-                match self.quic_request(method.clone(), authority, rest, token, cap).await {
+                match self
+                    .quic_request(method.clone(), authority, rest, token, cap)
+                    .await
+                {
                     Ok(body) => {
                         self.record("quic", &method, "ok", t, body.len() as u64);
                         let mut peers = lock(&self.inner.peers);
@@ -300,7 +345,10 @@ impl PeerClient {
                     }
                     Err(QuicError::Status(s)) => {
                         self.record("quic", &method, "http_error", t, 0);
-                        lock(&self.inner.peers).entry(authority.to_string()).or_default().last = Some("quic");
+                        lock(&self.inner.peers)
+                            .entry(authority.to_string())
+                            .or_default()
+                            .last = Some("quic");
                         return Err(format!("HTTP {}", s));
                     }
                     Err(QuicError::Request(e)) => {
@@ -321,7 +369,11 @@ impl PeerClient {
                         if quic_only {
                             return Err(e);
                         }
-                        tracing::warn!(peer = authority, "QUIC unavailable, falling back to HTTPS: {}", e);
+                        tracing::warn!(
+                            peer = authority,
+                            "QUIC unavailable, falling back to HTTPS: {}",
+                            e
+                        );
                         self.inner.stats.fallbacks.fetch_add(1, Ordering::Relaxed);
                         crate::metrics::peer_fallback();
                     }
@@ -334,29 +386,62 @@ impl PeerClient {
             "https" => ("https", url.to_string()),
             _ => ("http", url.to_string()),
         };
-        let client = if pooled { &self.inner.http } else { &self.inner.http_unpooled };
+        let client = if pooled {
+            &self.inner.http
+        } else {
+            &self.inner.http_unpooled
+        };
         let t = Instant::now();
-        let r = send_capped(client.request(method.clone(), &http_url).header("x-cluster-token", token), cap).await;
+        let r = send_capped(
+            client
+                .request(method.clone(), &http_url)
+                .header("x-cluster-token", token),
+            cap,
+        )
+        .await;
         match &r {
             Ok(b) => self.record(transport, &method, "ok", t, b.len() as u64),
             Err(e) if e.starts_with("HTTP ") => self.record(transport, &method, "http_error", t, 0),
             Err(_) => self.record(transport, &method, "error", t, 0),
         }
         if r.as_ref().is_ok() || r.as_ref().is_err_and(|e| e.starts_with("HTTP ")) {
-            lock(&self.inner.peers).entry(authority.to_string()).or_default().last = Some(transport);
+            lock(&self.inner.peers)
+                .entry(authority.to_string())
+                .or_default()
+                .last = Some(transport);
         }
         r
     }
 
-    async fn quic_request(&self, method: Method, authority: &str, rest: &str, token: &str, cap: usize) -> Result<Vec<u8>, QuicError> {
+    async fn quic_request(
+        &self,
+        method: Method,
+        authority: &str,
+        rest: &str,
+        token: &str,
+        cap: usize,
+    ) -> Result<Vec<u8>, QuicError> {
         let q = self.quic().map_err(QuicError::Handshake)?;
-        let rt = self.inner.rt.clone().ok_or_else(|| QuicError::Handshake("QUIC needs a tokio runtime".into()))?;
+        let rt = self
+            .inner
+            .rt
+            .clone()
+            .ok_or_else(|| QuicError::Handshake("QUIC needs a tokio runtime".into()))?;
         let (authority, rest, token) = (authority.to_string(), rest.to_string(), token.to_string());
         // QUIC connections and their drivers live on the runtime the client was built on
-        rt.spawn(async move { q.request(method, &authority, &rest, &token, cap).await }).await.map_err(|e| QuicError::Request(e.to_string()))?
+        rt.spawn(async move { q.request(method, &authority, &rest, &token, cap).await })
+            .await
+            .map_err(|e| QuicError::Request(e.to_string()))?
     }
 
-    fn record(&self, transport: &'static str, method: &Method, result: &str, t: Instant, bytes: u64) {
+    fn record(
+        &self,
+        transport: &'static str,
+        method: &Method,
+        result: &str,
+        t: Instant,
+        bytes: u64,
+    ) {
         let s = self.inner.stats.of(transport);
         s.requests.fetch_add(1, Ordering::Relaxed);
         if result != "ok" {
@@ -368,7 +453,9 @@ impl PeerClient {
 
     /// Transport view of one peer for `/cluster/status`.
     pub fn peer_json(&self, url: &str) -> serde_json::Value {
-        let Ok((scheme, authority, _)) = split_url(url) else { return json!({ "transport": null }) };
+        let Ok((scheme, authority, _)) = split_url(url) else {
+            return json!({ "transport": null });
+        };
         let configured = if self.wants_quic(scheme) {
             "quic"
         } else if scheme == "https" {

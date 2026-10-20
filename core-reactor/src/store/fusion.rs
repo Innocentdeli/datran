@@ -17,7 +17,9 @@
 //! commit the old objects are already queued for GC.
 
 use super::index::{self, meta, AccessRec, ChunkLoc, ObjectRec};
-use super::{class_code, class_name, id_hex, lock, now, sha256, with_write, Id, Reservation, Result, Store};
+use super::{
+    class_code, class_name, id_hex, lock, now, sha256, with_write, Id, Reservation, Result, Store,
+};
 use redb::{ReadableDatabase, ReadableTable};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -96,7 +98,12 @@ impl Store {
                 if t.chunk_loc.get(id)?.is_none() {
                     continue;
                 }
-                let cur = t.access.get(id)?.map(|g| AccessRec::decode(g.value())).transpose()?.unwrap_or_default();
+                let cur = t
+                    .access
+                    .get(id)?
+                    .map(|g| AccessRec::decode(g.value()))
+                    .transpose()?
+                    .unwrap_or_default();
                 let mut d = cur.decayed(ts, hl);
                 d.co += co;
                 d.solo += solo;
@@ -113,7 +120,12 @@ impl Store {
     /// Decayed access counters of a chunk (after flushing).
     pub fn access_counts(&self, chunk: &Id) -> Result<AccessRec> {
         let tx = self.db.begin_read()?;
-        let rec = tx.open_table(index::ACCESS)?.get(chunk)?.map(|g| AccessRec::decode(g.value())).transpose()?.unwrap_or_default();
+        let rec = tx
+            .open_table(index::ACCESS)?
+            .get(chunk)?
+            .map(|g| AccessRec::decode(g.value()))
+            .transpose()?
+            .unwrap_or_default();
         Ok(rec.decayed(now(), self.cfg.access_half_life.as_millis() as u64))
     }
 
@@ -152,12 +164,16 @@ impl Store {
                 FuseResult::Fused { current, fused } => {
                     report.fused += 1;
                     report.bytes_saved += current.saturating_sub(fused);
-                    report.evaluated.push((c.chunks.len(), current, fused, true));
+                    report
+                        .evaluated
+                        .push((c.chunks.len(), current, fused, true));
                 }
                 FuseResult::Rejected { current, fused } => {
                     report.rejected += 1;
                     self.stats.fusion_rejected.fetch_add(1, Ordering::Relaxed);
-                    report.evaluated.push((c.chunks.len(), current, fused, false));
+                    report
+                        .evaluated
+                        .push((c.chunks.len(), current, fused, false));
                 }
                 FuseResult::Skipped => report.skipped += 1,
             }
@@ -167,13 +183,22 @@ impl Store {
         Ok(report)
     }
 
-    fn find_candidates(&self, co_hot: &HashSet<Id>, access: &HashMap<Id, AccessRec>, report: &mut FusionReport) -> Result<Vec<Candidate>> {
+    fn find_candidates(
+        &self,
+        co_hot: &HashSet<Id>,
+        access: &HashMap<Id, AccessRec>,
+        report: &mut FusionReport,
+    ) -> Result<Vec<Candidate>> {
         let tx = self.db.begin_read()?;
         let mc = tx.open_table(index::MANIFEST_CHUNKS)?;
         let locs = tx.open_table(index::CHUNK_LOC)?;
         let objects = tx.open_table(index::OBJECTS)?;
         let shared = |id: &Id| -> Result<bool> {
-            Ok(locs.get(id)?.map(|g| ChunkLoc::decode(g.value())).transpose()?.is_some_and(|l| l.refs >= 2))
+            Ok(locs
+                .get(id)?
+                .map(|g| ChunkLoc::decode(g.value()))
+                .transpose()?
+                .is_some_and(|l| l.refs >= 2))
         };
 
         // pass 1: structural pair counts over distinct manifests
@@ -212,8 +237,20 @@ impl Store {
 
         // pass 2: maximal linked runs per manifest
         let single = |id: &Id| -> Result<Option<Id>> {
-            let Some(loc) = locs.get(id)?.map(|g| ChunkLoc::decode(g.value())).transpose()? else { return Ok(None) };
-            let Some(o) = objects.get(&loc.object)?.map(|g| ObjectRec::decode(g.value())).transpose()? else { return Ok(None) };
+            let Some(loc) = locs
+                .get(id)?
+                .map(|g| ChunkLoc::decode(g.value()))
+                .transpose()?
+            else {
+                return Ok(None);
+            };
+            let Some(o) = objects
+                .get(&loc.object)?
+                .map(|g| ObjectRec::decode(g.value()))
+                .transpose()?
+            else {
+                return Ok(None);
+            };
             Ok((!o.is_super() && !o.quarantined()).then_some(loc.object))
         };
         let max_run = self.cfg.fuse_max_run as u64;
@@ -225,9 +262,16 @@ impl Store {
         let mut run_access = true;
         let mut run_ids: HashSet<Id> = HashSet::new();
         let mut cur_file: Option<Id> = None;
-        let emit = |run: &mut Vec<(Id, u32)>, access_linked: bool, out: &mut Vec<Candidate>, used: &mut HashSet<Id>| -> Result<()> {
+        let emit = |run: &mut Vec<(Id, u32)>,
+                    access_linked: bool,
+                    out: &mut Vec<Candidate>,
+                    used: &mut HashSet<Id>|
+         -> Result<()> {
             // hysteresis with unfuse: never fuse a run whose chunks are mostly read individually
-            let (solo, co) = run.iter().filter_map(|(c, _)| access.get(c)).fold((0.0, 0.0), |a, x| (a.0 + x.solo, a.1 + x.co));
+            let (solo, co) = run
+                .iter()
+                .filter_map(|(c, _)| access.get(c))
+                .fold((0.0, 0.0), |a, x| (a.0 + x.solo, a.1 + x.co));
             let solo_dominated = solo >= min && solo > co;
             if run.len() >= 2 && !solo_dominated && !run.iter().any(|(c, _)| used.contains(c)) {
                 let mut objs = HashSet::new();
@@ -242,7 +286,10 @@ impl Store {
                 }
                 if ok && objs.len() >= 2 {
                     used.extend(run.iter().map(|(c, _)| *c));
-                    out.push(Candidate { chunks: run.clone(), access_linked });
+                    out.push(Candidate {
+                        chunks: run.clone(),
+                        access_linked,
+                    });
                 }
             }
             run.clear();
@@ -263,7 +310,9 @@ impl Store {
                     let accessed = co_hot.contains(p) && co_hot.contains(&cid);
                     structural || accessed
                 });
-            let link_access = run.last().is_some_and(|(p, _)| co_hot.contains(p) && co_hot.contains(&cid));
+            let link_access = run
+                .last()
+                .is_some_and(|(p, _)| co_hot.contains(p) && co_hot.contains(&cid));
             if !link || run_bytes + len as u64 > max_run || run_ids.contains(&cid) {
                 emit(&mut run, run_access, &mut out, &mut used)?;
                 run_ids.clear();
@@ -292,8 +341,18 @@ impl Store {
             let locs = tx.open_table(index::CHUNK_LOC)?;
             let objects = tx.open_table(index::OBJECTS)?;
             for id in &ids {
-                let Some(loc) = locs.get(id)?.map(|g| ChunkLoc::decode(g.value())).transpose()? else { return Ok(FuseResult::Skipped) };
-                let Some(o) = objects.get(&loc.object)?.map(|g| ObjectRec::decode(g.value())).transpose()? else {
+                let Some(loc) = locs
+                    .get(id)?
+                    .map(|g| ChunkLoc::decode(g.value()))
+                    .transpose()?
+                else {
+                    return Ok(FuseResult::Skipped);
+                };
+                let Some(o) = objects
+                    .get(&loc.object)?
+                    .map(|g| ObjectRec::decode(g.value()))
+                    .transpose()?
+                else {
                     return Ok(FuseResult::Skipped);
                 };
                 if loc.refs == 0 || o.is_super() || o.quarantined() {
@@ -329,14 +388,21 @@ impl Store {
         let structural_ok = (fused as f64) <= current_sum as f64 * (1.0 - self.cfg.fuse_min_gain);
         let access_ok = c.access_linked && fused <= current_sum;
         if !(structural_ok || access_ok) {
-            return Ok(FuseResult::Rejected { current: current_sum, fused });
+            return Ok(FuseResult::Rejected {
+                current: current_sum,
+                fused,
+            });
         }
         res.add(super_id);
         res.created(super_id);
         let existing = self.object_rec(&super_id)?;
         let reuse = existing.as_ref().is_some_and(|o| !o.quarantined());
         // small super-chunks go into the active pack (pinned until the commit below)
-        let (loc, _pin) = if reuse { (None, super::pack::PackPin::none(self)) } else { self.place_blob(&super_id, &blob)? };
+        let (loc, _pin) = if reuse {
+            (None, super::pack::PackPin::none(self))
+        } else {
+            self.place_blob(&super_id, &blob)?
+        };
         self.fail("fuse.after_object")?;
         let ts = now();
         let committed = with_write(self, |t| {
@@ -365,8 +431,15 @@ impl Store {
             }
             let mut off = 0u32;
             for id in &ids {
-                let old = t.get_loc(id)?.ok_or_else(|| super::StoreError::Corrupt("chunk vanished".into()))?;
-                let new = ChunkLoc { object: super_id, offset: off, len: old.len, refs: old.refs };
+                let old = t
+                    .get_loc(id)?
+                    .ok_or_else(|| super::StoreError::Corrupt("chunk vanished".into()))?;
+                let new = ChunkLoc {
+                    object: super_id,
+                    offset: off,
+                    len: old.len,
+                    refs: old.refs,
+                };
                 t.put_loc(id, &new)?;
                 t.obj_ref_inc(&super_id)?;
                 t.obj_ref_dec(&old.object, ts)?;
@@ -380,7 +453,10 @@ impl Store {
         if !committed {
             return Ok(FuseResult::Skipped);
         }
-        Ok(FuseResult::Fused { current: current_sum, fused })
+        Ok(FuseResult::Fused {
+            current: current_sum,
+            fused,
+        })
     }
 
     /// Splits super-chunks > `unfuse_min_bytes` whose members are mostly read individually.
@@ -391,7 +467,11 @@ impl Store {
             for r in tx.open_table(index::OBJECTS)?.range::<&[u8; 32]>(..)? {
                 let (k, v) = r?;
                 let o = ObjectRec::decode(v.value())?;
-                if !o.is_super() || o.quarantined() || o.refcount == 0 || o.plain_len <= self.cfg.unfuse_min_bytes {
+                if !o.is_super()
+                    || o.quarantined()
+                    || o.refcount == 0
+                    || o.plain_len <= self.cfg.unfuse_min_bytes
+                {
                     continue;
                 }
                 let (mut solo, mut co) = (0.0, 0.0);
@@ -419,7 +499,9 @@ impl Store {
     pub fn unfuse(&self, id: &Id) -> Result<bool> {
         let mut res = Reservation::new(self);
         res.add(*id);
-        let Some(rec) = self.object_rec(id)? else { return Ok(false) };
+        let Some(rec) = self.object_rec(id)? else {
+            return Ok(false);
+        };
         if !rec.is_super() || rec.quarantined() {
             return Ok(false);
         }
@@ -430,7 +512,11 @@ impl Store {
             let locs = tx.open_table(index::CHUNK_LOC)?;
             let mut v = Vec::new();
             for m in &rec.members {
-                if let Some(l) = locs.get(m)?.map(|g| ChunkLoc::decode(g.value())).transpose()? {
+                if let Some(l) = locs
+                    .get(m)?
+                    .map(|g| ChunkLoc::decode(g.value()))
+                    .transpose()?
+                {
                     if l.object == *id && l.refs > 0 {
                         v.push((*m, l));
                     }
@@ -447,7 +533,10 @@ impl Store {
                 self.quarantine(id, "member failed verification during unfuse");
                 return Ok(false);
             }
-            if self.object_rec(m)?.is_some_and(|o| !o.quarantined() && o.plain_len == l.len as u64) {
+            if self
+                .object_rec(m)?
+                .is_some_and(|o| !o.quarantined() && o.plain_len == l.len as u64)
+            {
                 continue; // an object with exactly this plaintext exists (e.g. awaiting GC)
             }
             let blob = self.encode_sealed(&enc, m, &plain[s..e])?;
@@ -485,12 +574,25 @@ impl Store {
                 }
             }
             for (m, _) in &live {
-                let cur = t.get_loc(m)?.ok_or_else(|| super::StoreError::Corrupt("chunk vanished".into()))?;
+                let cur = t
+                    .get_loc(m)?
+                    .ok_or_else(|| super::StoreError::Corrupt("chunk vanished".into()))?;
                 if t.get_obj(m)?.is_none() {
                     // reserved, so it cannot have been collected; abort the transaction
-                    return Err(super::StoreError::Corrupt(format!("object {} vanished during unfuse", id_hex(m))));
+                    return Err(super::StoreError::Corrupt(format!(
+                        "object {} vanished during unfuse",
+                        id_hex(m)
+                    )));
                 }
-                t.put_loc(m, &ChunkLoc { object: *m, offset: 0, len: cur.len, refs: cur.refs })?;
+                t.put_loc(
+                    m,
+                    &ChunkLoc {
+                        object: *m,
+                        offset: 0,
+                        len: cur.len,
+                        refs: cur.refs,
+                    },
+                )?;
                 if cur.refs > 0 {
                     t.obj_ref_inc(m)?;
                     t.obj_ref_dec(id, ts)?;
@@ -501,7 +603,11 @@ impl Store {
         })?;
         drop(pins);
         if done {
-            tracing::info!("unfused super-chunk {} into {} objects", id_hex(id), live.len());
+            tracing::info!(
+                "unfused super-chunk {} into {} objects",
+                id_hex(id),
+                live.len()
+            );
         }
         Ok(done)
     }

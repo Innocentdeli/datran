@@ -33,7 +33,11 @@ pub struct AppState {
 }
 
 /// Spec §4: refuse a non-loopback bind unless both tokens are set.
-pub fn check_bind(ip: IpAddr, has_reactor_token: bool, has_cluster_token: bool) -> Result<(), String> {
+pub fn check_bind(
+    ip: IpAddr,
+    has_reactor_token: bool,
+    has_cluster_token: bool,
+) -> Result<(), String> {
     if ip.is_loopback() || (has_reactor_token && has_cluster_token) {
         Ok(())
     } else {
@@ -50,22 +54,42 @@ fn error(status: StatusCode, msg: impl Into<String>) -> Response {
 
 async fn require_token(State(st): State<AppState>, req: Request, next: Next) -> Response {
     if let Some(expected) = &st.reactor_token {
-        let provided = req.headers().get("x-reactor-token").map(|v| v.as_bytes()).unwrap_or(&[]);
+        let provided = req
+            .headers()
+            .get("x-reactor-token")
+            .map(|v| v.as_bytes())
+            .unwrap_or(&[]);
         if !constant_time_eq(provided, expected) {
-            return error(StatusCode::UNAUTHORIZED, "missing or invalid x-reactor-token");
+            return error(
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid x-reactor-token",
+            );
         }
     }
     next.run(req).await
 }
 
 async fn require_cluster(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    let cluster_token = st.cluster.as_ref().and_then(|c| c.cfg.cluster_token.as_deref());
+    let cluster_token = st
+        .cluster
+        .as_ref()
+        .and_then(|c| c.cfg.cluster_token.as_deref());
     let Some(expected) = st.gossip.cfg.cluster_token.as_deref().or(cluster_token) else {
-        return error(StatusCode::NOT_FOUND, "gossip disabled (no REACTOR_CLUSTER_TOKEN)");
+        return error(
+            StatusCode::NOT_FOUND,
+            "gossip disabled (no REACTOR_CLUSTER_TOKEN)",
+        );
     };
-    let provided = req.headers().get("x-cluster-token").map(|v| v.as_bytes()).unwrap_or(&[]);
+    let provided = req
+        .headers()
+        .get("x-cluster-token")
+        .map(|v| v.as_bytes())
+        .unwrap_or(&[]);
     if !constant_time_eq(provided, expected.as_bytes()) {
-        return error(StatusCode::UNAUTHORIZED, "missing or invalid x-cluster-token");
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid x-cluster-token",
+        );
     }
     next.run(req).await
 }
@@ -83,12 +107,23 @@ impl MetricsAuth {
     /// `REACTOR_METRICS_TOKEN` / `REACTOR_METRICS_PUBLIC`; public is ignored (with a warning)
     /// unless `bind` is loopback.
     pub fn from_env(bind: IpAddr) -> MetricsAuth {
-        let token = std::env::var("REACTOR_METRICS_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| Arc::new(t.into_bytes()));
-        let want_public = std::env::var("REACTOR_METRICS_PUBLIC").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+        let token = std::env::var("REACTOR_METRICS_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty())
+            .map(|t| Arc::new(t.into_bytes()));
+        let want_public = std::env::var("REACTOR_METRICS_PUBLIC").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
         if want_public && !bind.is_loopback() {
             tracing::warn!(%bind, "REACTOR_METRICS_PUBLIC ignored on a non-loopback bind; /metrics needs a token");
         }
-        MetricsAuth { token, public: want_public && bind.is_loopback() }
+        MetricsAuth {
+            token,
+            public: want_public && bind.is_loopback(),
+        }
     }
 }
 
@@ -97,7 +132,11 @@ fn metrics_allowed(st: &AppState, auth: &MetricsAuth, h: &HeaderMap) -> bool {
         return true;
     }
     if let Some(expected) = &auth.token {
-        let bearer = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().as_bytes());
+        let bearer = h
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|v| v.trim().as_bytes());
         if bearer.is_some_and(|b| constant_time_eq(b, expected)) {
             return true;
         }
@@ -110,12 +149,29 @@ fn metrics_allowed(st: &AppState, auth: &MetricsAuth, h: &HeaderMap) -> bool {
     false
 }
 
-async fn metrics_handler(State((st, auth)): State<(AppState, MetricsAuth)>, h: HeaderMap) -> Response {
+async fn metrics_handler(
+    State((st, auth)): State<(AppState, MetricsAuth)>,
+    h: HeaderMap,
+) -> Response {
     if !metrics_allowed(&st, &auth, &h) {
-        return error(StatusCode::UNAUTHORIZED, "metrics need x-reactor-token or Authorization: Bearer <REACTOR_METRICS_TOKEN>");
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "metrics need x-reactor-token or Authorization: Bearer <REACTOR_METRICS_TOKEN>",
+        );
     }
-    let body = tokio::task::spawn_blocking(move || crate::metrics::render(&st.engine, st.store.as_deref(), st.cluster.as_deref())).await.unwrap_or_default();
-    ([(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))], body).into_response()
+    let body = tokio::task::spawn_blocking(move || {
+        crate::metrics::render(&st.engine, st.store.as_deref(), st.cluster.as_deref())
+    })
+    .await
+    .unwrap_or_default();
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// A client-supplied `x-request-id` is kept when it is 1–128 visible ASCII characters; otherwise
@@ -133,7 +189,11 @@ fn request_id(h: &HeaderMap) -> String {
 /// Request id, tracing span, access log line and HTTP metrics for every request.
 async fn observe(req: Request, next: Next) -> Response {
     use tracing::Instrument;
-    let route = req.extensions().get::<axum::extract::MatchedPath>().map(|m| m.as_str().to_string()).unwrap_or_else(|| "unmatched".into());
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| "unmatched".into());
     let method = req.method().as_str().to_string();
     let rid = request_id(req.headers());
     let span = tracing::info_span!("request", request_id = %rid, method = %method, route = %route);
@@ -150,7 +210,8 @@ async fn observe(req: Request, next: Next) -> Response {
         }
     });
     if let Ok(v) = HeaderValue::from_str(&rid) {
-        resp.headers_mut().insert(HeaderName::from_static("x-request-id"), v);
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), v);
     }
     resp
 }
@@ -160,7 +221,9 @@ pub fn router(state: AppState) -> Router {
 }
 
 pub fn router_with(state: AppState, metrics_auth: MetricsAuth) -> Router {
-    let metrics = Router::new().route("/metrics", get(metrics_handler)).with_state((state.clone(), metrics_auth));
+    let metrics = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .with_state((state.clone(), metrics_auth));
     let protected = Router::new()
         .route("/entropy", post(entropy_check))
         .route("/compress", post(compress_handler))
@@ -185,7 +248,10 @@ fn peer_api(state: &AppState) -> Router<AppState> {
         .route("/evolution/champions", get(champions_handler))
         .route("/evolution/dict/:sha256", get(dict_handler))
         .merge(crate::cluster::http::cluster_routes())
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_cluster))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_cluster,
+        ))
 }
 
 /// Router of the QUIC listener (NETWORK_SPEC §4 "QUIC transport"): the same peer handlers and
@@ -230,7 +296,11 @@ fn hv(s: &str) -> HeaderValue {
     HeaderValue::from_str(s).unwrap_or(HeaderValue::from_static("invalid"))
 }
 
-async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, body: Bytes) -> Response {
+async fn compress_handler(
+    State(st): State<AppState>,
+    req_headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let hint = req_headers
         .get("x-content-type")
         .and_then(|v| v.to_str().ok())
@@ -247,7 +317,12 @@ async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, bo
     });
     let (out, us, original) = match task.await {
         Ok(r) => r,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("reactor task failed: {}", e)),
+        Err(e) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reactor task failed: {}", e),
+            )
+        }
     };
 
     let algo = match &out.recipe {
@@ -255,9 +330,16 @@ async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, bo
         None if out.class == crate::classify::MEDIA_COMPRESSED => "raw_bypass".into(),
         None => "raw".into(),
     };
-    let ratio = if out.blob.is_empty() { 1.0 } else { original as f64 / out.blob.len() as f64 };
+    let ratio = if out.blob.is_empty() {
+        1.0
+    } else {
+        original as f64 / out.blob.len() as f64
+    };
     let mut h = HeaderMap::new();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     let pairs: [(&'static str, String); 10] = [
         ("x-datran-algo", algo),
         ("x-datran-ratio", format!("{:.2}x", ratio)),
@@ -266,12 +348,31 @@ async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, bo
         ("x-reactor-class", out.class.to_string()),
         (
             "x-reactor-recipe",
-            out.recipe.as_ref().map(|r| r.to_compact_json()).unwrap_or_else(|| "null".into()),
+            out.recipe
+                .as_ref()
+                .map(|r| r.to_compact_json())
+                .unwrap_or_else(|| "null".into()),
         ),
-        ("x-reactor-format", if out.recipe.is_some() { "v2" } else { "legacy-raw" }.into()),
+        (
+            "x-reactor-format",
+            if out.recipe.is_some() {
+                "v2"
+            } else {
+                "legacy-raw"
+            }
+            .into(),
+        ),
         ("x-original-size", original.to_string()),
         ("x-compressed-size", out.blob.len().to_string()),
-        ("x-reactor-note", out.note.clone().unwrap_or_default().chars().filter(|c| (' '..='~').contains(c)).collect()),
+        (
+            "x-reactor-note",
+            out.note
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| (' '..='~').contains(c))
+                .collect(),
+        ),
     ];
     for (k, v) in pairs {
         if k == "x-reactor-note" && v.is_empty() {
@@ -282,14 +383,22 @@ async fn compress_handler(State(st): State<AppState>, req_headers: HeaderMap, bo
     (StatusCode::OK, h, out.blob).into_response()
 }
 
-fn decode_blocking(st: &AppState, body: Bytes) -> tokio::task::JoinHandle<Result<Vec<u8>, DecodeError>> {
+fn decode_blocking(
+    st: &AppState,
+    body: Bytes,
+) -> tokio::task::JoinHandle<Result<Vec<u8>, DecodeError>> {
     let engine = st.engine.clone();
     let limit = st.max_output;
     tokio::task::spawn_blocking(move || {
         let t = std::time::Instant::now();
         let r = codec::decode_any(&body, limit, &|id: &DictId| engine.dicts.get(id));
         if let Ok(out) = &r {
-            crate::metrics::codec_op("decompress", crate::metrics::blob_codec(&body), out.len() as u64, t.elapsed());
+            crate::metrics::codec_op(
+                "decompress",
+                crate::metrics::blob_codec(&body),
+                out.len() as u64,
+                t.elapsed(),
+            );
         }
         r
     })
@@ -298,13 +407,23 @@ fn decode_blocking(st: &AppState, body: Bytes) -> tokio::task::JoinHandle<Result
 async fn decompress_handler(State(st): State<AppState>, body: Bytes) -> Response {
     let mut result = match decode_blocking(&st, body.clone()).await {
         Ok(r) => r,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("reactor task failed: {}", e)),
+        Err(e) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reactor task failed: {}", e),
+            )
+        }
     };
     if let Err(DecodeError::UnknownDict(id)) = &result {
         if st.gossip.fetch_dict(&st.engine, id).await {
             result = match decode_blocking(&st, body).await {
                 Ok(r) => r,
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("reactor task failed: {}", e)),
+                Err(e) => {
+                    return error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("reactor task failed: {}", e),
+                    )
+                }
             };
         }
     }
@@ -343,12 +462,23 @@ async fn dict_handler(State(st): State<AppState>, Path(sha): Path<String>) -> Re
     if !st.gossip.cfg.share_dicts {
         return error(StatusCode::NOT_FOUND, "dictionary sharing disabled");
     }
-    let id: Option<DictId> = if sha.len() == 64 { hex::decode(&sha).ok().and_then(|b| b.try_into().ok()) } else { None };
-    let Some(id) = id else { return error(StatusCode::BAD_REQUEST, "invalid dictionary id") };
+    let id: Option<DictId> = if sha.len() == 64 {
+        hex::decode(&sha).ok().and_then(|b| b.try_into().ok())
+    } else {
+        None
+    };
+    let Some(id) = id else {
+        return error(StatusCode::BAD_REQUEST, "invalid dictionary id");
+    };
     match st.engine.dicts.get(&id) {
-        Some(d) => {
-            ([(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))], d.as_ref().clone()).into_response()
-        }
+        Some(d) => (
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            )],
+            d.as_ref().clone(),
+        )
+            .into_response(),
         None => error(StatusCode::NOT_FOUND, "unknown dictionary"),
     }
 }

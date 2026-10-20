@@ -132,12 +132,18 @@ fn copy_hashed(src: &Path, dst: &Path, len: Option<u64>) -> Result<(u64, String)
             break;
         }
         h.update(&buf[..n]);
-        out.write_all(&buf[..n]).map_err(|e| io_err(dst.display(), e))?;
+        out.write_all(&buf[..n])
+            .map_err(|e| io_err(dst.display(), e))?;
         total += n as u64;
     }
     if let Some(n) = len {
         if total != n {
-            return Err(StoreError::Corrupt(format!("{}: {} bytes, expected {}", src.display(), total, n)));
+            return Err(StoreError::Corrupt(format!(
+                "{}: {} bytes, expected {}",
+                src.display(),
+                total,
+                n
+            )));
         }
     }
     out.sync_all().map_err(|e| io_err(dst.display(), e))?;
@@ -176,18 +182,36 @@ pub(crate) fn rel_join(root: &Path, rel: &str) -> PathBuf {
 
 /// A relative manifest path must stay inside its root (no absolute paths, no `..`).
 pub(crate) fn safe_rel(rel: &str) -> bool {
-    !rel.is_empty() && !rel.starts_with('/') && !rel.contains('\\') && !rel.contains(':') && rel.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.contains('\\')
+        && !rel.contains(':')
+        && rel
+            .split('/')
+            .all(|s| !s.is_empty() && s != "." && s != "..")
 }
 
 pub fn read_manifest(dir: &Path) -> Result<BackupManifest> {
-    let b = std::fs::read(dir.join(MANIFEST)).map_err(|e| io_err(format!("{} (not a complete backup?)", dir.join(MANIFEST).display()), e))?;
-    let m: BackupManifest = serde_json::from_slice(&b).map_err(|e| StoreError::Corrupt(format!("unreadable backup manifest: {}", e)))?;
+    let b = std::fs::read(dir.join(MANIFEST)).map_err(|e| {
+        io_err(
+            format!("{} (not a complete backup?)", dir.join(MANIFEST).display()),
+            e,
+        )
+    })?;
+    let m: BackupManifest = serde_json::from_slice(&b)
+        .map_err(|e| StoreError::Corrupt(format!("unreadable backup manifest: {}", e)))?;
     if m.format != BACKUP_FORMAT {
-        return Err(StoreError::Invalid(format!("unsupported backup format {}", m.format)));
+        return Err(StoreError::Invalid(format!(
+            "unsupported backup format {}",
+            m.format
+        )));
     }
     for f in &m.files {
         if !safe_rel(&f.path) {
-            return Err(StoreError::Corrupt(format!("backup manifest has an unsafe path {:?}", f.path)));
+            return Err(StoreError::Corrupt(format!(
+                "backup manifest has an unsafe path {:?}",
+                f.path
+            )));
         }
     }
     Ok(m)
@@ -226,7 +250,10 @@ impl Store {
     fn backup_inner(&self, dest: &Path, previous: Option<&Path>) -> Result<BackupReport> {
         let start = std::time::Instant::now();
         if !dir_is_empty(dest) {
-            return Err(StoreError::Invalid(format!("backup destination {} is not empty", dest.display())));
+            return Err(StoreError::Invalid(format!(
+                "backup destination {} is not empty",
+                dest.display()
+            )));
         }
         let prev = match previous {
             Some(p) => {
@@ -240,7 +267,9 @@ impl Store {
         let dest_abs = std::fs::canonicalize(dest)?;
         let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|p| dest_abs.starts_with(p));
         if inside(self.dir()) || inside(&self.engine.cfg.state_dir) {
-            return Err(StoreError::Invalid("backup destination must be outside the reactor state dir".into()));
+            return Err(StoreError::Invalid(
+                "backup destination must be outside the reactor state dir".into(),
+            ));
         }
         // previous entries by path, resolved to the directory that physically holds them
         let prev_by_path: HashMap<String, (FileEntry, String)> = match &prev {
@@ -248,7 +277,10 @@ impl Store {
                 .files
                 .iter()
                 .map(|f| {
-                    let holder = f.base.clone().unwrap_or_else(|| abs.to_string_lossy().to_string());
+                    let holder = f
+                        .base
+                        .clone()
+                        .unwrap_or_else(|| abs.to_string_lossy().to_string());
                     (f.path.clone(), (f.clone(), holder))
                 })
                 .collect(),
@@ -260,7 +292,10 @@ impl Store {
         // 2. snapshot + index copy
         let tx = self.db.begin_read()?;
         let mut files: Vec<FileEntry> = Vec::new();
-        let mut rep = BackupReport { dest: dest_abs.to_string_lossy().to_string(), ..Default::default() };
+        let mut rep = BackupReport {
+            dest: dest_abs.to_string_lossy().to_string(),
+            ..Default::default()
+        };
         {
             let idx_path = dest.join("store").join("index.redb");
             std::fs::create_dir_all(dest.join("store"))?;
@@ -282,7 +317,13 @@ impl Store {
             drop(out);
             let (size, sha) = hash_file(&idx_path)?;
             rep.bytes_copied += size;
-            files.push(FileEntry { path: "store/index.redb".into(), size, sha256: sha, base: None, key_slot: None });
+            files.push(FileEntry {
+                path: "store/index.redb".into(),
+                size,
+                sha256: sha,
+                base: None,
+                key_slot: None,
+            });
         }
 
         // snapshot counters and key slots (for the encryption section)
@@ -293,12 +334,18 @@ impl Store {
         }
         let slot_names: HashMap<u8, String> = meta_map
             .iter()
-            .filter_map(|(k, v)| k.strip_prefix(meta::KEY_SLOT_PREFIX).map(|id| (*v as u8, id.to_string())))
+            .filter_map(|(k, v)| {
+                k.strip_prefix(meta::KEY_SLOT_PREFIX)
+                    .map(|id| (*v as u8, id.to_string()))
+            })
             .collect();
 
         let reuse = |path: &str, size: u64, slot: Option<u8>| -> Option<FileEntry> {
             let (e, holder) = prev_by_path.get(path)?;
-            (e.size == size && e.key_slot == slot).then(|| FileEntry { base: Some(holder.clone()), ..e.clone() })
+            (e.size == size && e.key_slot == slot).then(|| FileEntry {
+                base: Some(holder.clone()),
+                ..e.clone()
+            })
         };
 
         // 3a. packs, up to their committed end
@@ -313,10 +360,17 @@ impl Store {
                 files.push(e);
                 continue;
             }
-            let (size, sha) = copy_hashed(&self.pack_path(pid), &rel_join(dest, &rel), Some(row.end))?;
+            let (size, sha) =
+                copy_hashed(&self.pack_path(pid), &rel_join(dest, &rel), Some(row.end))?;
             rep.bytes_copied += size;
             rep.packs_copied += 1;
-            files.push(FileEntry { path: rel, size, sha256: sha, base: None, key_slot: None });
+            files.push(FileEntry {
+                path: rel,
+                size,
+                sha256: sha,
+                base: None,
+                key_slot: None,
+            });
         }
         // 3b. file objects (packed and quarantined ones have no file to copy)
         let mut objects = 0u64;
@@ -336,11 +390,21 @@ impl Store {
                 files.push(e);
                 continue;
             }
-            let (size, sha) = copy_hashed(&self.object_path(&id), &rel_join(dest, &rel), Some(rec.stored_len))
-                .map_err(|e| StoreError::Corrupt(format!("object {}: {}", h, e)))?;
+            let (size, sha) = copy_hashed(
+                &self.object_path(&id),
+                &rel_join(dest, &rel),
+                Some(rec.stored_len),
+            )
+            .map_err(|e| StoreError::Corrupt(format!("object {}: {}", h, e)))?;
             rep.bytes_copied += size;
             rep.objects_copied += 1;
-            files.push(FileEntry { path: rel, size, sha256: sha, base: None, key_slot: slot });
+            files.push(FileEntry {
+                path: rel,
+                size,
+                sha256: sha,
+                base: None,
+                key_slot: slot,
+            });
         }
         drop(tx);
 
@@ -348,23 +412,44 @@ impl Store {
         let state_dir = self.engine.cfg.state_dir.clone();
         let mut state_rel: Vec<String> = STATE_FILES.iter().map(|s| s.to_string()).collect();
         if let Ok(rd) = std::fs::read_dir(state_dir.join("dicts")) {
-            let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".dict")).collect();
+            let mut names: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".dict"))
+                .collect();
             names.sort();
             state_rel.extend(names.into_iter().map(|n| format!("dicts/{}", n)));
         }
         for rel in state_rel {
             // read whole (small, atomically replaced files) so the copy is one consistent version
-            let Ok(bytes) = std::fs::read(rel_join(&state_dir, &rel)) else { continue };
+            let Ok(bytes) = std::fs::read(rel_join(&state_dir, &rel)) else {
+                continue;
+            };
             let (size, sha) = write_bytes(&rel_join(&dest.join("state"), &rel), &bytes)?;
             rep.bytes_copied += size;
-            files.push(FileEntry { path: format!("state/{}", rel), size, sha256: sha, base: None, key_slot: None });
+            files.push(FileEntry {
+                path: format!("state/{}", rel),
+                size,
+                sha256: sha,
+                base: None,
+                key_slot: None,
+            });
         }
 
         // 4. manifest
         let mut key_ids: Vec<String> = meta_map
             .iter()
-            .filter_map(|(k, n)| k.strip_prefix(meta::ENC_OBJECTS_PREFIX).and_then(|s| s.parse::<u8>().ok()).filter(|s| *s != 0 && *n > 0))
-            .map(|s| slot_names.get(&s).cloned().unwrap_or_else(|| format!("slot-{}", s)))
+            .filter_map(|(k, n)| {
+                k.strip_prefix(meta::ENC_OBJECTS_PREFIX)
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .filter(|s| *s != 0 && *n > 0)
+            })
+            .map(|s| {
+                slot_names
+                    .get(&s)
+                    .cloned()
+                    .unwrap_or_else(|| format!("slot-{}", s))
+            })
             .collect();
         for d in self.engine.dicts.list_ids() {
             if let Some(k) = self.engine.dicts.file_key_id(&d) {
@@ -379,14 +464,24 @@ impl Store {
             created_ms: super::now(),
             reactor_version: env!("CARGO_PKG_VERSION").into(),
             previous: prev.as_ref().map(|p| p.0.to_string_lossy().to_string()),
-            encryption: EncryptionInfo { key_ids: key_ids.clone(), plaintext_objects: g(&meta::enc_objects(0)) },
-            index: IndexSummary { files: g(meta::FILES), objects, logical_bytes: g(meta::LOGICAL), physical_bytes: g(meta::PHYSICAL), packs },
+            encryption: EncryptionInfo {
+                key_ids: key_ids.clone(),
+                plaintext_objects: g(&meta::enc_objects(0)),
+            },
+            index: IndexSummary {
+                files: g(meta::FILES),
+                objects,
+                logical_bytes: g(meta::LOGICAL),
+                physical_bytes: g(meta::PHYSICAL),
+                packs,
+            },
             files,
         };
         rep.files = manifest.files.len() as u64;
         rep.bytes_total = manifest.files.iter().map(|f| f.size).sum();
         rep.key_ids = key_ids;
-        let body = serde_json::to_vec_pretty(&manifest).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        let body =
+            serde_json::to_vec_pretty(&manifest).map_err(|e| StoreError::Invalid(e.to_string()))?;
         let tmp = dest.join(".MANIFEST.json.tmp");
         write_bytes(&tmp, &body)?;
         std::fs::rename(&tmp, dest.join(MANIFEST))?;
@@ -404,7 +499,11 @@ fn resolve_base(src: &Path, base: &str) -> PathBuf {
     if p.join(MANIFEST).exists() {
         return p;
     }
-    let name = base.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(base);
+    let name = base
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(base);
     match src.parent() {
         Some(parent) if !name.is_empty() => parent.join(name),
         _ => p,
@@ -413,7 +512,12 @@ fn resolve_base(src: &Path, base: &str) -> PathBuf {
 
 /// Key ids a backup needs that `keys` does not have.
 pub fn missing_keys(m: &BackupManifest, keys: &crate::crypto::KeyRing) -> Vec<String> {
-    m.encryption.key_ids.iter().filter(|k| !keys.has_key(k)).cloned().collect()
+    m.encryption
+        .key_ids
+        .iter()
+        .filter(|k| !keys.has_key(k))
+        .cloned()
+        .collect()
 }
 
 /// Restores backup `src` into `state_dir` (see the module docs). `state_dir` must be empty unless
@@ -438,7 +542,10 @@ pub fn restore(
     }
     if !dir_is_empty(state_dir) {
         if !force {
-            return Err(StoreError::Invalid(format!("restore target {} is not empty (use --force to replace its reactor state)", state_dir.display())));
+            return Err(StoreError::Invalid(format!(
+                "restore target {} is not empty (use --force to replace its reactor state)",
+                state_dir.display()
+            )));
         }
         for e in ["store", "dicts"] {
             let p = state_dir.join(e);
@@ -465,7 +572,10 @@ pub fn restore(
             written.push(to.clone());
             let (size, sha) = copy_hashed(&from, &to, None)?;
             if size != f.size || sha != f.sha256 {
-                return Err(StoreError::Corrupt(format!("backup file {} fails its manifest check (size {} / {}, sha256 {} / {})", f.path, size, f.size, sha, f.sha256)));
+                return Err(StoreError::Corrupt(format!(
+                    "backup file {} fails its manifest check (size {} / {}, sha256 {} / {})",
+                    f.path, size, f.size, sha, f.sha256
+                )));
             }
             rep.files += 1;
             rep.bytes += size;
@@ -475,7 +585,10 @@ pub fn restore(
         }
         let fsck = open_and_verify(state_dir)?;
         if !fsck.ok() {
-            return Err(StoreError::Corrupt(format!("restored store fails the deep check: {:?}", fsck.problems.iter().take(10).collect::<Vec<_>>())));
+            return Err(StoreError::Corrupt(format!(
+                "restored store fails the deep check: {:?}",
+                fsck.problems.iter().take(10).collect::<Vec<_>>()
+            )));
         }
         rep.fsck = Some(fsck);
         rep.seconds = start.elapsed().as_secs_f64();

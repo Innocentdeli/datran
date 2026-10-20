@@ -76,7 +76,10 @@ pub struct UploadOptions {
 
 impl UploadOptions {
     pub fn content_type(ct: impl Into<String>) -> Self {
-        UploadOptions { content_type: Some(ct.into()), no_sample: false }
+        UploadOptions {
+            content_type: Some(ct.into()),
+            no_sample: false,
+        }
     }
     pub fn no_sample(mut self) -> Self {
         self.no_sample = true;
@@ -141,9 +144,13 @@ impl ClientBuilder {
 
     pub fn build(self) -> Result<Client> {
         let base = self.base_url.trim_end_matches('/').to_owned();
-        let parsed = reqwest::Url::parse(&base).map_err(|e| Error::InvalidArgument(format!("base_url: {}", e)))?;
+        let parsed = reqwest::Url::parse(&base)
+            .map_err(|e| Error::InvalidArgument(format!("base_url: {}", e)))?;
         if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(Error::InvalidArgument(format!("base_url scheme must be http or https: {}", base)));
+            return Err(Error::InvalidArgument(format!(
+                "base_url scheme must be http or https: {}",
+                base
+            )));
         }
         let mut b = reqwest::Client::builder()
             .connect_timeout(self.connect_timeout)
@@ -215,7 +222,10 @@ impl Client {
     // ------------------------------------------------------------------ transport
 
     fn request(&self, method: Method, path: &str, headers: HeaderMap) -> reqwest::RequestBuilder {
-        let mut rb = self.http.request(method, format!("{}{}", self.base, path)).headers(headers);
+        let mut rb = self
+            .http
+            .request(method, format!("{}{}", self.base, path))
+            .headers(headers);
         if let Some(t) = &self.token {
             rb = rb.header("x-reactor-token", t);
         }
@@ -227,8 +237,16 @@ impl Client {
             return Ok(resp);
         }
         let status = resp.status().as_u16();
-        let cr = resp.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        let body = if head { Bytes::new() } else { resp.bytes().await.unwrap_or_default() };
+        let cr = resp
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = if head {
+            Bytes::new()
+        } else {
+            resp.bytes().await.unwrap_or_default()
+        };
         Err(Error::Api(ApiError::new(status, body, cr)))
     }
 
@@ -238,11 +256,17 @@ impl Client {
         let mut attempt = 0u32;
         loop {
             if attempt > 0 {
-                let base = (self.backoff.as_millis() as u64).saturating_mul(1 << (attempt - 1).min(16)).min(10_000);
+                let base = (self.backoff.as_millis() as u64)
+                    .saturating_mul(1 << (attempt - 1).min(16))
+                    .min(10_000);
                 tokio::time::sleep(Duration::from_millis(base + jitter(base / 2 + 1))).await;
             }
             let last = attempt >= self.max_retries;
-            match self.request(method.clone(), path, headers.clone()).send().await {
+            match self
+                .request(method.clone(), path, headers.clone())
+                .send()
+                .await
+            {
                 Err(e) if !last => {
                     let _ = e;
                 }
@@ -255,9 +279,21 @@ impl Client {
     }
 
     /// Request with a body: never retried.
-    async fn with_body(&self, method: Method, path: &str, mut headers: HeaderMap, body: Body) -> Result<Response> {
-        headers.entry(CONTENT_TYPE).or_insert(HeaderValue::from_static("application/octet-stream"));
-        let resp = self.request(method, path, headers).body(body).send().await?;
+    async fn with_body(
+        &self,
+        method: Method,
+        path: &str,
+        mut headers: HeaderMap,
+        body: Body,
+    ) -> Result<Response> {
+        headers
+            .entry(CONTENT_TYPE)
+            .or_insert(HeaderValue::from_static("application/octet-stream"));
+        let resp = self
+            .request(method, path, headers)
+            .body(body)
+            .send()
+            .await?;
         Self::check(resp, false).await
     }
 
@@ -275,54 +311,95 @@ impl Client {
 
     /// `GET /health` (no auth).
     pub async fn health(&self) -> Result<Health> {
-        Self::json(self.idempotent(Method::GET, "/health", HeaderMap::new()).await?).await
+        Self::json(
+            self.idempotent(Method::GET, "/health", HeaderMap::new())
+                .await?,
+        )
+        .await
     }
 
     /// `POST /compress` (buffered response). Accepts `Vec<u8>`, `Bytes`, `&'static [u8]`, or a [`Body`].
-    pub async fn compress(&self, data: impl Into<Body>, opts: &UploadOptions) -> Result<CompressResult> {
-        let resp = self.with_body(Method::POST, "/compress", hints(opts), data.into()).await?;
+    pub async fn compress(
+        &self,
+        data: impl Into<Body>,
+        opts: &UploadOptions,
+    ) -> Result<CompressResult> {
+        let resp = self
+            .with_body(Method::POST, "/compress", hints(opts), data.into())
+            .await?;
         let meta = compress_meta(resp.headers());
         let data = resp.bytes().await?;
         Ok(CompressResult { meta, data })
     }
 
     /// `POST /compress` with a streamed response (metadata available immediately).
-    pub async fn compress_stream(&self, data: impl Into<Body>, opts: &UploadOptions) -> Result<(CompressMeta, ByteStream)> {
-        let resp = self.with_body(Method::POST, "/compress", hints(opts), data.into()).await?;
+    pub async fn compress_stream(
+        &self,
+        data: impl Into<Body>,
+        opts: &UploadOptions,
+    ) -> Result<(CompressMeta, ByteStream)> {
+        let resp = self
+            .with_body(Method::POST, "/compress", hints(opts), data.into())
+            .await?;
         Ok((compress_meta(resp.headers()), Self::stream(resp)))
     }
 
     /// `POST /decompress`.
     pub async fn decompress(&self, blob: impl Into<Body>) -> Result<Bytes> {
-        let resp = self.with_body(Method::POST, "/decompress", HeaderMap::new(), blob.into()).await?;
+        let resp = self
+            .with_body(Method::POST, "/decompress", HeaderMap::new(), blob.into())
+            .await?;
         Ok(resp.bytes().await?)
     }
 
     /// `POST /decompress` with a streamed response.
     pub async fn decompress_stream(&self, blob: impl Into<Body>) -> Result<ByteStream> {
-        let resp = self.with_body(Method::POST, "/decompress", HeaderMap::new(), blob.into()).await?;
+        let resp = self
+            .with_body(Method::POST, "/decompress", HeaderMap::new(), blob.into())
+            .await?;
         Ok(Self::stream(resp))
     }
 
     /// `POST /entropy`.
     pub async fn entropy(&self, data: impl Into<Body>) -> Result<Entropy> {
-        Self::json(self.with_body(Method::POST, "/entropy", HeaderMap::new(), data.into()).await?).await
+        Self::json(
+            self.with_body(Method::POST, "/entropy", HeaderMap::new(), data.into())
+                .await?,
+        )
+        .await
     }
 
     /// `GET /evolution/status`.
     pub async fn evolution_status(&self) -> Result<EvolutionStatus> {
-        Self::json(self.idempotent(Method::GET, "/evolution/status", HeaderMap::new()).await?).await
+        Self::json(
+            self.idempotent(Method::GET, "/evolution/status", HeaderMap::new())
+                .await?,
+        )
+        .await
     }
 
     // ------------------------------------------------------------------ store
 
     /// `PUT /store/files` with any body (a stream body is sent chunked). Never retried.
-    pub async fn store_put(&self, body: impl Into<Body>, opts: &UploadOptions) -> Result<PutResult> {
-        Self::json(self.with_body(Method::PUT, "/store/files", hints(opts), body.into()).await?).await
+    pub async fn store_put(
+        &self,
+        body: impl Into<Body>,
+        opts: &UploadOptions,
+    ) -> Result<PutResult> {
+        Self::json(
+            self.with_body(Method::PUT, "/store/files", hints(opts), body.into())
+                .await?,
+        )
+        .await
     }
 
     /// Streams an [`AsyncRead`]; with `length` the request uses `Content-Length`, otherwise chunked encoding.
-    pub async fn store_put_reader<R>(&self, reader: R, length: Option<u64>, opts: &UploadOptions) -> Result<PutResult>
+    pub async fn store_put_reader<R>(
+        &self,
+        reader: R,
+        length: Option<u64>,
+        opts: &UploadOptions,
+    ) -> Result<PutResult>
     where
         R: AsyncRead + Send + 'static,
     {
@@ -330,12 +407,19 @@ impl Client {
         if let Some(n) = length {
             h.insert(CONTENT_LENGTH, HeaderValue::from(n));
         }
-        let body = Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(reader, 64 * 1024));
+        let body = Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
+            reader,
+            64 * 1024,
+        ));
         Self::json(self.with_body(Method::PUT, "/store/files", h, body).await?).await
     }
 
     /// Streams a file from disk with a known length.
-    pub async fn store_put_file(&self, path: impl AsRef<Path>, opts: &UploadOptions) -> Result<PutResult> {
+    pub async fn store_put_file(
+        &self,
+        path: impl AsRef<Path>,
+        opts: &UploadOptions,
+    ) -> Result<PutResult> {
         let f = tokio::fs::File::open(path).await?;
         let len = f.metadata().await?.len();
         self.store_put_reader(f, Some(len), opts).await
@@ -345,7 +429,10 @@ impl Client {
         let mut h = HeaderMap::new();
         if let Some(r) = range {
             let v = r.header_value()?;
-            h.insert(RANGE, HeaderValue::from_str(&v).map_err(|e| Error::InvalidArgument(e.to_string()))?);
+            h.insert(
+                RANGE,
+                HeaderValue::from_str(&v).map_err(|e| Error::InvalidArgument(e.to_string()))?,
+            );
         }
         self.idempotent(Method::GET, &file_path(file_id)?, h).await
     }
@@ -357,7 +444,11 @@ impl Client {
         let data = resp.bytes().await?;
         if let Some(n) = info.length {
             if n != data.len() as u64 {
-                return Err(Error::InvalidResponse(format!("truncated body ({} of {} bytes)", data.len(), n)));
+                return Err(Error::InvalidResponse(format!(
+                    "truncated body ({} of {} bytes)",
+                    data.len(),
+                    n
+                )));
             }
         }
         if info.status != 206 {
@@ -369,13 +460,22 @@ impl Client {
     }
 
     /// `GET /store/files/:id` as a stream.
-    pub async fn store_get_stream(&self, file_id: &str, range: Option<ByteRange>) -> Result<(RangeInfo, ByteStream)> {
+    pub async fn store_get_stream(
+        &self,
+        file_id: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(RangeInfo, ByteStream)> {
         let resp = self.get_resp(file_id, range).await?;
         Ok((range_info(&resp)?, Self::stream(resp)))
     }
 
     /// Streams a file (or range) into an [`AsyncWrite`]; returns the range info and bytes written.
-    pub async fn store_get_to_writer<W>(&self, file_id: &str, range: Option<ByteRange>, w: &mut W) -> Result<(RangeInfo, u64)>
+    pub async fn store_get_to_writer<W>(
+        &self,
+        file_id: &str,
+        range: Option<ByteRange>,
+        w: &mut W,
+    ) -> Result<(RangeInfo, u64)>
     where
         W: AsyncWrite + Unpin,
     {
@@ -389,7 +489,10 @@ impl Client {
         w.flush().await?;
         if let Some(len) = info.length {
             if len != n {
-                return Err(Error::InvalidResponse(format!("truncated body ({} of {} bytes)", n, len)));
+                return Err(Error::InvalidResponse(format!(
+                    "truncated body ({} of {} bytes)",
+                    n, len
+                )));
             }
         }
         Ok((info, n))
@@ -397,12 +500,22 @@ impl Client {
 
     /// `HEAD /store/files/:id`.
     pub async fn store_head(&self, file_id: &str) -> Result<HeadResult> {
-        let resp = self.idempotent(Method::HEAD, &file_path(file_id)?, HeaderMap::new()).await?;
+        let resp = self
+            .idempotent(Method::HEAD, &file_path(file_id)?, HeaderMap::new())
+            .await?;
         let h = resp.headers();
-        let size = h.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let size = h
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         let accept_ranges = header_str(h, "accept-ranges").map(str::to_owned);
         let etag = header_str(h, "etag").map(str::to_owned);
-        Ok(HeadResult { size, accept_ranges, etag })
+        Ok(HeadResult {
+            size,
+            accept_ranges,
+            etag,
+        })
     }
 
     /// `true` when HEAD succeeds, `false` on 404.
@@ -416,20 +529,31 @@ impl Client {
 
     /// `DELETE /store/files/:id` (unpin once; never retried). 404 once the file is no longer stored.
     pub async fn store_delete(&self, file_id: &str) -> Result<DeleteResult> {
-        let resp = self.request(Method::DELETE, &file_path(file_id)?, HeaderMap::new()).send().await?;
+        let resp = self
+            .request(Method::DELETE, &file_path(file_id)?, HeaderMap::new())
+            .send()
+            .await?;
         Self::json(Self::check(resp, false).await?).await
     }
 
     /// `GET /store/stats`. 503 ([`ErrorKind::Server`]) when the object store is disabled.
     pub async fn store_stats(&self) -> Result<StoreStats> {
-        Self::json(self.idempotent(Method::GET, "/store/stats", HeaderMap::new()).await?).await
+        Self::json(
+            self.idempotent(Method::GET, "/store/stats", HeaderMap::new())
+                .await?,
+        )
+        .await
     }
 
     /// `GET /cluster/status`: node config, per-peer health, sampled holders, top demand and
     /// data-gravity metrics. 503 ([`ErrorKind::Server`]) when data gravity is disabled (no store or no
     /// `REACTOR_CLUSTER_TOKEN`).
     pub async fn cluster_status(&self) -> Result<ClusterStatus> {
-        Self::json(self.idempotent(Method::GET, "/cluster/status", HeaderMap::new()).await?).await
+        Self::json(
+            self.idempotent(Method::GET, "/cluster/status", HeaderMap::new())
+                .await?,
+        )
+        .await
     }
 }
 
@@ -445,15 +569,22 @@ pub struct ClusterAdmin {
 
 impl ClusterAdmin {
     pub fn new(base_url: impl Into<String>, cluster_token: &str) -> Result<ClusterAdmin> {
-        Self::from_builder(Client::builder(base_url).timeout(Duration::from_secs(30)), cluster_token)
+        Self::from_builder(
+            Client::builder(base_url).timeout(Duration::from_secs(30)),
+            cluster_token,
+        )
     }
 
     /// Uses the builder's transport settings; any `x-reactor-token` set on it is dropped.
     pub fn from_builder(builder: ClientBuilder, cluster_token: &str) -> Result<ClusterAdmin> {
         let mut builder = builder;
         builder.token = None;
-        let token = HeaderValue::from_str(cluster_token).map_err(|e| Error::InvalidArgument(format!("cluster token: {}", e)))?;
-        Ok(ClusterAdmin { inner: builder.build()?, token })
+        let token = HeaderValue::from_str(cluster_token)
+            .map_err(|e| Error::InvalidArgument(format!("cluster token: {}", e)))?;
+        Ok(ClusterAdmin {
+            inner: builder.build()?,
+            token,
+        })
     }
 
     fn headers(&self) -> HeaderMap {
@@ -471,21 +602,44 @@ impl ClusterAdmin {
         if let Some(t) = tsince {
             q.push(format!("tsince={}", t));
         }
-        let path = if q.is_empty() { "/cluster/inventory".to_owned() } else { format!("/cluster/inventory?{}", q.join("&")) };
-        Client::json(self.inner.idempotent(Method::GET, &path, self.headers()).await?).await
+        let path = if q.is_empty() {
+            "/cluster/inventory".to_owned()
+        } else {
+            format!("/cluster/inventory?{}", q.join("&"))
+        };
+        Client::json(
+            self.inner
+                .idempotent(Method::GET, &path, self.headers())
+                .await?,
+        )
+        .await
     }
 
     /// `POST /cluster/hold/:id?node=..`: asks the node to lease (not drop) its replica; with
     /// `origin` also to take over origin and `pins` pins. Never retried.
-    pub async fn hold(&self, file_id: &str, node: &str, origin: bool, pins: u64) -> Result<HoldResult> {
+    pub async fn hold(
+        &self,
+        file_id: &str,
+        node: &str,
+        origin: bool,
+        pins: u64,
+    ) -> Result<HoldResult> {
         if node.is_empty() || !node.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return Err(Error::InvalidArgument(format!("node id must be alphanumeric: {:?}", node)));
+            return Err(Error::InvalidArgument(format!(
+                "node id must be alphanumeric: {:?}",
+                node
+            )));
         }
         let mut path = format!("/cluster/hold/{}?node={}", id_segment(file_id)?, node);
         if origin {
             path.push_str(&format!("&origin=1&pins={}", pins));
         }
-        let resp = self.inner.request(Method::POST, &path, self.headers()).header(CONTENT_LENGTH, 0).send().await?;
+        let resp = self
+            .inner
+            .request(Method::POST, &path, self.headers())
+            .header(CONTENT_LENGTH, 0)
+            .send()
+            .await?;
         Client::json(Client::check(resp, false).await?).await
     }
 }
@@ -504,7 +658,11 @@ fn hints(o: &UploadOptions) -> HeaderMap {
 }
 
 fn id_segment(id: &str) -> Result<&str> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err(Error::InvalidArgument(format!("invalid file id {:?}", id)));
     }
     Ok(id)
@@ -521,12 +679,20 @@ fn header_str<'a>(h: &'a HeaderMap, k: &str) -> Option<&'a str> {
 fn compress_meta(h: &HeaderMap) -> CompressMeta {
     let num = |k: &str| header_str(h, k).and_then(|v| v.trim_end_matches('x').parse::<f64>().ok());
     CompressMeta {
-        content_class: header_str(h, "x-reactor-class").unwrap_or_default().to_owned(),
-        recipe: header_str(h, "x-reactor-recipe").and_then(|v| serde_json::from_str::<Option<Recipe>>(v).ok()).flatten(),
-        format: header_str(h, "x-reactor-format").unwrap_or_default().to_owned(),
+        content_class: header_str(h, "x-reactor-class")
+            .unwrap_or_default()
+            .to_owned(),
+        recipe: header_str(h, "x-reactor-recipe")
+            .and_then(|v| serde_json::from_str::<Option<Recipe>>(v).ok())
+            .flatten(),
+        format: header_str(h, "x-reactor-format")
+            .unwrap_or_default()
+            .to_owned(),
         original_size: num("x-original-size").unwrap_or(0.0) as u64,
         compressed_size: num("x-compressed-size").unwrap_or(0.0) as u64,
-        algo: header_str(h, "x-datran-algo").unwrap_or_default().to_owned(),
+        algo: header_str(h, "x-datran-algo")
+            .unwrap_or_default()
+            .to_owned(),
         ratio: num("x-datran-ratio").unwrap_or(0.0),
         time_us: num("x-datran-time-us").unwrap_or(0.0) as u64,
         entropy: num("x-datran-entropy").unwrap_or(0.0),
@@ -540,9 +706,16 @@ fn range_info(resp: &Response) -> Result<RangeInfo> {
     let etag = header_str(h, "etag").map(str::to_owned);
     if resp.status() == StatusCode::PARTIAL_CONTENT {
         if let Some(cr) = header_str(h, "content-range") {
-            let (start, end, total) =
-                parse_content_range(cr).ok_or_else(|| Error::InvalidResponse(format!("bad Content-Range {:?}", cr)))?;
-            return Ok(RangeInfo { status: 206, start, end: Some(end), total, length, etag });
+            let (start, end, total) = parse_content_range(cr)
+                .ok_or_else(|| Error::InvalidResponse(format!("bad Content-Range {:?}", cr)))?;
+            return Ok(RangeInfo {
+                status: 206,
+                start,
+                end: Some(end),
+                total,
+                length,
+                etag,
+            });
         }
     }
     Ok(RangeInfo {
@@ -566,18 +739,28 @@ mod tests {
         assert_eq!(ByteRange::Suffix(5).header_value().unwrap(), "bytes=-5");
         assert!(ByteRange::Span(5, 1).header_value().is_err());
         assert!(ByteRange::Suffix(0).header_value().is_err());
-        assert_eq!(parse_content_range("bytes 0-99/1000"), Some((0, 99, Some(1000))));
+        assert_eq!(
+            parse_content_range("bytes 0-99/1000"),
+            Some((0, 99, Some(1000)))
+        );
         assert_eq!(parse_content_range("bytes 5-6/*"), Some((5, 6, None)));
         assert_eq!(parse_content_range("nope"), None);
     }
 
     #[test]
     fn api_error_parsing() {
-        let e = ApiError::new(401, Bytes::from_static(br#"{"error":"missing or invalid x-reactor-token"}"#), None);
+        let e = ApiError::new(
+            401,
+            Bytes::from_static(br#"{"error":"missing or invalid x-reactor-token"}"#),
+            None,
+        );
         assert_eq!(e.kind, ErrorKind::Unauthorized);
         assert_eq!(e.message, "missing or invalid x-reactor-token");
         let d = format!(r#"{{"error":"x","unknown_dict":"{}"}}"#, "0".repeat(64));
-        assert_eq!(ApiError::new(400, Bytes::from(d), None).unknown_dict(), Some("0".repeat(64)));
+        assert_eq!(
+            ApiError::new(400, Bytes::from(d), None).unknown_dict(),
+            Some("0".repeat(64))
+        );
         let r = ApiError::new(416, Bytes::new(), Some("bytes */1234".into()));
         assert_eq!(r.kind, ErrorKind::RangeNotSatisfiable);
         assert_eq!(r.range_total(), Some(1234));
@@ -613,10 +796,16 @@ mod tests {
         assert_eq!(s.group_commit.unwrap().jobs, 5);
         assert_eq!(s.cluster.unwrap().unpins_forwarded, 23);
         assert_eq!(s.packs.unwrap()["files"], 1);
-        let d: DeleteResult = serde_json::from_str(r#"{"file_id":"ab","pins":0,"deleted":true,"forwarded_to":"n1"}"#).unwrap();
+        let d: DeleteResult =
+            serde_json::from_str(r#"{"file_id":"ab","pins":0,"deleted":true,"forwarded_to":"n1"}"#)
+                .unwrap();
         assert_eq!(d.forwarded_to.as_deref(), Some("n1"));
         assert!(serde_json::from_str::<DeleteResult>(r#"{"file_id":"ab","pins":1}"#).is_err());
-        let e = ApiError::new(507, Bytes::from_static(br#"{"error":"store full","needed":10,"used":90,"max":95}"#), None);
+        let e = ApiError::new(
+            507,
+            Bytes::from_static(br#"{"error":"store full","needed":10,"used":90,"max":95}"#),
+            None,
+        );
         assert_eq!(e.message, "store full");
         let f = e.store_full().unwrap();
         assert_eq!((f.needed, f.used, f.max), (10, 90, 95));
@@ -627,7 +816,12 @@ mod tests {
             remote_read_bytes remote_objects_fetched remote_fetch_bytes remote_fetch_failures cache_hits cache_bytes \
             cache_objects tombstones_applied quarantine_repairs quarantine_repair_failures leases_granted \
             leases_refused leases_active evictions_confirmed unpins_forwarded";
-        serde_json::Value::Object(keys.split_whitespace().enumerate().map(|(i, k)| (k.to_owned(), (i as u64 + 1).into())).collect())
+        serde_json::Value::Object(
+            keys.split_whitespace()
+                .enumerate()
+                .map(|(i, k)| (k.to_owned(), (i as u64 + 1).into()))
+                .collect(),
+        )
     }
 
     #[test]
@@ -652,7 +846,10 @@ mod tests {
             "metrics": metrics_json(),
         });
         let s: ClusterStatus = serde_json::from_value(j.clone()).unwrap();
-        assert_eq!((s.cluster_size, s.capacity, s.used, s.region.as_deref()), (2, None, Some(123), None));
+        assert_eq!(
+            (s.cluster_size, s.capacity, s.used, s.region.as_deref()),
+            (2, None, Some(123), None)
+        );
         let p = s.peer(&b).unwrap();
         assert!(p.healthy && !p.is_self && p.files == 1);
         assert_eq!(s.peers[1].node_id, None);
@@ -668,7 +865,15 @@ mod tests {
             "demand": [{"file_id": f, "score": 2}], "now_ms": 1700000000000u64
         }))
         .unwrap();
-        assert_eq!((inv.version, inv.full, inv.more, inv.tombstones[0].deleted_ms), (7, true, false, 5));
+        assert_eq!(
+            (
+                inv.version,
+                inv.full,
+                inv.more,
+                inv.tombstones[0].deleted_ms
+            ),
+            (7, true, false, 5)
+        );
         let h: HoldResult = serde_json::from_str(
             r#"{"file_id":"ab","node_id":"n","granted":false,"expires_ms":0,"lease_ms":600000,"origin_accepted":false,"reason":"not held"}"#,
         )

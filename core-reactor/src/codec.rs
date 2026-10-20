@@ -34,8 +34,14 @@ pub enum Codec {
 }
 
 impl Codec {
-    pub const ALL: [Codec; 6] =
-        [Codec::Raw, Codec::Lz4, Codec::Deflate, Codec::Zstd, Codec::Brotli, Codec::Procedural];
+    pub const ALL: [Codec; 6] = [
+        Codec::Raw,
+        Codec::Lz4,
+        Codec::Deflate,
+        Codec::Zstd,
+        Codec::Brotli,
+        Codec::Procedural,
+    ];
 
     pub fn id(self) -> u8 {
         match self {
@@ -305,12 +311,16 @@ pub fn parse_header(blob: &[u8], limit: usize) -> Result<Header, DecodeError> {
     if blob[1] != FORMAT_VERSION {
         return Err(invalid(format!("unknown v2 format version {}", blob[1])));
     }
-    let codec = Codec::from_id(blob[2]).ok_or_else(|| invalid(format!("unknown codec {}", blob[2])))?;
+    let codec =
+        Codec::from_id(blob[2]).ok_or_else(|| invalid(format!("unknown codec {}", blob[2])))?;
     let filter =
         Filter::from_id(blob[3]).ok_or_else(|| invalid(format!("unknown filter {}", blob[3])))?;
     let stride = blob[4];
     if !valid_filter_stride(filter, stride) {
-        return Err(invalid(format!("invalid stride {} for filter {:?}", stride, filter)));
+        return Err(invalid(format!(
+            "invalid stride {} for filter {:?}",
+            stride, filter
+        )));
     }
     let mut len8 = [0u8; 8];
     len8.copy_from_slice(&blob[5..13]);
@@ -326,12 +336,26 @@ pub fn parse_header(blob: &[u8], limit: usize) -> Result<Header, DecodeError> {
     id.copy_from_slice(&blob[17..49]);
     let dict = if id == NO_DICT { None } else { Some(id) };
     if dict.is_some() && codec != Codec::Zstd {
-        return Err(invalid(format!("dictionary set on non-zstd codec {}", codec.name())));
+        return Err(invalid(format!(
+            "dictionary set on non-zstd codec {}",
+            codec.name()
+        )));
     }
-    Ok(Header { codec, filter, stride, original_len, crc, dict })
+    Ok(Header {
+        codec,
+        filter,
+        stride,
+        original_len,
+        crc,
+        dict,
+    })
 }
 
-fn read_capped<R: Read>(reader: &mut R, expected: usize, what: &str) -> Result<Vec<u8>, DecodeError> {
+fn read_capped<R: Read>(
+    reader: &mut R,
+    expected: usize,
+    what: &str,
+) -> Result<Vec<u8>, DecodeError> {
     let mut out = Vec::with_capacity(expected.min(16 << 20));
     reader
         .take(expected as u64 + 1)
@@ -344,7 +368,11 @@ fn no_trailing(rest: &[u8], what: &str) -> Result<(), DecodeError> {
     if rest.is_empty() {
         Ok(())
     } else {
-        Err(invalid(format!("{} stream followed by {} trailing bytes", what, rest.len())))
+        Err(invalid(format!(
+            "{} stream followed by {} trailing bytes",
+            what,
+            rest.len()
+        )))
     }
 }
 
@@ -352,7 +380,11 @@ fn no_trailing(rest: &[u8], what: &str) -> Result<(), DecodeError> {
 fn brotli_decode(payload: &[u8], expected: usize) -> Result<Vec<u8>, DecodeError> {
     use brotli::enc::StandardAlloc;
     use brotli::{BrotliDecompressStream, BrotliResult, BrotliState};
-    let mut state = BrotliState::new(StandardAlloc::default(), StandardAlloc::default(), StandardAlloc::default());
+    let mut state = BrotliState::new(
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+        StandardAlloc::default(),
+    );
     let mut out = Vec::with_capacity(expected.min(16 << 20));
     let mut buf = vec![0u8; 64 * 1024];
     let (mut avail_in, mut in_off, mut total) = (payload.len(), 0usize, 0usize);
@@ -406,7 +438,11 @@ pub fn decode_v2(
             payload.to_vec()
         }
         Codec::Lz4 => {
-            if n > payload.len().saturating_mul(LZ4_MAX_RATIO).saturating_add(16) {
+            if n > payload
+                .len()
+                .saturating_mul(LZ4_MAX_RATIO)
+                .saturating_add(16)
+            {
                 return Err(invalid("lz4 original length impossible for payload length"));
             }
             let mut buf = vec![0u8; n];
@@ -421,7 +457,11 @@ pub fn decode_v2(
             if out.len() == n {
                 // make sure the stream (incl. Adler-32 trailer) really ended, then check for trailing bytes
                 let mut probe = [0u8; 1];
-                if dec.read(&mut probe).map_err(|e| invalid(format!("deflate decode failed: {}", e)))? != 0 {
+                if dec
+                    .read(&mut probe)
+                    .map_err(|e| invalid(format!("deflate decode failed: {}", e)))?
+                    != 0
+                {
                     return Err(invalid("deflate output exceeds original length"));
                 }
                 no_trailing(dec.into_inner(), "deflate")?;
@@ -439,7 +479,8 @@ pub fn decode_v2(
                 .single_frame();
             let out = read_capped(&mut dec, n, "zstd")?;
             if out.len() == n {
-                dec.finish_frame().map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
+                dec.finish_frame()
+                    .map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
                 no_trailing(dec.into_inner(), "zstd")?;
             }
             out
@@ -458,7 +499,10 @@ pub fn decode_v2(
     let out = unapply_filter(h.filter, h.stride, decoded);
     let crc = crc32(&out);
     if crc != h.crc {
-        return Err(invalid(format!("CRC mismatch: header {:08x}, data {:08x}", h.crc, crc)));
+        return Err(invalid(format!(
+            "CRC mismatch: header {:08x}, data {:08x}",
+            h.crc, crc
+        )));
     }
     Ok(out)
 }
@@ -469,10 +513,18 @@ pub fn decode_v2(
 /// as they come out (no output allocation of the full size, no CRC pass: the byte comparison is
 /// strictly stronger); everything else goes through [`decode_v2`] + comparison. The frame must
 /// end exactly at the end of the blob either way.
-pub fn verify_v2(blob: &[u8], data: &[u8], dict_lookup: &dyn Fn(&DictId) -> Option<Arc<Vec<u8>>>) -> Result<(), DecodeError> {
+pub fn verify_v2(
+    blob: &[u8],
+    data: &[u8],
+    dict_lookup: &dyn Fn(&DictId) -> Option<Arc<Vec<u8>>>,
+) -> Result<(), DecodeError> {
     let h = parse_header(blob, usize::MAX)?;
     if h.original_len != data.len() as u64 {
-        return Err(invalid(format!("header length {} != input length {}", h.original_len, data.len())));
+        return Err(invalid(format!(
+            "header length {} != input length {}",
+            h.original_len,
+            data.len()
+        )));
     }
     if h.codec != Codec::Zstd || h.filter != Filter::None {
         return match decode_v2(blob, data.len(), dict_lookup)? {
@@ -491,7 +543,9 @@ pub fn verify_v2(blob: &[u8], data: &[u8], dict_lookup: &dyn Fn(&DictId) -> Opti
     let mut buf = vec![0u8; (1 << 20).min(data.len().max(1))];
     let mut pos = 0usize;
     loop {
-        let n = dec.read(&mut buf).map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
+        let n = dec
+            .read(&mut buf)
+            .map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
         if n == 0 {
             break;
         }
@@ -501,9 +555,14 @@ pub fn verify_v2(blob: &[u8], data: &[u8], dict_lookup: &dyn Fn(&DictId) -> Opti
         pos += n;
     }
     if pos != data.len() {
-        return Err(invalid(format!("decoded length {} != original length {}", pos, data.len())));
+        return Err(invalid(format!(
+            "decoded length {} != original length {}",
+            pos,
+            data.len()
+        )));
     }
-    dec.finish_frame().map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
+    dec.finish_frame()
+        .map_err(|e| invalid(format!("zstd decode failed: {}", e)))?;
     no_trailing(dec.into_inner(), "zstd")
 }
 
@@ -561,7 +620,13 @@ impl Write for Tee<'_> {
 /// the end of the output (same guarantee as encode + [`verify_v2`], wall time ≈ the slower of the
 /// two instead of their sum). The frame is one standard zstd frame with the content size, like
 /// [`encode_with_workers`].
-pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option<(&DictId, &[u8])>, data: &[u8], workers: u32) -> Result<Vec<u8>, String> {
+pub fn encode_zstd_mt_verified(
+    level: i32,
+    window_log: Option<u32>,
+    dict: Option<(&DictId, &[u8])>,
+    data: &[u8],
+    workers: u32,
+) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(HEADER_LEN + data.len() / 3 + 64);
     out.push(FLAG_RECIPE);
     out.push(FORMAT_VERSION);
@@ -575,12 +640,23 @@ pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
     std::thread::scope(|s| {
         let verifier = s.spawn(move || -> Result<(), String> {
-            let reader = std::io::BufReader::with_capacity(1 << 16, SegmentReader { rx, cur: Vec::new(), pos: 0 });
-            let mut dec = zstd::stream::read::Decoder::with_dictionary(reader, dict_bytes).map_err(|e| format!("zstd init: {}", e))?.single_frame();
+            let reader = std::io::BufReader::with_capacity(
+                1 << 16,
+                SegmentReader {
+                    rx,
+                    cur: Vec::new(),
+                    pos: 0,
+                },
+            );
+            let mut dec = zstd::stream::read::Decoder::with_dictionary(reader, dict_bytes)
+                .map_err(|e| format!("zstd init: {}", e))?
+                .single_frame();
             let mut buf = vec![0u8; 1 << 20];
             let mut pos = 0usize;
             loop {
-                let n = dec.read(&mut buf).map_err(|e| format!("round-trip failed: zstd decode: {}", e))?;
+                let n = dec
+                    .read(&mut buf)
+                    .map_err(|e| format!("round-trip failed: zstd decode: {}", e))?;
                 if n == 0 {
                     break;
                 }
@@ -590,9 +666,14 @@ pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option
                 pos += n;
             }
             if pos != data.len() {
-                return Err(format!("round-trip failed: decoded {} of {} bytes", pos, data.len()));
+                return Err(format!(
+                    "round-trip failed: decoded {} of {} bytes",
+                    pos,
+                    data.len()
+                ));
             }
-            dec.finish_frame().map_err(|e| format!("round-trip failed: {}", e))?;
+            dec.finish_frame()
+                .map_err(|e| format!("round-trip failed: {}", e))?;
             let mut rest = dec.finish();
             let mut probe = [0u8; 1];
             if rest.read(&mut probe).map_err(|e| e.to_string())? != 0 {
@@ -601,7 +682,10 @@ pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option
             Ok(())
         });
         let encoded = (|| -> std::io::Result<()> {
-            let tee = Tee { out: &mut out, tx: Some(tx) };
+            let tee = Tee {
+                out: &mut out,
+                tx: Some(tx),
+            };
             let mut enc = zstd::stream::write::Encoder::with_dictionary(tee, level, dict_bytes)?;
             enc.include_contentsize(true)?;
             enc.set_pledged_src_size(Some(data.len() as u64))?;
@@ -620,7 +704,9 @@ pub fn encode_zstd_mt_verified(level: i32, window_log: Option<u32>, dict: Option
             drop(tee); // closes the channel: the verifier sees the end of the stream
             Ok(())
         })();
-        let verified = verifier.join().map_err(|_| "verifier panicked".to_string())?;
+        let verified = verifier
+            .join()
+            .map_err(|_| "verifier panicked".to_string())?;
         encoded.map_err(|e| format!("zstd: {}", e))?;
         verified
     })?;
@@ -672,7 +758,10 @@ mod tests {
     #[test]
     fn filter_definitions_match_spec() {
         let d = [10u8, 20, 5, 1, 7];
-        assert_eq!(apply_filter(Filter::Delta, 2, &d), vec![10, 20, 251, 237, 2]);
+        assert_eq!(
+            apply_filter(Filter::Delta, 2, &d),
+            vec![10, 20, 251, 237, 2]
+        );
         // m = 5/2 = 2: plane0 = in[0], in[2]; plane1 = in[1], in[3]; tail in[4]
         assert_eq!(apply_filter(Filter::Shuffle, 2, &d), vec![10, 5, 20, 1, 7]);
     }

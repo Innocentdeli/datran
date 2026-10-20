@@ -78,7 +78,9 @@ fn hint_is_media(hint: &str) -> bool {
 fn looks_like_text(d: &[u8]) -> bool {
     let printable = d
         .iter()
-        .filter(|&&b| b == b'\t' || b == b'\n' || b == b'\r' || (0x20..0x7f).contains(&b) || b >= 0x80)
+        .filter(|&&b| {
+            b == b'\t' || b == b'\n' || b == b'\r' || (0x20..0x7f).contains(&b) || b >= 0x80
+        })
         .count();
     if (printable as f64) < 0.97 * d.len() as f64 {
         return false;
@@ -98,7 +100,11 @@ fn looks_like_csv(d: &[u8]) -> bool {
     }
     for sep in [',', '\t', ';'] {
         let first = lines[0].matches(sep).count();
-        if first >= 1 && lines[..lines.len() - 1].iter().all(|l| l.matches(sep).count() == first) {
+        if first >= 1
+            && lines[..lines.len() - 1]
+                .iter()
+                .all(|l| l.matches(sep).count() == first)
+        {
             return true;
         }
     }
@@ -131,7 +137,13 @@ pub fn classify(data: &[u8], mime_hint: Option<&str>) -> &'static str {
         return EMPTY;
     }
     let hint = mime_hint
-        .map(|h| h.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .map(|h| {
+            h.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
         .unwrap_or_default();
     let prefix = &data[..data.len().min(SNIFF_BYTES)];
 
@@ -139,7 +151,11 @@ pub fn classify(data: &[u8], mime_hint: Option<&str>) -> &'static str {
         return MEDIA_COMPRESSED;
     }
     if looks_like_text(prefix) {
-        let first = prefix.iter().copied().find(|b| !b.is_ascii_whitespace()).unwrap_or(b' ');
+        let first = prefix
+            .iter()
+            .copied()
+            .find(|b| !b.is_ascii_whitespace())
+            .unwrap_or(b' ');
         if hint.contains("json") || first == b'{' || first == b'[' {
             return TEXT_JSON;
         }
@@ -169,7 +185,9 @@ mod tests {
         let mut s = seed;
         (0..n)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (s >> 33) as u8
             })
             .collect()
@@ -180,10 +198,16 @@ mod tests {
         assert_eq!(classify(b"", None), EMPTY);
         assert_eq!(classify(b"{\"a\": 1, \"b\": [1,2,3]}", None), TEXT_JSON);
         assert_eq!(classify(b"  [1,2]", None), TEXT_JSON);
-        assert_eq!(classify(b"key=value", Some("application/json; charset=utf-8")), TEXT_JSON);
+        assert_eq!(
+            classify(b"key=value", Some("application/json; charset=utf-8")),
+            TEXT_JSON
+        );
         assert_eq!(classify(b"<html><body>hi</body></html>", None), TEXT_MARKUP);
         assert_eq!(classify(b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n", None), TEXT_CSV);
-        assert_eq!(classify("hello world, plain text h\u{e9}r\u{e9}\n".as_bytes(), None), TEXT_PLAIN);
+        assert_eq!(
+            classify("hello world, plain text h\u{e9}r\u{e9}\n".as_bytes(), None),
+            TEXT_PLAIN
+        );
         assert_eq!(classify(&lcg(100_000, 1), None), MEDIA_COMPRESSED);
         let mut gz = vec![0x1f, 0x8b];
         gz.extend_from_slice(b"hello");

@@ -7,11 +7,16 @@ use common::*;
 use core_reactor::codec::{self, Codec, DictId, EncodeParams, Filter, HEADER_LEN};
 use core_reactor::evolution::Engine;
 use core_reactor::recipe::Recipe;
-use core_reactor::store::{sha256, PutOptions, PutOutcome, Store, StoreConfig, StoreError, CDC_MAX};
+use core_reactor::store::{
+    sha256, PutOptions, PutOutcome, Store, StoreConfig, StoreError, CDC_MAX,
+};
 use std::sync::Arc;
 
 fn opts() -> PutOptions {
-    PutOptions { content_type: None, sample: false }
+    PutOptions {
+        content_type: None,
+        sample: false,
+    }
 }
 
 struct Env {
@@ -34,7 +39,11 @@ impl Env {
         if let Some(t) = pack_threshold {
             cfg.pack_threshold = t;
         }
-        Env { _dir: dir, cfg, engine }
+        Env {
+            _dir: dir,
+            cfg,
+            engine,
+        }
     }
     fn open(&self) -> Store {
         Store::open(self.cfg.clone(), self.engine.clone()).unwrap()
@@ -86,7 +95,10 @@ fn corpora() -> Vec<(&'static str, Vec<u8>)> {
 /// Everything observable about a stored upload except timestamps.
 fn snapshot(s: &Store, o: &PutOutcome) -> String {
     let (meta, refs) = s.chunk_refs(&o.file_id).unwrap().unwrap();
-    let mut out = format!("{} {} {} {}\n", meta.size, meta.chunks, meta.class, meta.pins);
+    let mut out = format!(
+        "{} {} {} {}\n",
+        meta.size, meta.chunks, meta.class, meta.pins
+    );
     for r in refs {
         let om = s.object_meta(&r.object_id).unwrap().unwrap();
         out.push_str(&format!(
@@ -103,7 +115,11 @@ fn snapshot(s: &Store, o: &PutOutcome) -> String {
     out
 }
 
-fn run_corpus(threads: usize, cap: u64, pack_threshold: Option<usize>) -> (Vec<PutOutcome>, Vec<String>, String) {
+fn run_corpus(
+    threads: usize,
+    cap: u64,
+    pack_threshold: Option<usize>,
+) -> (Vec<PutOutcome>, Vec<String>, String) {
     let env = Env::new(threads, cap, pack_threshold);
     let s = env.open();
     let mut outs = Vec::new();
@@ -112,7 +128,11 @@ fn run_corpus(threads: usize, cap: u64, pack_threshold: Option<usize>) -> (Vec<P
     // prefix (partial dedup)
     for round in 0..3 {
         for (name, d) in corpora() {
-            let data = if round == 2 { [b"prefix-".as_slice(), &d].concat() } else { d.clone() };
+            let data = if round == 2 {
+                [b"prefix-".as_slice(), &d].concat()
+            } else {
+                d.clone()
+            };
             let o = s.put_bytes(&data, &opts()).unwrap();
             assert_eq!(o.file_id, sha256(&data), "{}", name);
             assert_eq!(s.read_to_vec(&o.file_id, None).unwrap(), data, "{}", name);
@@ -124,12 +144,24 @@ fn run_corpus(threads: usize, cap: u64, pack_threshold: Option<usize>) -> (Vec<P
     let st = s.stats().unwrap();
     let totals = format!(
         "{} {} {} {} {} {}",
-        st["files"], st["objects"], st["physical_bytes"], st["live_physical_bytes"], st["unique_bytes"], st["packs"]["packed_objects"]
+        st["files"],
+        st["objects"],
+        st["physical_bytes"],
+        st["live_physical_bytes"],
+        st["unique_bytes"],
+        st["packs"]["packed_objects"]
     );
     if threads > 1 {
-        assert!(stat(&s, &["ingest", "pool_chunks"]) > 0.0, "parallel path used");
+        assert!(
+            stat(&s, &["ingest", "pool_chunks"]) > 0.0,
+            "parallel path used"
+        );
     } else {
-        assert_eq!(stat(&s, &["ingest", "pool_chunks"]), 0.0, "sequential path used");
+        assert_eq!(
+            stat(&s, &["ingest", "pool_chunks"]),
+            0.0,
+            "sequential path used"
+        );
     }
     drop(s);
     drop(env);
@@ -144,14 +176,30 @@ fn parallel_ingest_is_identical_to_sequential() {
             let (par, par_snaps, par_tot) = run_corpus(threads, cap, packs);
             assert_eq!(seq.len(), par.len());
             for (i, (a, b)) in seq.iter().zip(&par).enumerate() {
-                assert_eq!(a, b, "PutOutcome #{} (threads {}, cap {}, packs {:?})", i, threads, cap, packs);
+                assert_eq!(
+                    a, b,
+                    "PutOutcome #{} (threads {}, cap {}, packs {:?})",
+                    i, threads, cap, packs
+                );
             }
-            assert_eq!(seq_snaps, par_snaps, "manifests / object layout (threads {}, packs {:?})", threads, packs);
-            assert_eq!(seq_tot, par_tot, "store totals (threads {}, packs {:?})", threads, packs);
+            assert_eq!(
+                seq_snaps, par_snaps,
+                "manifests / object layout (threads {}, packs {:?})",
+                threads, packs
+            );
+            assert_eq!(
+                seq_tot, par_tot,
+                "store totals (threads {}, packs {:?})",
+                threads, packs
+            );
         }
         // sanity: the duplicate-heavy corpus really deduplicated inside the file
         let dup = &seq[6];
-        assert!(dup.dedup_chunks > 0 && dup.new_chunks > 0 && !dup.duplicate, "{:?}", dup);
+        assert!(
+            dup.dedup_chunks > 0 && dup.new_chunks > 0 && !dup.duplicate,
+            "{:?}",
+            dup
+        );
     }
 }
 
@@ -170,8 +218,17 @@ fn inflight_bytes_are_bounded() {
         let peak = stat(&s, &["ingest", "inflight_peak_bytes"]) as u64;
         println!("cap {} peak {}", cap, peak);
         assert!(peak > 0, "pipeline used");
-        assert!(peak <= cap.max(CDC_MAX as u64), "peak {} exceeds cap {}", peak, cap);
-        assert_eq!(stat(&s, &["inflight_bytes"]), 0.0, "admission accounting released");
+        assert!(
+            peak <= cap.max(CDC_MAX as u64),
+            "peak {} exceeds cap {}",
+            peak,
+            cap
+        );
+        assert_eq!(
+            stat(&s, &["inflight_bytes"]),
+            0.0,
+            "admission accounting released"
+        );
         assert_consistent(&s);
     }
 }
@@ -204,10 +261,23 @@ fn concurrent_large_uploads_share_the_pool() {
     // inside each upload the second copy of `shared` is pure dedup; across racing uploads a chunk
     // may be staged by several writers (the index keeps one), exactly as with sequential ingest
     let new_total: u64 = results.iter().map(|r| r.0.new_chunks).sum();
-    let unique: std::collections::HashSet<_> =
-        results.iter().flat_map(|r| s.get_manifest(&r.0.file_id).unwrap().unwrap().chunks.into_iter().map(|c| c.id)).collect();
+    let unique: std::collections::HashSet<_> = results
+        .iter()
+        .flat_map(|r| {
+            s.get_manifest(&r.0.file_id)
+                .unwrap()
+                .unwrap()
+                .chunks
+                .into_iter()
+                .map(|c| c.id)
+        })
+        .collect();
     assert!(new_total >= unique.len() as u64);
-    assert_eq!(stat(&s, &["chunks"]), unique.len() as f64, "each chunk indexed once");
+    assert_eq!(
+        stat(&s, &["chunks"]),
+        unique.len() as f64,
+        "each chunk indexed once"
+    );
     for (o, _) in &results {
         assert!(o.dedup_chunks > 0, "{:?}", o);
     }
@@ -226,7 +296,12 @@ fn admission_failure_mid_upload_stops_the_pipeline() {
         let s = env.open();
         let data = random_bytes(12 << 20, 9);
         let err = s.put_bytes(&data, &opts()).unwrap_err();
-        assert!(matches!(err, StoreError::Full { .. }), "threads {}: {}", threads, err);
+        assert!(
+            matches!(err, StoreError::Full { .. }),
+            "threads {}: {}",
+            threads,
+            err
+        );
         assert_eq!(stat(&s, &["inflight_bytes"]), 0.0, "threads {}", threads);
         assert!(s.file_meta(&sha256(&data)).unwrap().is_none());
         assert_consistent(&s);
@@ -261,7 +336,12 @@ fn crash_injection_with_parallel_ingest() {
         data.extend_from_slice(&keep[..300_000]);
         crash_at(&s, point);
         let err = s.put_bytes(&data, &opts()).unwrap_err();
-        assert!(matches!(err, StoreError::Injected(p) if p == point), "{}: {}", point, err);
+        assert!(
+            matches!(err, StoreError::Injected(p) if p == point),
+            "{}: {}",
+            point,
+            err
+        );
         drop(s);
         let s = env.open();
         assert_consistent(&s);
@@ -290,13 +370,25 @@ fn assert_single_frame(blob: &[u8], len: usize) {
     let payload = &blob[HEADER_LEN..];
     let frame = zstd::zstd_safe::find_frame_compressed_size(payload).expect("valid frame");
     assert_eq!(frame, payload.len(), "exactly one zstd frame");
-    assert_eq!(zstd::zstd_safe::get_frame_content_size(payload).ok().flatten(), Some(len as u64));
+    assert_eq!(
+        zstd::zstd_safe::get_frame_content_size(payload)
+            .ok()
+            .flatten(),
+        Some(len as u64)
+    );
 }
 
 #[test]
 fn mt_zstd_emits_one_standard_frame() {
     let data = text(24 << 20, 77);
-    let base = EncodeParams { codec: Codec::Zstd, level: 3, window_log: None, filter: Filter::None, stride: 0, dict: None };
+    let base = EncodeParams {
+        codec: Codec::Zstd,
+        level: 3,
+        window_log: None,
+        filter: Filter::None,
+        stride: 0,
+        dict: None,
+    };
     let st = codec::encode(&base, &data).unwrap();
     let mt = codec::encode_with_workers(&base, &data, 4).unwrap();
     assert_ne!(st, mt, "multithreaded encoder engaged (zstdmt feature)");
@@ -313,18 +405,46 @@ fn mt_zstd_emits_one_standard_frame() {
     let floats = f32_sensor(4 << 20, 3);
     let dict_bytes = small_json(5).repeat(64);
     let dict_id = codec::sha256(&dict_bytes);
-    let lookup = |id: &DictId| if *id == dict_id { Some(Arc::new(dict_bytes.clone())) } else { None };
+    let lookup = |id: &DictId| {
+        if *id == dict_id {
+            Some(Arc::new(dict_bytes.clone()))
+        } else {
+            None
+        }
+    };
     for (p, d) in [
-        (EncodeParams { window_log: Some(24), filter: Filter::Shuffle, stride: 4, ..base }, &floats),
-        (EncodeParams { level: 9, dict: Some((&dict_id, &dict_bytes)), ..base }, &data),
+        (
+            EncodeParams {
+                window_log: Some(24),
+                filter: Filter::Shuffle,
+                stride: 4,
+                ..base
+            },
+            &floats,
+        ),
+        (
+            EncodeParams {
+                level: 9,
+                dict: Some((&dict_id, &dict_bytes)),
+                ..base
+            },
+            &data,
+        ),
     ] {
         let mt = codec::encode_with_workers(&p, d, 3).unwrap();
         assert_single_frame(&mt, d.len());
         assert_eq!(&codec::decode_v2(&mt, usize::MAX, &lookup).unwrap(), d);
     }
     // non-zstd codecs ignore the worker count
-    let b = EncodeParams { codec: Codec::Brotli, level: 1, ..base };
-    assert_eq!(codec::encode_with_workers(&b, &data[..1 << 20], 4).unwrap(), codec::encode(&b, &data[..1 << 20]).unwrap());
+    let b = EncodeParams {
+        codec: Codec::Brotli,
+        level: 1,
+        ..base
+    };
+    assert_eq!(
+        codec::encode_with_workers(&b, &data[..1 << 20], 4).unwrap(),
+        codec::encode(&b, &data[..1 << 20]).unwrap()
+    );
 }
 
 #[test]
@@ -336,9 +456,16 @@ fn engine_uses_mt_only_for_large_zstd_bodies() {
     c.mt_workers = 4;
     let e = Engine::new(c);
     let z = Recipe::new(Codec::Zstd, 3);
-    assert_eq!(e.mt_workers_for(&z, 1 << 20), 0, "at the threshold: single-threaded");
+    assert_eq!(
+        e.mt_workers_for(&z, 1 << 20),
+        0,
+        "at the threshold: single-threaded"
+    );
     assert_eq!(e.mt_workers_for(&z, (1 << 20) + 1), 4);
-    assert_eq!(e.mt_workers_for(&Recipe::new(Codec::Brotli, 5), 64 << 20), 0);
+    assert_eq!(
+        e.mt_workers_for(&Recipe::new(Codec::Brotli, 5), 64 << 20),
+        0
+    );
     assert_eq!(e.mt_workers_for(&Recipe::new(Codec::Lz4, 0), 64 << 20), 0);
 
     let data = text(12 << 20, 8);
@@ -346,7 +473,10 @@ fn engine_uses_mt_only_for_large_zstd_bodies() {
     let r = out.recipe.expect("v2 blob");
     assert_eq!(r.codec, Codec::Zstd, "baseline champion");
     assert_single_frame(&out.blob, data.len());
-    assert_eq!(codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(), data);
+    assert_eq!(
+        codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(),
+        data
+    );
 
     // REACTOR_OVERLAP_VERIFY: same guarantee and format, verify runs alongside the encode
     let mut c = test_config(dir.path(), 3);
@@ -356,7 +486,15 @@ fn engine_uses_mt_only_for_large_zstd_bodies() {
     c.overlap_verify = true;
     let e = Engine::new(c);
     let out = e.compress(&data, Some("text/plain"), false);
-    assert_eq!(out.recipe.expect("v2 blob").codec, Codec::Zstd, "{:?}", out.note);
+    assert_eq!(
+        out.recipe.expect("v2 blob").codec,
+        Codec::Zstd,
+        "{:?}",
+        out.note
+    );
     assert_single_frame(&out.blob, data.len());
-    assert_eq!(codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(), data);
+    assert_eq!(
+        codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(),
+        data
+    );
 }

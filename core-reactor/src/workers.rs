@@ -13,8 +13,13 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// `min(available_parallelism, REACTOR_COMPRESS_THREADS)`; unset or 0 = every core.
 pub fn configured_threads() -> usize {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    match std::env::var("REACTOR_COMPRESS_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    match std::env::var("REACTOR_COMPRESS_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
         Some(n) if n > 0 => n.min(cores),
         _ => cores,
     }
@@ -33,21 +38,26 @@ impl Pool {
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..threads {
             let rx = rx.clone();
-            let spawned = std::thread::Builder::new().name(format!("reactor-compress-{}", i)).spawn(move || loop {
-                let job = match rx.lock() {
-                    Ok(g) => g.recv(),
-                    Err(p) => p.into_inner().recv(),
-                };
-                match job {
-                    Ok(job) => job(),
-                    Err(_) => break,
-                }
-            });
+            let spawned = std::thread::Builder::new()
+                .name(format!("reactor-compress-{}", i))
+                .spawn(move || loop {
+                    let job = match rx.lock() {
+                        Ok(g) => g.recv(),
+                        Err(p) => p.into_inner().recv(),
+                    };
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break,
+                    }
+                });
             if spawned.is_err() {
                 tracing::warn!("could not spawn compression thread {}", i);
             }
         }
-        Pool { tx: Mutex::new(tx), threads }
+        Pool {
+            tx: Mutex::new(tx),
+            threads,
+        }
     }
 
     /// Queues `job`; returns it back when the pool cannot run it (the caller runs it inline).

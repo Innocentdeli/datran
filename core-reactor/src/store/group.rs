@@ -82,7 +82,11 @@ impl GroupCommit {
 fn dup_err(e: &StoreError) -> StoreError {
     match e {
         StoreError::NotFound => StoreError::NotFound,
-        StoreError::Full { needed, used, max } => StoreError::Full { needed: *needed, used: *used, max: *max },
+        StoreError::Full { needed, used, max } => StoreError::Full {
+            needed: *needed,
+            used: *used,
+            max: *max,
+        },
         StoreError::Corrupt(m) => StoreError::Corrupt(m.clone()),
         StoreError::Invalid(m) => StoreError::Invalid(m.clone()),
         StoreError::UnknownDict(d) => StoreError::UnknownDict(*d),
@@ -120,15 +124,24 @@ impl Store {
                         if left.is_zero() {
                             break;
                         }
-                        q = g.cv.wait_timeout(q, left).unwrap_or_else(|p| p.into_inner()).0;
+                        q =
+                            g.cv.wait_timeout(q, left)
+                                .unwrap_or_else(|p| p.into_inner())
+                                .0;
                     }
                 }
                 let batch = std::mem::take(&mut q.jobs);
                 drop(q);
                 let tickets: Vec<u64> = batch.iter().map(|(t, _)| *t).collect();
                 // a panic must not leave the followers waiting forever
-                let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.commit_batch(batch))).unwrap_or_else(|_| {
-                    tickets.iter().map(|t| (*t, Err(StoreError::Db("group commit panicked".into())))).collect()
+                let results = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.commit_batch(batch)
+                }))
+                .unwrap_or_else(|_| {
+                    tickets
+                        .iter()
+                        .map(|t| (*t, Err(StoreError::Db("group commit panicked".into()))))
+                        .collect()
                 });
                 q = lock(&g.q);
                 q.done.extend(results);
@@ -183,7 +196,10 @@ impl Store {
         self.group.max_batch.fetch_max(n, Ordering::Relaxed);
         crate::metrics::group_commit_batch(n);
         // held until the index transaction(s) below finished
-        let _pin = match self.append_batch(&mut batch).and_then(|pin| self.fail("pack.before_commit").map(|_| pin)) {
+        let _pin = match self
+            .append_batch(&mut batch)
+            .and_then(|pin| self.fail("pack.before_commit").map(|_| pin))
+        {
             Ok(pin) => pin,
             Err(e) => return batch.iter().map(|(t, _)| (*t, Err(dup_err(&e)))).collect(),
         };
@@ -203,9 +219,16 @@ impl Store {
             Ok(v)
         })();
         let mut results: Vec<(u64, JobResult)> = match shared {
-            Ok(v) => batch.iter().map(|(t, _)| *t).zip(v.into_iter().map(Ok)).collect(),
+            Ok(v) => batch
+                .iter()
+                .map(|(t, _)| *t)
+                .zip(v.into_iter().map(Ok))
+                .collect(),
             Err(e) if batch.len() == 1 => vec![(batch[0].0, Err(e))],
-            Err(_) => batch.iter().map(|(t, job)| (*t, super::with_write(self, |tb| apply_commit(tb, job, ts)))).collect(),
+            Err(_) => batch
+                .iter()
+                .map(|(t, job)| (*t, super::with_write(self, |tb| apply_commit(tb, job, ts))))
+                .collect(),
         };
         if let Err(e) = self.fail("write.after_commit") {
             for (_, r) in results.iter_mut() {
@@ -220,6 +243,10 @@ impl Store {
     /// `(batches, jobs, max_batch)` of the group commit since startup.
     pub fn group_commit_stats(&self) -> (u64, u64, u64) {
         let g = &self.group;
-        (g.batches.load(Ordering::Relaxed), g.jobs.load(Ordering::Relaxed), g.max_batch.load(Ordering::Relaxed))
+        (
+            g.batches.load(Ordering::Relaxed),
+            g.jobs.load(Ordering::Relaxed),
+            g.max_batch.load(Ordering::Relaxed),
+        )
     }
 }

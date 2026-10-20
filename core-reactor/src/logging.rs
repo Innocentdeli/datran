@@ -17,12 +17,24 @@ pub fn init() {
         .or_else(|| std::env::var("RUST_LOG").ok())
         .and_then(|s| EnvFilter::try_new(s).ok())
         .unwrap_or_else(|| EnvFilter::new("info"));
-    let json = std::env::var("REACTOR_LOG_FORMAT").is_ok_and(|v| v.trim().eq_ignore_ascii_case("json"));
+    let json =
+        std::env::var("REACTOR_LOG_FORMAT").is_ok_and(|v| v.trim().eq_ignore_ascii_case("json"));
     // stderr, like the eprintln! output this replaced (stdout stays free for CLI output)
     let res = if json {
-        fmt().json().with_writer(std::io::stderr).with_env_filter(filter).with_current_span(true).with_span_list(false).with_target(true).try_init()
+        fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .with_current_span(true)
+            .with_span_list(false)
+            .with_target(true)
+            .try_init()
     } else {
-        fmt().with_writer(std::io::stderr).with_env_filter(filter).with_target(true).try_init()
+        fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(filter)
+            .with_target(true)
+            .try_init()
     };
     let _ = res;
 }

@@ -60,7 +60,11 @@ pub enum CryptoError {
 impl std::fmt::Display for CryptoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CryptoError::MissingKey(id) => write!(f, "encryption key {:?} is not configured (set it in REACTOR_MASTER_KEYS)", id),
+            CryptoError::MissingKey(id) => write!(
+                f,
+                "encryption key {:?} is not configured (set it in REACTOR_MASTER_KEYS)",
+                id
+            ),
             CryptoError::Auth(m) => write!(f, "decryption failed: {}", m),
             CryptoError::Malformed(m) => write!(f, "malformed encrypted envelope: {}", m),
         }
@@ -87,7 +91,11 @@ pub fn sealed_key_id(b: &[u8]) -> Option<&str> {
 pub const HEADER_PEEK: usize = 6 + MAX_KEY_ID;
 
 fn valid_key_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_KEY_ID && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    !id.is_empty()
+        && id.len() <= MAX_KEY_ID
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
 }
 
 /// Configured master keys (zeroized on drop) and the active one.
@@ -98,7 +106,10 @@ pub struct KeyRing {
 
 impl std::fmt::Debug for KeyRing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KeyRing").field("key_ids", &self.key_ids()).field("active", &self.active_id()).finish()
+        f.debug_struct("KeyRing")
+            .field("key_ids", &self.key_ids())
+            .field("active", &self.active_id())
+            .finish()
     }
 }
 
@@ -111,7 +122,10 @@ impl Default for KeyRing {
 impl KeyRing {
     /// No keys: items are stored in plaintext (development only).
     pub fn disabled() -> KeyRing {
-        KeyRing { keys: Vec::new(), active: None }
+        KeyRing {
+            keys: Vec::new(),
+            active: None,
+        }
     }
 
     /// Keys `(id, master)`; new writes use `active`.
@@ -119,15 +133,26 @@ impl KeyRing {
         let mut out: Vec<(String, Zeroizing<[u8; 32]>)> = Vec::new();
         for (id, k) in keys {
             if !valid_key_id(&id) {
-                return Err(format!("invalid key id {:?} (1-{} chars of [A-Za-z0-9._-])", id, MAX_KEY_ID));
+                return Err(format!(
+                    "invalid key id {:?} (1-{} chars of [A-Za-z0-9._-])",
+                    id, MAX_KEY_ID
+                ));
             }
             if out.iter().any(|(i, _)| *i == id) {
                 return Err(format!("key id {:?} configured twice", id));
             }
             out.push((id, Zeroizing::new(k)));
         }
-        let active = out.iter().position(|(i, _)| i == active).ok_or_else(|| format!("active key id {:?} is not among the configured keys", active))?;
-        Ok(KeyRing { keys: out, active: Some(active) })
+        let active = out.iter().position(|(i, _)| i == active).ok_or_else(|| {
+            format!(
+                "active key id {:?} is not among the configured keys",
+                active
+            )
+        })?;
+        Ok(KeyRing {
+            keys: out,
+            active: Some(active),
+        })
     }
 
     /// One key with id `id`.
@@ -147,17 +172,31 @@ impl KeyRing {
         if let Some(list) = get("REACTOR_MASTER_KEYS") {
             keys.extend(parse_key_list(&list).map_err(|e| format!("REACTOR_MASTER_KEYS: {}", e))?);
         }
-        let single_id = active_env.clone().filter(|_| keys.is_empty()).unwrap_or_else(|| DEFAULT_KEY_ID.to_string());
+        let single_id = active_env
+            .clone()
+            .filter(|_| keys.is_empty())
+            .unwrap_or_else(|| DEFAULT_KEY_ID.to_string());
         if let Some(k) = get("REACTOR_MASTER_KEY") {
-            keys.push((single_id.clone(), parse_key(k.trim()).map_err(|e| format!("REACTOR_MASTER_KEY: {}", e))?));
+            keys.push((
+                single_id.clone(),
+                parse_key(k.trim()).map_err(|e| format!("REACTOR_MASTER_KEY: {}", e))?,
+            ));
         }
         if let Some(path) = get("REACTOR_MASTER_KEY_FILE") {
-            let text = Zeroizing::new(std::fs::read_to_string(path.trim()).map_err(|e| format!("REACTOR_MASTER_KEY_FILE {}: {}", path.trim(), e))?);
+            let text = Zeroizing::new(
+                std::fs::read_to_string(path.trim())
+                    .map_err(|e| format!("REACTOR_MASTER_KEY_FILE {}: {}", path.trim(), e))?,
+            );
             let t = text.trim();
             if t.contains(':') {
-                keys.extend(parse_key_list(t).map_err(|e| format!("REACTOR_MASTER_KEY_FILE: {}", e))?);
+                keys.extend(
+                    parse_key_list(t).map_err(|e| format!("REACTOR_MASTER_KEY_FILE: {}", e))?,
+                );
             } else {
-                keys.push((single_id, parse_key(t).map_err(|e| format!("REACTOR_MASTER_KEY_FILE: {}", e))?));
+                keys.push((
+                    single_id,
+                    parse_key(t).map_err(|e| format!("REACTOR_MASTER_KEY_FILE: {}", e))?,
+                ));
             }
         }
         if keys.is_empty() {
@@ -197,7 +236,8 @@ impl KeyRing {
     fn cipher(master: &[u8; 32], kind: Kind, id: &[u8; 32]) -> Aes256GcmSiv {
         let hk = Hkdf::<Sha256>::new(Some(id), master);
         let mut okm = Zeroizing::new([0u8; 32]);
-        hk.expand(kind.info(), okm.as_mut()).expect("32 bytes is a valid HKDF-SHA256 length");
+        hk.expand(kind.info(), okm.as_mut())
+            .expect("32 bytes is a valid HKDF-SHA256 length");
         Aes256GcmSiv::new_from_slice(okm.as_ref()).expect("32-byte key")
     }
 
@@ -230,7 +270,12 @@ impl KeyRing {
 
     /// Opens an envelope for item `id`; a plaintext (legacy) item is returned as is. A sealed
     /// item whose key id is not configured is an error — never treated as plaintext.
-    pub fn open<'a>(&self, kind: Kind, id: &[u8; 32], stored: &'a [u8]) -> Result<Cow<'a, [u8]>, CryptoError> {
+    pub fn open<'a>(
+        &self,
+        kind: Kind,
+        id: &[u8; 32],
+        stored: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>, CryptoError> {
         if !is_sealed(stored) {
             return Ok(Cow::Borrowed(stored));
         }
@@ -238,32 +283,52 @@ impl KeyRing {
             return Err(CryptoError::Malformed("truncated header".into()));
         }
         if stored[4] != kind as u8 {
-            return Err(CryptoError::Malformed(format!("envelope kind {} where {} expected", stored[4], kind as u8)));
+            return Err(CryptoError::Malformed(format!(
+                "envelope kind {} where {} expected",
+                stored[4], kind as u8
+            )));
         }
         let kid_len = stored[5] as usize;
         let hdr = 6 + kid_len;
         if kid_len == 0 || kid_len > MAX_KEY_ID || stored.len() < hdr + NONCE_LEN + TAG_LEN {
             return Err(CryptoError::Malformed("truncated or invalid header".into()));
         }
-        let kid = std::str::from_utf8(&stored[6..hdr]).map_err(|_| CryptoError::Malformed("key id is not UTF-8".into()))?;
-        let master = &self.keys.iter().find(|k| k.0 == kid).ok_or_else(|| CryptoError::MissingKey(kid.to_string()))?.1;
-        let nonce = Nonce::try_from(&stored[hdr..hdr + NONCE_LEN]).map_err(|_| CryptoError::Malformed("nonce".into()))?;
+        let kid = std::str::from_utf8(&stored[6..hdr])
+            .map_err(|_| CryptoError::Malformed("key id is not UTF-8".into()))?;
+        let master = &self
+            .keys
+            .iter()
+            .find(|k| k.0 == kid)
+            .ok_or_else(|| CryptoError::MissingKey(kid.to_string()))?
+            .1;
+        let nonce = Nonce::try_from(&stored[hdr..hdr + NONCE_LEN])
+            .map_err(|_| CryptoError::Malformed("nonce".into()))?;
         let ct_end = stored.len() - TAG_LEN;
-        let tag = Tag::try_from(&stored[ct_end..]).map_err(|_| CryptoError::Malformed("tag".into()))?;
+        let tag =
+            Tag::try_from(&stored[ct_end..]).map_err(|_| CryptoError::Malformed("tag".into()))?;
         let mut aad = Vec::with_capacity(hdr + 32);
         aad.extend_from_slice(&stored[..hdr]);
         aad.extend_from_slice(id);
         let mut buf = stored[hdr + NONCE_LEN..ct_end].to_vec();
         Self::cipher(master, kind, id)
             .decrypt_inout_detached(&nonce, &aad, buf.as_mut_slice().into(), &tag)
-            .map_err(|_| CryptoError::Auth(format!("authentication tag mismatch (key {:?})", kid)))?;
+            .map_err(|_| {
+                CryptoError::Auth(format!("authentication tag mismatch (key {:?})", kid))
+            })?;
         Ok(Cow::Owned(buf))
     }
 }
 
 /// `REACTOR_REQUIRE_ENCRYPTION=true`.
 pub fn require_encryption_from_env() -> bool {
-    std::env::var("REACTOR_REQUIRE_ENCRYPTION").map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")).unwrap_or(false)
+    std::env::var("REACTOR_REQUIRE_ENCRYPTION")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Loads the key ring for a process: errors on bad configuration, refuses to run without a key
@@ -275,8 +340,12 @@ pub fn keyring_for_startup() -> Result<KeyRing, String> {
             return Err("REACTOR_REQUIRE_ENCRYPTION is set but no master key is configured (REACTOR_MASTER_KEY, REACTOR_MASTER_KEY_FILE or REACTOR_MASTER_KEYS)".into());
         }
         tracing::warn!("************************************************************************");
-        tracing::warn!("WARNING: encryption at rest is DISABLED (no REACTOR_MASTER_KEY configured).");
-        tracing::warn!("Stored objects and dictionaries are written in plaintext. Development only;");
+        tracing::warn!(
+            "WARNING: encryption at rest is DISABLED (no REACTOR_MASTER_KEY configured)."
+        );
+        tracing::warn!(
+            "Stored objects and dictionaries are written in plaintext. Development only;"
+        );
         tracing::warn!("set REACTOR_REQUIRE_ENCRYPTION=true in production to refuse this.");
         tracing::warn!("************************************************************************");
     }
@@ -286,13 +355,24 @@ pub fn keyring_for_startup() -> Result<KeyRing, String> {
 /// `id:key` entries separated by commas, whitespace or newlines.
 fn parse_key_list(s: &str) -> Result<Vec<(String, [u8; 32])>, String> {
     let mut out = Vec::new();
-    for item in s.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()) {
-        let (id, key) = item.split_once(':').ok_or_else(|| format!("entry {:?} is not id:key", item.split(':').next().unwrap_or("")))?;
+    for item in s
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+    {
+        let (id, key) = item.split_once(':').ok_or_else(|| {
+            format!(
+                "entry {:?} is not id:key",
+                item.split(':').next().unwrap_or("")
+            )
+        })?;
         let id = id.trim();
         if !valid_key_id(id) {
             return Err(format!("invalid key id {:?}", id));
         }
-        out.push((id.to_string(), parse_key(key.trim()).map_err(|e| format!("key {:?}: {}", id, e))?));
+        out.push((
+            id.to_string(),
+            parse_key(key.trim()).map_err(|e| format!("key {:?}: {}", id, e))?,
+        ));
     }
     if out.is_empty() {
         return Err("no keys".into());
@@ -356,28 +436,59 @@ mod tests {
         let s = r.seal(Kind::Object, &id, b"hello world".to_vec());
         assert!(is_sealed(&s));
         assert_eq!(sealed_key_id(&s), Some("k1"));
-        assert_eq!(r.open(Kind::Object, &id, &s).unwrap().as_ref(), b"hello world");
+        assert_eq!(
+            r.open(Kind::Object, &id, &s).unwrap().as_ref(),
+            b"hello world"
+        );
         // other id / other kind rejected
-        assert!(matches!(r.open(Kind::Object, &[2u8; 32], &s), Err(CryptoError::Auth(_))));
-        assert!(matches!(r.open(Kind::Dict, &id, &s), Err(CryptoError::Malformed(_))));
+        assert!(matches!(
+            r.open(Kind::Object, &[2u8; 32], &s),
+            Err(CryptoError::Auth(_))
+        ));
+        assert!(matches!(
+            r.open(Kind::Dict, &id, &s),
+            Err(CryptoError::Malformed(_))
+        ));
         // tamper
         let mut t = s.clone();
         let n = t.len();
         t[n - 20] ^= 1;
-        assert!(matches!(r.open(Kind::Object, &id, &t), Err(CryptoError::Auth(_))));
+        assert!(matches!(
+            r.open(Kind::Object, &id, &t),
+            Err(CryptoError::Auth(_))
+        ));
         // relabelled key id
-        let r2 = KeyRing::new(vec![("k1".into(), [7u8; 32]), ("k2".into(), [7u8; 32])], "k1").unwrap();
+        let r2 = KeyRing::new(
+            vec![("k1".into(), [7u8; 32]), ("k2".into(), [7u8; 32])],
+            "k1",
+        )
+        .unwrap();
         let mut t = s.clone();
         t[7] = b'2';
-        assert!(matches!(r2.open(Kind::Object, &id, &t), Err(CryptoError::Auth(_))));
+        assert!(matches!(
+            r2.open(Kind::Object, &id, &t),
+            Err(CryptoError::Auth(_))
+        ));
         // missing key
         let r3 = KeyRing::single("k9", [7u8; 32]);
-        assert_eq!(r3.open(Kind::Object, &id, &s), Err(CryptoError::MissingKey("k1".into())));
+        assert_eq!(
+            r3.open(Kind::Object, &id, &s),
+            Err(CryptoError::MissingKey("k1".into()))
+        );
         // plaintext passes through; disabled ring seals nothing
-        assert_eq!(r.open(Kind::Object, &id, b"\x10abc").unwrap().as_ref(), b"\x10abc");
-        assert_eq!(KeyRing::disabled().seal(Kind::Object, &id, b"x".to_vec()), b"x");
+        assert_eq!(
+            r.open(Kind::Object, &id, b"\x10abc").unwrap().as_ref(),
+            b"\x10abc"
+        );
+        assert_eq!(
+            KeyRing::disabled().seal(Kind::Object, &id, b"x".to_vec()),
+            b"x"
+        );
         // a disabled ring cannot open sealed data
-        assert!(matches!(KeyRing::disabled().open(Kind::Object, &id, &s), Err(CryptoError::MissingKey(_))));
+        assert!(matches!(
+            KeyRing::disabled().open(Kind::Object, &id, &s),
+            Err(CryptoError::MissingKey(_))
+        ));
     }
 
     /// `cargo test --release --lib crypto::tests::throughput -- --ignored --nocapture`
@@ -399,10 +510,17 @@ mod tests {
         let mut id = [0u8; 32];
         id[..8].copy_from_slice(&((n - 1) as u64).to_le_bytes());
         for _ in 0..n {
-            assert_eq!(r.open(Kind::Object, &id, &sealed).unwrap().len(), data.len());
+            assert_eq!(
+                r.open(Kind::Object, &id, &sealed).unwrap().len(),
+                data.len()
+            );
         }
         let o = t.elapsed().as_secs_f64();
-        println!("seal {:.0} MiB/s, open {:.0} MiB/s (64 KiB objects, one core)", 256.0 / s, 256.0 / o);
+        println!(
+            "seal {:.0} MiB/s, open {:.0} MiB/s (64 KiB objects, one core)",
+            256.0 / s,
+            256.0 / o
+        );
     }
 
     #[test]
@@ -412,12 +530,21 @@ mod tests {
         assert_eq!(parse_key(&hex).unwrap(), parse_key(b64).unwrap());
         assert_eq!(parse_key(b64.trim_end_matches('=')).unwrap()[31], 1);
         assert!(parse_key("abc").is_err());
-        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string());
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|p| p.0 == k).map(|p| p.1.to_string())
+        };
         assert!(!KeyRing::from_lookup(env(&[])).unwrap().enabled());
-        let r = KeyRing::from_lookup(env(&[("REACTOR_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=")])).unwrap();
+        let r = KeyRing::from_lookup(env(&[(
+            "REACTOR_MASTER_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=",
+        )]))
+        .unwrap();
         assert_eq!(r.active_id(), Some(DEFAULT_KEY_ID));
         let list = "a:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=,b:0000000000000000000000000000000000000000000000000000000000000002";
-        assert!(KeyRing::from_lookup(move |k: &str| (k == "REACTOR_MASTER_KEYS").then(|| list.to_string())).is_err());
+        assert!(KeyRing::from_lookup(
+            move |k: &str| (k == "REACTOR_MASTER_KEYS").then(|| list.to_string())
+        )
+        .is_err());
         let r = KeyRing::from_lookup(move |k: &str| match k {
             "REACTOR_MASTER_KEYS" => Some(list.to_string()),
             "REACTOR_ACTIVE_KEY_ID" => Some("b".into()),

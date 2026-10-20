@@ -38,7 +38,10 @@ fn gossip_cfg_token_set(g: &Gossip) -> bool {
 #[tokio::main]
 async fn main() {
     core_reactor::logging::init();
-    let port: u16 = std::env::var("REACTOR_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3005);
+    let port: u16 = std::env::var("REACTOR_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3005);
     let bind: IpAddr = match std::env::var("REACTOR_BIND") {
         Ok(b) if !b.trim().is_empty() => match b.trim().parse() {
             Ok(ip) => ip,
@@ -49,9 +52,16 @@ async fn main() {
         },
         _ => IpAddr::V4(Ipv4Addr::LOCALHOST),
     };
-    let reactor_token = std::env::var("REACTOR_TOKEN").ok().filter(|t| !t.is_empty()).map(|t| Arc::new(t.into_bytes()));
+    let reactor_token = std::env::var("REACTOR_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .map(|t| Arc::new(t.into_bytes()));
     let gossip_cfg = GossipConfig::from_env();
-    if let Err(e) = server::check_bind(bind, reactor_token.is_some(), gossip_cfg.cluster_token.is_some()) {
+    if let Err(e) = server::check_bind(
+        bind,
+        reactor_token.is_some(),
+        gossip_cfg.cluster_token.is_some(),
+    ) {
         tracing::error!("{}", e);
         std::process::exit(2);
     }
@@ -91,15 +101,27 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let engine = Arc::new(tokio::task::spawn_blocking(move || Engine::new(evo_cfg)).await.expect("engine init"));
+    let engine = Arc::new(
+        tokio::task::spawn_blocking(move || Engine::new(evo_cfg))
+            .await
+            .expect("engine init"),
+    );
     let gossip = Arc::new(Gossip::with_client(gossip_cfg, transport.clone()));
     let store_enabled = std::env::var("REACTOR_STORE")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(true);
     let store = if store_enabled {
         let cfg = StoreConfig::from_env(&engine.cfg.state_dir);
         let e = engine.clone();
-        match tokio::task::spawn_blocking(move || Store::open(cfg, e)).await.expect("store init") {
+        match tokio::task::spawn_blocking(move || Store::open(cfg, e))
+            .await
+            .expect("store init")
+        {
             Ok(s) => Some(Arc::new(s)),
             Err(err) => {
                 tracing::error!("failed to open object store: {}", err);
@@ -149,9 +171,16 @@ async fn main() {
     let gossip_task = gossip.clone().spawn_loop(engine.clone(), rx);
 
     let addr = SocketAddr::new(bind, port);
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind TCP listener");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind TCP listener");
     let quic_server = match &quic_settings {
-        Some((qport, qs)) => match QuicServer::start_with_stats(SocketAddr::new(bind, *qport), server::peer_router(state.clone()), qs, quic_stats.clone()) {
+        Some((qport, qs)) => match QuicServer::start_with_stats(
+            SocketAddr::new(bind, *qport),
+            server::peer_router(state.clone()),
+            qs,
+            quic_stats.clone(),
+        ) {
             Ok(q) => {
                 tracing::info!(
                     mtls = qs.client_ca.is_some(),
@@ -190,7 +219,14 @@ async fn main() {
         }
     );
 
-    tls::serve(listener, server::router_with(state, server::MetricsAuth::from_env(bind)), tls, shutdown_signal()).await.expect("Reactor server failed");
+    tls::serve(
+        listener,
+        server::router_with(state, server::MetricsAuth::from_env(bind)),
+        tls,
+        shutdown_signal(),
+    )
+    .await
+    .expect("Reactor server failed");
 
     tracing::info!("shutting down; saving evolution state");
     if let Some(q) = &quic_server {

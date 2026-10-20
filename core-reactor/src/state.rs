@@ -81,7 +81,10 @@ pub fn now_ms() -> u64 {
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     let tmp = dir.join(format!(".{}.{}.tmp", file_name, std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;

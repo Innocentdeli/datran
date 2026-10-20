@@ -38,13 +38,13 @@ pub mod transport;
 use crate::state::now_ms;
 use crate::store::{self, id_hex, parse_id, FileMeta, Id, Manifest, Store, StoreError};
 use ::http::Method;
-use transport::{PeerClient, PeerTransport, TransportConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
+use transport::{PeerClient, PeerTransport, TransportConfig};
 
 /// Cap on a `/cluster/inventory` response.
 pub const MAX_INVENTORY_BYTES: usize = 64 << 20;
@@ -156,7 +156,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("tmp{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let tmp = path.with_extension(format!(
+        "tmp{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -201,9 +205,14 @@ impl ClusterConfig {
 
     pub fn from_env(state_dir: &Path) -> std::io::Result<ClusterConfig> {
         let mut c = ClusterConfig::new(state_dir)?;
-        c.region = std::env::var("REACTOR_REGION").ok().map(|s| s.trim().chars().take(64).collect::<String>()).filter(|s| !s.is_empty());
+        c.region = std::env::var("REACTOR_REGION")
+            .ok()
+            .map(|s| s.trim().chars().take(64).collect::<String>())
+            .filter(|s| !s.is_empty());
         c.peers = crate::gossip::parse_peers(&std::env::var("REACTOR_PEERS").unwrap_or_default());
-        c.cluster_token = std::env::var("REACTOR_CLUSTER_TOKEN").ok().filter(|t| !t.is_empty());
+        c.cluster_token = std::env::var("REACTOR_CLUSTER_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         if let Some(ms) = env_parse::<u64>("REACTOR_GOSSIP_INTERVAL_MS") {
             c.interval = Duration::from_millis(ms.max(100));
             c.peer_timeout = c.interval * 3;
@@ -212,10 +221,14 @@ impl ClusterConfig {
         if let Some(ms) = env_parse::<u64>("REACTOR_DEMAND_HALFLIFE_MS").filter(|v| *v > 0) {
             c.demand_half_life = Duration::from_millis(ms);
         }
-        if let Some(v) = env_parse::<f64>("REACTOR_GRAVITY_PULL").filter(|v| v.is_finite() && *v > 0.0) {
+        if let Some(v) =
+            env_parse::<f64>("REACTOR_GRAVITY_PULL").filter(|v| v.is_finite() && *v > 0.0)
+        {
             c.gravity_pull = v;
         }
-        if let Some(v) = env_parse::<f64>("REACTOR_GRAVITY_DROP_BELOW").filter(|v| v.is_finite() && *v >= 0.0) {
+        if let Some(v) =
+            env_parse::<f64>("REACTOR_GRAVITY_DROP_BELOW").filter(|v| v.is_finite() && *v >= 0.0)
+        {
             c.drop_below = v;
         }
         if let Some(n) = env_parse::<usize>("REACTOR_MIN_REPLICAS").filter(|n| *n >= 1) {
@@ -225,8 +238,13 @@ impl ClusterConfig {
             c.cache_bytes = n;
         }
         c.tls_server = tls::TlsSettings::from_env().is_some();
-        c.tls_ca = std::env::var("REACTOR_TLS_CA").ok().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
-        if let Some(n) = env_parse::<usize>("REACTOR_PULL_CONCURRENCY").filter(|n| (1..=256).contains(n)) {
+        c.tls_ca = std::env::var("REACTOR_TLS_CA")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
+        if let Some(n) =
+            env_parse::<usize>("REACTOR_PULL_CONCURRENCY").filter(|n| (1..=256).contains(n))
+        {
             c.pull_concurrency = n;
         }
         let t = TransportConfig::from_env().map_err(std::io::Error::other)?;
@@ -326,7 +344,14 @@ impl PeerManifest {
         Manifest {
             file_id: self.file_id,
             size: self.size,
-            chunks: self.chunks.iter().map(|c| store::ChunkEntry { id: c.id, len: c.len }).collect(),
+            chunks: self
+                .chunks
+                .iter()
+                .map(|c| store::ChunkEntry {
+                    id: c.id,
+                    len: c.len,
+                })
+                .collect(),
             created_ms: self.created_ms,
         }
     }
@@ -337,18 +362,27 @@ impl PeerManifest {
             return Err("manifest is for another file".into());
         }
         let mut total = 0u64;
-        let objects: HashMap<Id, &PeerObject> = self.objects.iter().map(|o| (o.object_id, o)).collect();
+        let objects: HashMap<Id, &PeerObject> =
+            self.objects.iter().map(|o| (o.object_id, o)).collect();
         for o in &self.objects {
             let sum: u64 = o.members.iter().map(|m| m.len as u64).sum();
-            if sum != o.plain_len || o.plain_len as usize > store::OBJECT_MAX_PLAIN || o.stored_len as usize > MAX_OBJECT_BYTES {
-                return Err(format!("object {} has inconsistent lengths", id_hex(&o.object_id)));
+            if sum != o.plain_len
+                || o.plain_len as usize > store::OBJECT_MAX_PLAIN
+                || o.stored_len as usize > MAX_OBJECT_BYTES
+            {
+                return Err(format!(
+                    "object {} has inconsistent lengths",
+                    id_hex(&o.object_id)
+                ));
             }
         }
         for c in &self.chunks {
             if c.len == 0 || c.len as usize > store::CHUNK_MAX {
                 return Err("chunk length out of range".into());
             }
-            let o = objects.get(&c.object_id).ok_or("chunk references an unlisted object")?;
+            let o = objects
+                .get(&c.object_id)
+                .ok_or("chunk references an unlisted object")?;
             let mut off = 0u32;
             let mut ok = false;
             for m in &o.members {
@@ -359,12 +393,18 @@ impl PeerManifest {
                 off = off.saturating_add(m.len);
             }
             if !ok {
-                return Err(format!("chunk {} is not a member of its object at the given offset", id_hex(&c.id)));
+                return Err(format!(
+                    "chunk {} is not a member of its object at the given offset",
+                    id_hex(&c.id)
+                ));
             }
             total += c.len as u64;
         }
         if total != self.size {
-            return Err(format!("chunk lengths sum to {} but size is {}", total, self.size));
+            return Err(format!(
+                "chunk lengths sum to {} but size is {}",
+                total, self.size
+            ));
         }
         Ok(())
     }
@@ -435,10 +475,14 @@ impl Peer {
         !self.is_self
             && self.failures == 0
             && self.node_id.is_some()
-            && self.last_ok_ms.is_some_and(|t| now.saturating_sub(t) <= timeout.as_millis() as u64)
+            && self
+                .last_ok_ms
+                .is_some_and(|t| now.saturating_sub(t) <= timeout.as_millis() as u64)
     }
     fn free(&self) -> u64 {
-        self.capacity.map(|c| c.saturating_sub(self.used)).unwrap_or(u64::MAX)
+        self.capacity
+            .map(|c| c.saturating_sub(self.used))
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -453,17 +497,23 @@ struct LeaseBook {
 
 impl LeaseBook {
     fn active(&self, file: &Id, now: u64) -> bool {
-        self.granted.get(&id_hex(file)).is_some_and(|v| v.iter().any(|(_, exp)| *exp > now))
+        self.granted
+            .get(&id_hex(file))
+            .is_some_and(|v| v.iter().any(|(_, exp)| *exp > now))
     }
     fn prune(&mut self, now: u64) {
         self.granted.retain(|_, v| {
             v.retain(|(_, exp)| *exp > now);
             !v.is_empty()
         });
-        self.dropping.retain(|_, since| now.saturating_sub(*since) < 60_000);
+        self.dropping
+            .retain(|_, since| now.saturating_sub(*since) < 60_000);
     }
     fn count_active(&self, now: u64) -> usize {
-        self.granted.values().map(|v| v.iter().filter(|(_, e)| *e > now).count()).sum()
+        self.granted
+            .values()
+            .map(|v| v.iter().filter(|(_, e)| *e > now).count())
+            .sum()
     }
 }
 
@@ -531,12 +581,23 @@ impl Cluster {
     }
 
     /// [`Cluster::start`] with a peer client shared with recipe gossip.
-    pub fn start_with_client(cfg: ClusterConfig, store: Arc<Store>, client: PeerClient) -> Result<Arc<Cluster>, String> {
+    pub fn start_with_client(
+        cfg: ClusterConfig,
+        store: Arc<Store>,
+        client: PeerClient,
+    ) -> Result<Arc<Cluster>, String> {
         if cfg.cluster_token.is_none() {
             return Err("data gravity needs REACTOR_CLUSTER_TOKEN".into());
         }
         let leases = load_leases(&cfg.state_dir);
-        let peers = cfg.peers.iter().map(|u| Peer { url: u.clone(), ..Default::default() }).collect();
+        let peers = cfg
+            .peers
+            .iter()
+            .map(|u| Peer {
+                url: u.clone(),
+                ..Default::default()
+            })
+            .collect();
         let cache = remote::ObjCache::new(cfg.cache_bytes);
         let cluster = Arc::new_cyclic(|me| Cluster {
             cfg,
@@ -555,7 +616,9 @@ impl Cluster {
             metrics: Metrics::default(),
             me: me.clone(),
         });
-        store.set_eviction_policy(Arc::new(policy::GravityPolicy::new(Arc::downgrade(&cluster))));
+        store.set_eviction_policy(Arc::new(policy::GravityPolicy::new(Arc::downgrade(
+            &cluster,
+        ))));
         let weak = Arc::downgrade(&cluster);
         store.set_read_hook(Some(Arc::new(move |id: &Id, _bytes: u64| {
             if let Some(c) = weak.upgrade() {
@@ -620,13 +683,20 @@ impl Cluster {
     /// Current decayed local demand for `file`.
     pub fn demand(&self, file: &Id) -> f64 {
         let now = now_ms();
-        lock(&self.demand).get(file).map(|d| d.at(now, self.hl_ms())).unwrap_or(0.0)
+        lock(&self.demand)
+            .get(file)
+            .map(|d| d.at(now, self.hl_ms()))
+            .unwrap_or(0.0)
     }
 
     fn demand_top(&self, n: usize, min: f64) -> Vec<(Id, f64)> {
         let now = now_ms();
         let hl = self.hl_ms();
-        let mut v: Vec<(Id, f64)> = lock(&self.demand).iter().map(|(k, d)| (*k, d.at(now, hl))).filter(|(_, s)| *s >= min).collect();
+        let mut v: Vec<(Id, f64)> = lock(&self.demand)
+            .iter()
+            .map(|(k, d)| (*k, d.at(now, hl)))
+            .filter(|(_, s)| *s >= min)
+            .collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         v.truncate(n);
         v
@@ -654,7 +724,9 @@ impl Cluster {
             .map(|p| (p, p.demand.get(file).copied().unwrap_or(0.0)))
             .collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.node_id.cmp(&b.0.node_id)));
-        v.into_iter().map(|(p, _)| (p.url.clone(), p.node_id.clone().unwrap_or_default())).collect()
+        v.into_iter()
+            .map(|(p, _)| (p.url.clone(), p.node_id.clone().unwrap_or_default()))
+            .collect()
     }
 
     /// Peers to try for a file: known holders first, then every other reachable peer (the
@@ -671,11 +743,19 @@ impl Cluster {
 
     fn healthy_peer_urls(&self) -> Vec<String> {
         let now = now_ms();
-        lock(&self.peers).iter().filter(|p| p.healthy(now, self.cfg.peer_timeout)).map(|p| p.url.clone()).collect()
+        lock(&self.peers)
+            .iter()
+            .filter(|p| p.healthy(now, self.cfg.peer_timeout))
+            .map(|p| p.url.clone())
+            .collect()
     }
 
     fn all_peer_urls(&self) -> Vec<String> {
-        lock(&self.peers).iter().filter(|p| !p.is_self).map(|p| p.url.clone()).collect()
+        lock(&self.peers)
+            .iter()
+            .filter(|p| !p.is_self)
+            .map(|p| p.url.clone())
+            .collect()
     }
 
     // ---- HTTP client helpers ---------------------------------------------------------------
@@ -696,7 +776,8 @@ impl Cluster {
         let cap = st.capacity()?;
         let (_, current) = st.file_events_since(u64::MAX, 0)?;
         let floor = st.file_log_floor()?;
-        let delta_ok = matches!(since, Some(s) if s > 0 && s <= current && s.saturating_add(1) >= floor);
+        let delta_ok =
+            matches!(since, Some(s) if s > 0 && s <= current && s.saturating_add(1) >= floor);
         let mut inv = Inventory {
             node_id: self.cfg.node_id.clone(),
             region: self.cfg.region.clone(),
@@ -708,14 +789,25 @@ impl Cluster {
             added: Vec::new(),
             removed: Vec::new(),
             tombstones: Vec::new(),
-            demand: self.demand_top(DEMAND_ADVERTISED, 0.05).into_iter().map(|(id, s)| DemandEntry { file_id: id_hex(&id), score: s }).collect(),
+            demand: self
+                .demand_top(DEMAND_ADVERTISED, 0.05)
+                .into_iter()
+                .map(|(id, s)| DemandEntry {
+                    file_id: id_hex(&id),
+                    score: s,
+                })
+                .collect(),
             now_ms: now_ms(),
         };
         if delta_ok {
             let since = since.unwrap_or(0);
             let (events, version) = st.file_events_since(since, INVENTORY_PAGE)?;
             inv.more = events.len() >= INVENTORY_PAGE;
-            inv.version = if inv.more { events.last().map(|e| e.version).unwrap_or(version) } else { version };
+            inv.version = if inv.more {
+                events.last().map(|e| e.version).unwrap_or(version)
+            } else {
+                version
+            };
             let mut tomb_ids: HashSet<Id> = HashSet::new();
             for e in events {
                 match e.kind {
@@ -732,7 +824,13 @@ impl Cluster {
                     tombs.insert(id, ms);
                 }
             }
-            inv.tombstones = tombs.into_iter().map(|(id, ms)| TombstoneEntry { file_id: id_hex(&id), deleted_ms: ms }).collect();
+            inv.tombstones = tombs
+                .into_iter()
+                .map(|(id, ms)| TombstoneEntry {
+                    file_id: id_hex(&id),
+                    deleted_ms: ms,
+                })
+                .collect();
         } else {
             let mut after: Option<Id> = None;
             while inv.added.len() < INVENTORY_FULL_MAX {
@@ -743,7 +841,14 @@ impl Cluster {
                 after = page.last().map(|m| m.file_id);
                 inv.added.extend(page.iter().map(|m| id_hex(&m.file_id)));
             }
-            inv.tombstones = st.tombstones(0)?.into_iter().map(|(id, ms)| TombstoneEntry { file_id: id_hex(&id), deleted_ms: ms }).collect();
+            inv.tombstones = st
+                .tombstones(0)?
+                .into_iter()
+                .map(|(id, ms)| TombstoneEntry {
+                    file_id: id_hex(&id),
+                    deleted_ms: ms,
+                })
+                .collect();
         }
         Ok(inv)
     }
@@ -766,7 +871,8 @@ impl Cluster {
                 lock(&me.syncing).remove(&url);
             }));
         }
-        let _ = tokio::time::timeout(self.cfg.interval, futures_util::future::join_all(handles)).await;
+        let _ =
+            tokio::time::timeout(self.cfg.interval, futures_util::future::join_all(handles)).await;
         self.metrics.gossip_rounds.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -794,25 +900,43 @@ impl Cluster {
             let (since, tsince) = {
                 let peers = lock(&self.peers);
                 let p = peers.iter().find(|p| p.url == url).ok_or("unknown peer")?;
-                let full = p.node_id.is_none() || p.version == 0 || p.syncs % self.cfg.full_sync_every.max(1) == 0;
+                let full = p.node_id.is_none()
+                    || p.version == 0
+                    || p.syncs % self.cfg.full_sync_every.max(1) == 0;
                 if full {
                     (0, 0)
                 } else {
                     (p.version, p.tomb_since)
                 }
             };
-            let body = self.get_capped(&format!("{}/cluster/inventory?since={}&tsince={}", url, since, tsince), MAX_INVENTORY_BYTES).await?;
-            let inv: Inventory = serde_json::from_slice(&body).map_err(|e| format!("bad inventory JSON: {}", e))?;
+            let body = self
+                .get_capped(
+                    &format!(
+                        "{}/cluster/inventory?since={}&tsince={}",
+                        url, since, tsince
+                    ),
+                    MAX_INVENTORY_BYTES,
+                )
+                .await?;
+            let inv: Inventory =
+                serde_json::from_slice(&body).map_err(|e| format!("bad inventory JSON: {}", e))?;
             if inv.node_id == self.cfg.node_id {
                 if let Some(p) = lock(&self.peers).iter_mut().find(|p| p.url == url) {
                     p.is_self = true;
                 }
                 return Ok(());
             }
-            let tombstones: Vec<(Id, u64)> = inv.tombstones.iter().filter_map(|t| parse_id(&t.file_id).map(|id| (id, t.deleted_ms))).collect();
+            let tombstones: Vec<(Id, u64)> = inv
+                .tombstones
+                .iter()
+                .filter_map(|t| parse_id(&t.file_id).map(|id| (id, t.deleted_ms)))
+                .collect();
             let restart = {
                 let mut peers = lock(&self.peers);
-                let p = peers.iter_mut().find(|p| p.url == url).ok_or("unknown peer")?;
+                let p = peers
+                    .iter_mut()
+                    .find(|p| p.url == url)
+                    .ok_or("unknown peer")?;
                 if !inv.full && p.node_id.as_deref() != Some(inv.node_id.as_str()) {
                     // identity changed under a delta: start over with a full listing
                     p.node_id = None;
@@ -838,7 +962,12 @@ impl Cluster {
                     p.version = inv.version;
                     p.capacity = inv.capacity;
                     p.used = inv.used;
-                    p.demand = inv.demand.iter().filter_map(|d| parse_id(&d.file_id).map(|id| (id, d.score))).filter(|(_, s)| s.is_finite()).collect();
+                    p.demand = inv
+                        .demand
+                        .iter()
+                        .filter_map(|d| parse_id(&d.file_id).map(|id| (id, d.score)))
+                        .filter(|(_, s)| s.is_finite())
+                        .collect();
                     let slack = (self.cfg.interval.as_millis() as u64 * 2).max(60_000);
                     p.tomb_since = inv.now_ms.saturating_sub(slack);
                     if !inv.more {
@@ -863,7 +992,13 @@ impl Cluster {
             let mut removed = Vec::new();
             for (id, ms) in list {
                 // skip what we already know
-                if store.tombstone(&id).ok().flatten().is_some_and(|cur| cur >= ms) && !store.contains_file(&id).unwrap_or(false) {
+                if store
+                    .tombstone(&id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|cur| cur >= ms)
+                    && !store.contains_file(&id).unwrap_or(false)
+                {
                     continue;
                 }
                 match store.apply_tombstone(&id, ms) {
@@ -877,7 +1012,9 @@ impl Cluster {
         .await
         .unwrap_or_default();
         if !removed.is_empty() {
-            self.metrics.tombstones_applied.fetch_add(removed.len() as u64, Ordering::Relaxed);
+            self.metrics
+                .tombstones_applied
+                .fetch_add(removed.len() as u64, Ordering::Relaxed);
             let mut d = lock(&self.demand);
             for id in &removed {
                 d.remove(id);
@@ -889,16 +1026,28 @@ impl Cluster {
 
     /// Fetches and validates a peer manifest from the first candidate that has it. Refuses
     /// manifests older than a local tombstone (an old replica must not resurrect a delete).
-    pub async fn fetch_manifest(&self, file: &Id) -> Result<Option<(PeerManifest, Vec<String>)>, String> {
+    pub async fn fetch_manifest(
+        &self,
+        file: &Id,
+    ) -> Result<Option<(PeerManifest, Vec<String>)>, String> {
         let tomb = {
             let store = self.store.clone();
             let f = *file;
-            tokio::task::spawn_blocking(move || store.tombstone(&f)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?
+            tokio::task::spawn_blocking(move || store.tombstone(&f))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?
         };
         let candidates = self.fetch_candidates(file);
         let mut last_err = None;
         for (i, url) in candidates.iter().enumerate() {
-            match self.get_capped(&format!("{}/cluster/manifests/{}", url, id_hex(file)), MAX_MANIFEST_BYTES).await {
+            match self
+                .get_capped(
+                    &format!("{}/cluster/manifests/{}", url, id_hex(file)),
+                    MAX_MANIFEST_BYTES,
+                )
+                .await
+            {
                 Ok(body) => {
                     let pm: PeerManifest = match serde_json::from_slice(&body) {
                         Ok(m) => m,
@@ -916,7 +1065,13 @@ impl Cluster {
                     }
                     // holders to fetch objects from: the one that answered first, then the rest
                     let mut order = vec![url.clone()];
-                    order.extend(candidates.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, u)| u.clone()));
+                    order.extend(
+                        candidates
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, u)| u.clone()),
+                    );
                     return Ok(Some((pm, order)));
                 }
                 Err(e) if e.starts_with("HTTP 404") => {}
@@ -931,18 +1086,35 @@ impl Cluster {
 
     /// Raw object bytes from the first holder that serves a valid copy, plus its decoded
     /// plaintext (decoded and hash-checked against `object_id`).
-    pub(crate) async fn fetch_object(&self, object_id: &Id, holders: &[String]) -> Result<(Vec<u8>, Arc<Vec<u8>>), String> {
+    pub(crate) async fn fetch_object(
+        &self,
+        object_id: &Id,
+        holders: &[String],
+    ) -> Result<(Vec<u8>, Arc<Vec<u8>>), String> {
         let mut last = String::from("no holders");
         for url in holders {
-            match self.get_capped(&format!("{}/cluster/objects/{}", url, id_hex(object_id)), MAX_OBJECT_BYTES).await {
+            match self
+                .get_capped(
+                    &format!("{}/cluster/objects/{}", url, id_hex(object_id)),
+                    MAX_OBJECT_BYTES,
+                )
+                .await
+            {
                 Ok(raw) => {
                     let store = self.store.clone();
                     let oid = *object_id;
-                    let res = tokio::task::spawn_blocking(move || store.decode_object(&oid, &raw).map(|p| (raw, p))).await;
+                    let res = tokio::task::spawn_blocking(move || {
+                        store.decode_object(&oid, &raw).map(|p| (raw, p))
+                    })
+                    .await;
                     match res {
                         Ok(Ok((raw, plain))) => {
-                            self.metrics.remote_objects_fetched.fetch_add(1, Ordering::Relaxed);
-                            self.metrics.remote_fetch_bytes.fetch_add(raw.len() as u64, Ordering::Relaxed);
+                            self.metrics
+                                .remote_objects_fetched
+                                .fetch_add(1, Ordering::Relaxed);
+                            self.metrics
+                                .remote_fetch_bytes
+                                .fetch_add(raw.len() as u64, Ordering::Relaxed);
                             return Ok((raw, Arc::new(plain)));
                         }
                         Ok(Err(e)) => last = format!("{}: object failed verification: {}", url, e),
@@ -951,13 +1123,19 @@ impl Cluster {
                 }
                 Err(e) => last = format!("{}: {}", url, e),
             }
-            self.metrics.remote_fetch_failures.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .remote_fetch_failures
+                .fetch_add(1, Ordering::Relaxed);
         }
         Err(last)
     }
 
     /// Decoded, verified object plaintext from the cache or a holder.
-    pub(crate) async fn object_plain(&self, object_id: &Id, holders: &[String]) -> Result<Arc<Vec<u8>>, String> {
+    pub(crate) async fn object_plain(
+        &self,
+        object_id: &Id,
+        holders: &[String],
+    ) -> Result<Arc<Vec<u8>>, String> {
         if let Some(p) = lock(&self.cache).get(object_id) {
             self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(p);
@@ -982,7 +1160,10 @@ impl Cluster {
                 }
                 Err(e) => {
                     tracing::warn!("pull of {} failed: {}", id_hex(&file), e);
-                    lock(&me.pull_retry_after).insert(file, now_ms() + me.cfg.pull_retry_backoff.as_millis() as u64);
+                    lock(&me.pull_retry_after).insert(
+                        file,
+                        now_ms() + me.cfg.pull_retry_backoff.as_millis() as u64,
+                    );
                 }
             }
         });
@@ -994,7 +1175,11 @@ impl Cluster {
     /// non-tombstoned files whose decayed local demand still meets the threshold, waiting
     /// `pull_retry_backoff` after a failure. Returns the number of pulls started.
     pub async fn gravity_retry_pass(&self) -> usize {
-        let wanted: Vec<Id> = self.demand_top(256, self.cfg.gravity_pull - 0.005).into_iter().map(|(id, _)| id).collect();
+        let wanted: Vec<Id> = self
+            .demand_top(256, self.cfg.gravity_pull - 0.005)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         if wanted.is_empty() {
             return 0;
         }
@@ -1003,11 +1188,19 @@ impl Cluster {
             let mut retry = lock(&self.pull_retry_after);
             retry.retain(|_, t| *t + 3_600_000 > now);
             let pulling = lock(&self.pulling);
-            wanted.into_iter().filter(|f| !pulling.contains(f) && retry.get(f).is_none_or(|t| *t <= now)).collect()
+            wanted
+                .into_iter()
+                .filter(|f| !pulling.contains(f) && retry.get(f).is_none_or(|t| *t <= now))
+                .collect()
         };
         let store = self.store.clone();
         let todo: Vec<Id> = tokio::task::spawn_blocking(move || {
-            due.into_iter().filter(|f| !store.contains_file(f).unwrap_or(true) && store.tombstone(f).ok().flatten().is_none()).collect()
+            due.into_iter()
+                .filter(|f| {
+                    !store.contains_file(f).unwrap_or(true)
+                        && store.tombstone(f).ok().flatten().is_none()
+                })
+                .collect()
         })
         .await
         .unwrap_or_default();
@@ -1034,7 +1227,11 @@ impl Cluster {
     async fn pull_inner(&self, file: &Id, reason: PullReason) -> Result<bool, String> {
         let store = self.store.clone();
         let f = *file;
-        if tokio::task::spawn_blocking(move || store.contains_file(&f)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())? {
+        if tokio::task::spawn_blocking(move || store.contains_file(&f))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+        {
             return Ok(false);
         }
         let Some((pm, holders)) = self.fetch_manifest(file).await? else {
@@ -1044,7 +1241,10 @@ impl Cluster {
         let handle = tokio::runtime::Handle::current();
         let concurrency = self.cfg.pull_concurrency.max(1);
         let outcome = tokio::task::spawn_blocking(move || -> Result<store::PutOutcome, String> {
-            let mut imp = me.store.begin_import(pm.manifest()).map_err(|e| e.to_string())?;
+            let mut imp = me
+                .store
+                .begin_import(pm.manifest())
+                .map_err(|e| e.to_string())?;
             let missing: HashSet<Id> = imp.missing_chunks().into_iter().collect();
             // group the missing chunks by the holder's objects
             let mut needed: Vec<Id> = Vec::new();
@@ -1054,7 +1254,8 @@ impl Cluster {
                     needed.push(c.object_id);
                 }
             }
-            let objects: HashMap<Id, &PeerObject> = pm.objects.iter().map(|o| (o.object_id, o)).collect();
+            let objects: HashMap<Id, &PeerObject> =
+                pm.objects.iter().map(|o| (o.object_id, o)).collect();
             if needed.iter().any(|o| !objects.contains_key(o)) {
                 return Err("manifest lists no such object".into());
             }
@@ -1077,7 +1278,10 @@ impl Cluster {
                             let cached = lock(&me.cache).get(&oid);
                             let r = match cached {
                                 Some(p) => Ok(Got::Plain(p)),
-                                None => me.fetch_object(&oid, &holders).await.map(|(raw, _)| Got::Raw(raw)),
+                                None => me
+                                    .fetch_object(&oid, &holders)
+                                    .await
+                                    .map(|(raw, _)| Got::Raw(raw)),
                             };
                             (oid, r)
                         }
@@ -1100,14 +1304,18 @@ impl Cluster {
                             for m in &o.members {
                                 let end = off + m.len as usize;
                                 if end > plain.len() {
-                                    return Err("cached object shorter than its members".to_string());
+                                    return Err(
+                                        "cached object shorter than its members".to_string()
+                                    );
                                 }
-                                imp.add_chunk(&m.id, &plain[off..end]).map_err(|e| e.to_string())?;
+                                imp.add_chunk(&m.id, &plain[off..end])
+                                    .map_err(|e| e.to_string())?;
                                 off = end;
                             }
                         }
                         Got::Raw(raw) => {
-                            imp.add_object(&oid, &raw, &o.members).map_err(|e| e.to_string())?;
+                            imp.add_object(&oid, &raw, &o.members)
+                                .map_err(|e| e.to_string())?;
                         }
                     }
                 }
@@ -1121,7 +1329,9 @@ impl Cluster {
         .await
         .map_err(|e| e.to_string())??;
         self.metrics.pulls.fetch_add(1, Ordering::Relaxed);
-        self.metrics.pull_bytes.fetch_add(outcome.stored_bytes, Ordering::Relaxed);
+        self.metrics
+            .pull_bytes
+            .fetch_add(outcome.stored_bytes, Ordering::Relaxed);
         if reason == PullReason::Repair {
             self.metrics.repairs.fetch_add(1, Ordering::Relaxed);
         }
@@ -1171,29 +1381,48 @@ impl Cluster {
 
     fn my_free(&self) -> u64 {
         match self.store.capacity() {
-            Ok(c) => c.max_bytes.map(|m| m.saturating_sub(c.live_bytes + c.inflight_bytes)).unwrap_or(u64::MAX),
+            Ok(c) => c
+                .max_bytes
+                .map(|m| m.saturating_sub(c.live_bytes + c.inflight_bytes))
+                .unwrap_or(u64::MAX),
             Err(_) => 0,
         }
     }
 
     /// Under-replication repair; returns the number of files this node pulled.
     pub async fn repair_pass(&self) -> usize {
-        let local: HashSet<Id> = self.local_files().await.into_iter().map(|m| m.file_id).collect();
+        let local: HashSet<Id> = self
+            .local_files()
+            .await
+            .into_iter()
+            .map(|m| m.file_id)
+            .collect();
         let store = self.store.clone();
         let tombs: HashSet<Id> =
-            tokio::task::spawn_blocking(move || store.tombstones(0).unwrap_or_default()).await.unwrap_or_default().into_iter().map(|t| t.0).collect();
+            tokio::task::spawn_blocking(move || store.tombstones(0).unwrap_or_default())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| t.0)
+                .collect();
         let my_free = self.my_free();
         let now = now_ms();
         let todo: Vec<Id> = {
             let peers = lock(&self.peers);
-            let healthy: Vec<&Peer> = peers.iter().filter(|p| p.healthy(now, self.cfg.peer_timeout)).collect();
+            let healthy: Vec<&Peer> = peers
+                .iter()
+                .filter(|p| p.healthy(now, self.cfg.peer_timeout))
+                .collect();
             let target = self.cfg.min_replicas.min(1 + healthy.len());
             let mut universe: HashSet<Id> = HashSet::new();
             for p in &healthy {
                 universe.extend(p.files.iter().copied());
             }
             let mut todo = Vec::new();
-            let mut files: Vec<Id> = universe.into_iter().filter(|f| !local.contains(f) && !tombs.contains(f)).collect();
+            let mut files: Vec<Id> = universe
+                .into_iter()
+                .filter(|f| !local.contains(f) && !tombs.contains(f))
+                .collect();
             files.sort_unstable();
             for f in files {
                 let holders = healthy.iter().filter(|p| p.files.contains(&f)).count();
@@ -1234,7 +1463,9 @@ impl Cluster {
     pub async fn drop_pass(&self) -> usize {
         let mut n = 0;
         for m in self.local_files().await {
-            if self.demand(&m.file_id) >= self.cfg.drop_below || self.peer_demand(&m.file_id) < self.cfg.drop_peer_demand {
+            if self.demand(&m.file_id) >= self.cfg.drop_below
+                || self.peer_demand(&m.file_id) < self.cfg.drop_peer_demand
+            {
                 continue;
             }
             match self.try_drop(&m).await {
@@ -1248,15 +1479,30 @@ impl Cluster {
 
     /// Requests hold-leases from other holders until `need` granted (one of them taking over
     /// origin when `origin_pins` is set). Returns `(granted, origin_accepted)`.
-    async fn acquire_leases(&self, pooled: bool, file: &Id, need: usize, origin_pins: Option<u64>) -> (usize, bool) {
+    async fn acquire_leases(
+        &self,
+        pooled: bool,
+        file: &Id,
+        need: usize,
+        origin_pins: Option<u64>,
+    ) -> (usize, bool) {
         let hold = |url: &str, origin: Option<u64>| {
-            let mut q = format!("{}/cluster/hold/{}?node={}", url, id_hex(file), self.cfg.node_id);
+            let mut q = format!(
+                "{}/cluster/hold/{}?node={}",
+                url,
+                id_hex(file),
+                self.cfg.node_id
+            );
             if let Some(pins) = origin {
                 q.push_str(&format!("&origin=1&pins={}", pins));
             }
             let fid = id_hex(file);
             async move {
-                let body = self.transport.request(Method::POST, &q, self.token(), MAX_SMALL_BYTES, pooled).await.ok()?;
+                let body = self
+                    .transport
+                    .request(Method::POST, &q, self.token(), MAX_SMALL_BYTES, pooled)
+                    .await
+                    .ok()?;
                 let h: HoldResponse = serde_json::from_slice(&body).ok()?;
                 (h.granted && h.file_id == fid).then_some(h)
             }
@@ -1274,9 +1520,14 @@ impl Cluster {
             return (granted.len(), false);
         }
         // Origin moves only once enough replicas are confirmed (the lease is refreshed).
-        let Some(pins) = origin_pins else { return (granted.len(), true) };
+        let Some(pins) = origin_pins else {
+            return (granted.len(), true);
+        };
         for url in &granted {
-            if hold(url, Some(pins)).await.is_some_and(|h| h.origin_accepted) {
+            if hold(url, Some(pins))
+                .await
+                .is_some_and(|h| h.origin_accepted)
+            {
                 return (granted.len(), true);
             }
         }
@@ -1298,15 +1549,24 @@ impl Cluster {
             }
             l.dropping.insert(file, now);
         }
-        let origin_pins = if meta.origin && meta.pins > 0 { Some(meta.pins) } else { None };
+        let origin_pins = if meta.origin && meta.pins > 0 {
+            Some(meta.pins)
+        } else {
+            None
+        };
         let (granted, origin_ok) = self.acquire_leases(true, &file, need, origin_pins).await;
         let res = if granted >= need && origin_ok {
             let store = self.store.clone();
-            let dropped = tokio::task::spawn_blocking(move || store.drop_replica(&file)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+            let dropped = tokio::task::spawn_blocking(move || store.drop_replica(&file))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
             if dropped {
                 self.metrics.drops.fetch_add(1, Ordering::Relaxed);
                 if origin_pins.is_some() {
-                    self.metrics.origin_transfers.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .origin_transfers
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 lock(&self.demand).remove(&file);
             }
@@ -1347,7 +1607,11 @@ impl Cluster {
                 self.metrics.leases_refused.fetch_add(1, Ordering::Relaxed);
                 return resp;
             }
-            let requester: String = requester.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect();
+            let requester: String = requester
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(64)
+                .collect();
             let v = l.granted.entry(id_hex(file)).or_default();
             v.retain(|(n, exp)| *n != requester && *exp > now);
             v.push((requester, now + ttl));
@@ -1360,7 +1624,8 @@ impl Cluster {
         resp.expires_ms = now + ttl;
         self.metrics.leases_granted.fetch_add(1, Ordering::Relaxed);
         if origin {
-            let ok = self.store.set_origin(file, true).unwrap_or(false) && self.store.add_pins(file, pins.min(1 << 32) as i64).is_ok();
+            let ok = self.store.set_origin(file, true).unwrap_or(false)
+                && self.store.add_pins(file, pins.min(1 << 32) as i64).is_ok();
             resp.origin_accepted = ok;
         }
         resp
@@ -1374,7 +1639,14 @@ impl Cluster {
     /// `POST /cluster/unpin/:id` (blocking): unpin forwarded by a node that does not hold the
     /// file; applied only where the file is a pinned origin.
     pub fn unpin_forwarded(&self, file: &Id) -> UnpinResponse {
-        let mut r = UnpinResponse { file_id: id_hex(file), node_id: self.cfg.node_id.clone(), held: false, origin: false, pins: 0, deleted: false };
+        let mut r = UnpinResponse {
+            file_id: id_hex(file),
+            node_id: self.cfg.node_id.clone(),
+            held: false,
+            origin: false,
+            pins: 0,
+            deleted: false,
+        };
         if let Ok(Some(m)) = self.store.file_meta(file) {
             r.held = true;
             r.origin = m.origin && m.pins > 0;
@@ -1393,10 +1665,22 @@ impl Cluster {
     /// origin (after an origin transfer the pins live there).
     pub async fn forward_unpin(&self, file: &Id) -> Option<UnpinResponse> {
         for url in self.fetch_candidates(file) {
-            let Ok(body) = self.post_capped(&format!("{}/cluster/unpin/{}", url, id_hex(file)), MAX_SMALL_BYTES).await else { continue };
-            let Ok(r) = serde_json::from_slice::<UnpinResponse>(&body) else { continue };
+            let Ok(body) = self
+                .post_capped(
+                    &format!("{}/cluster/unpin/{}", url, id_hex(file)),
+                    MAX_SMALL_BYTES,
+                )
+                .await
+            else {
+                continue;
+            };
+            let Ok(r) = serde_json::from_slice::<UnpinResponse>(&body) else {
+                continue;
+            };
             if r.held && r.origin {
-                self.metrics.unpins_forwarded.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .unpins_forwarded
+                    .fetch_add(1, Ordering::Relaxed);
                 return Some(r);
             }
         }
@@ -1408,11 +1692,19 @@ impl Cluster {
     async fn repair_quarantined(&self, oid: Id) {
         match self.repair_object(&oid).await {
             Ok(()) => {
-                self.metrics.quarantine_repairs.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .quarantine_repairs
+                    .fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
-                self.metrics.quarantine_repair_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("could not repair quarantined object {}: {}", id_hex(&oid), e);
+                self.metrics
+                    .quarantine_repair_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    "could not repair quarantined object {}: {}",
+                    id_hex(&oid),
+                    e
+                );
             }
         }
     }
@@ -1438,7 +1730,10 @@ impl Cluster {
         if let Ok((raw, _)) = self.fetch_object(oid, &peers).await {
             let store = self.store.clone();
             let id = *oid;
-            return tokio::task::spawn_blocking(move || store.repair_object_raw(&id, &raw)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string());
+            return tokio::task::spawn_blocking(move || store.repair_object_raw(&id, &raw))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string());
         }
         // fallback: member chunks (the peer may store them in differently fused objects)
         let store = self.store.clone();
@@ -1452,18 +1747,29 @@ impl Cluster {
         for m in &meta.members {
             let mut got = None;
             for url in &peers {
-                if let Ok(b) = self.get_capped(&format!("{}/cluster/chunks/{}", url, id_hex(&m.id)), store::CHUNK_MAX).await {
+                if let Ok(b) = self
+                    .get_capped(
+                        &format!("{}/cluster/chunks/{}", url, id_hex(&m.id)),
+                        store::CHUNK_MAX,
+                    )
+                    .await
+                {
                     if b.len() == m.len as usize && store::sha256(&b) == m.id {
                         got = Some(b);
                         break;
                     }
                 }
             }
-            plain.extend_from_slice(&got.ok_or_else(|| format!("no peer has chunk {}", id_hex(&m.id)))?);
+            plain.extend_from_slice(
+                &got.ok_or_else(|| format!("no peer has chunk {}", id_hex(&m.id)))?,
+            );
         }
         let store = self.store.clone();
         let id = *oid;
-        tokio::task::spawn_blocking(move || store.repair_object_plain(&id, &plain)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+        tokio::task::spawn_blocking(move || store.repair_object_plain(&id, &plain))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
     }
 
     // ---- background loop -------------------------------------------------------------------
@@ -1472,8 +1778,14 @@ impl Cluster {
     /// repair / gravity drops / housekeeping. Same work as [`Cluster::maintenance_round`], but a long
     /// repair pass (up to 32 sequential pulls) cannot stop gossip and let healthy peers' last
     /// successful sync age past the 3 x interval health window.
-    pub fn spawn_loop(self: Arc<Self>, shutdown: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
-        async fn tick(interval: Duration, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> bool {
+    pub fn spawn_loop(
+        self: Arc<Self>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        async fn tick(
+            interval: Duration,
+            shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        ) -> bool {
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
                 _ = shutdown.changed() => return false,
@@ -1508,7 +1820,13 @@ impl Cluster {
         let now = now_ms();
         let peers = lock(&self.peers);
         let others: Vec<&Peer> = peers.iter().filter(|p| !p.is_self).collect();
-        (others.iter().filter(|p| p.healthy(now, self.cfg.peer_timeout)).count(), others.len())
+        (
+            others
+                .iter()
+                .filter(|p| p.healthy(now, self.cfg.peer_timeout))
+                .count(),
+            others.len(),
+        )
     }
 
     pub fn metrics_json(&self) -> serde_json::Value {
@@ -1623,11 +1941,13 @@ fn leases_path(state_dir: &Path) -> PathBuf {
 }
 
 fn load_leases(state_dir: &Path) -> LeaseBook {
-    let mut book: LeaseBook = std::fs::read(leases_path(state_dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut book: LeaseBook = std::fs::read(leases_path(state_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     book.prune(now_ms());
     book
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1644,7 +1964,13 @@ mod tests {
                 let p = path.clone();
                 std::thread::spawn(move || {
                     for j in 0..20 {
-                        write_atomic(&p, format!("{{\"writer\":{},\"n\":{}}}", i, j).repeat(64).as_bytes()).unwrap();
+                        write_atomic(
+                            &p,
+                            format!("{{\"writer\":{},\"n\":{}}}", i, j)
+                                .repeat(64)
+                                .as_bytes(),
+                        )
+                        .unwrap();
                     }
                 })
             })

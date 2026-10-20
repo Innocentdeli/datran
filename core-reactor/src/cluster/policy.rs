@@ -29,11 +29,16 @@ impl EvictionPolicy for GravityPolicy {
         if meta.origin && meta.pins > 0 {
             return false;
         }
-        self.cluster.upgrade().is_some_and(|c| c.eviction_allowed(&meta.file_id))
+        self.cluster
+            .upgrade()
+            .is_some_and(|c| c.eviction_allowed(&meta.file_id))
     }
 
     fn candidates(&self, _store: &Store, need_bytes: u64) -> Vec<Id> {
-        self.cluster.upgrade().map(|c| c.eviction_candidates(need_bytes)).unwrap_or_default()
+        self.cluster
+            .upgrade()
+            .map(|c| c.eviction_candidates(need_bytes))
+            .unwrap_or_default()
     }
 }
 
@@ -44,7 +49,10 @@ impl Cluster {
         if l.active(file, now) || l.dropping.contains_key(file) {
             return false;
         }
-        if lock(&self.confirmed).get(file).is_some_and(|until| *until > now) {
+        if lock(&self.confirmed)
+            .get(file)
+            .is_some_and(|until| *until > now)
+        {
             l.dropping.insert(*file, now);
             return true;
         }
@@ -68,10 +76,17 @@ impl Cluster {
         }
         let need = self.min_replicas_effective();
         files.retain(|m| self.holders(&m.file_id).len() >= need);
-        files.sort_by(|a, b| self.demand(&a.file_id).total_cmp(&self.demand(&b.file_id)).then(b.size.cmp(&a.size)));
+        files.sort_by(|a, b| {
+            self.demand(&a.file_id)
+                .total_cmp(&self.demand(&b.file_id))
+                .then(b.size.cmp(&a.size))
+        });
         let ttl = self.cfg.lease_ttl.as_millis() as u64;
         let run = || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
             Some(rt.block_on(async {
                 let mut out = Vec::new();
                 let mut freed = 0u64;
@@ -84,7 +99,9 @@ impl Cluster {
                     let (granted, _) = self.acquire_leases(false, &m.file_id, need, None).await;
                     if granted >= need {
                         lock(&self.confirmed).insert(m.file_id, now + ttl);
-                        self.metrics.evictions_confirmed.fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .evictions_confirmed
+                            .fetch_add(1, Ordering::Relaxed);
                         out.push(m.file_id);
                         freed += m.size;
                     }

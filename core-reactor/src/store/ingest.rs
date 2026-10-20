@@ -14,8 +14,8 @@
 use super::index::{self, meta, ChunkLoc, FileRec, ObjectRec, PackLoc};
 use super::pack::PackPin;
 use super::{
-    class_code, id_hex, now, sha256, ChunkEntry, Id, Manifest, ObjEncoder, Reservation, Result, Store,
-    StoreError, CDC_AVG, CDC_MAX, CDC_MIN, CHUNK_MAX, OBJECT_MAX_PLAIN,
+    class_code, id_hex, now, sha256, ChunkEntry, Id, Manifest, ObjEncoder, Reservation, Result,
+    Store, StoreError, CDC_AVG, CDC_MAX, CDC_MIN, CHUNK_MAX, OBJECT_MAX_PLAIN,
 };
 use crate::classify;
 use fastcdc::v2020::StreamCDC;
@@ -45,7 +45,10 @@ pub struct PutOptions {
 
 impl Default for PutOptions {
     fn default() -> Self {
-        PutOptions { content_type: None, sample: true }
+        PutOptions {
+            content_type: None,
+            sample: true,
+        }
     }
 }
 
@@ -124,7 +127,13 @@ enum Begin {
 
 /// Ordered first half of staging a chunk (called in chunk order): in-file dedup, reservation
 /// (before the lookup, so GC cannot delete what we are about to reference) and the index lookup.
-fn begin_chunk(store: &Store, res: &mut Reservation<'_>, decided: &mut HashSet<Id>, id: Id, len: u32) -> Result<Begin> {
+fn begin_chunk(
+    store: &Store,
+    res: &mut Reservation<'_>,
+    decided: &mut HashSet<Id>,
+    id: Id,
+    len: u32,
+) -> Result<Begin> {
     if !decided.insert(id) {
         return Ok(Begin::Known);
     }
@@ -133,7 +142,11 @@ fn begin_chunk(store: &Store, res: &mut Reservation<'_>, decided: &mut HashSet<I
     if tx.open_table(index::CHUNK_LOC)?.get(&id)?.is_some() {
         return Ok(Begin::Known);
     }
-    let existing = tx.open_table(index::OBJECTS)?.get(&id)?.map(|g| ObjectRec::decode(g.value())).transpose()?;
+    let existing = tx
+        .open_table(index::OBJECTS)?
+        .get(&id)?
+        .map(|g| ObjectRec::decode(g.value()))
+        .transpose()?;
     if existing.is_some_and(|o| !o.quarantined() && o.plain_len == len as u64) {
         return Ok(Begin::Reuse);
     }
@@ -150,7 +163,9 @@ struct Front<'a> {
 
 impl Drop for Staging<'_> {
     fn drop(&mut self) {
-        self.store.inflight_bytes.fetch_sub(self.inflight, Ordering::Relaxed);
+        self.store
+            .inflight_bytes
+            .fetch_sub(self.inflight, Ordering::Relaxed);
         if !self.submitted {
             self.store.group.writer_done();
         }
@@ -239,12 +254,30 @@ impl<'a> Staging<'a> {
     /// Stages a small `blob` for the pack (appended at commit by the group-commit leader, or early
     /// once 16 MiB accumulated), a large one in a temp file (fsync + rename happen in batches in
     /// `flush`).
-    fn stage_blob(&mut self, id: Id, blob: Vec<u8>, plain_len: u64, class: u8, members: Vec<(Id, u32)>) -> Result<()> {
+    fn stage_blob(
+        &mut self,
+        id: Id,
+        blob: Vec<u8>,
+        plain_len: u64,
+        class: u8,
+        members: Vec<(Id, u32)>,
+    ) -> Result<()> {
         self.new_bytes += plain_len;
         if self.store.pack_eligible(blob.len()) {
             let n = blob.len() as u64;
             let flags = self.store.new_object_flags();
-            self.pending_objects.insert(id, PendingObject { stored_len: n, plain_len, class, members, in_pack: true, pack: None, flags });
+            self.pending_objects.insert(
+                id,
+                PendingObject {
+                    stored_len: n,
+                    plain_len,
+                    class,
+                    members,
+                    in_pack: true,
+                    pack: None,
+                    flags,
+                },
+            );
             self.packed.push((id, blob));
             self.packed_bytes += n;
             self.stored_bytes += n;
@@ -258,10 +291,20 @@ impl<'a> Staging<'a> {
         let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         std::fs::create_dir_all(&dir)?;
         let n = self.store.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        let tmp = dir.join(format!(".{}.obj.{}.{}.tmp", id_hex(&id), std::process::id(), n));
+        let tmp = dir.join(format!(
+            ".{}.obj.{}.{}.tmp",
+            id_hex(&id),
+            std::process::id(),
+            n
+        ));
         let mut f = File::create(&tmp)?;
         // register before writing so a failure removes the temp file
-        self.unsynced.push(Unsynced { id, tmp, file: None, len: blob.len() as u64 });
+        self.unsynced.push(Unsynced {
+            id,
+            tmp,
+            file: None,
+            len: blob.len() as u64,
+        });
         f.write_all(blob)?;
         if let Some(u) = self.unsynced.last_mut() {
             u.file = Some(f);
@@ -269,7 +312,18 @@ impl<'a> Staging<'a> {
         self.unsynced_bytes += blob.len() as u64;
         self.stored_bytes += blob.len() as u64;
         let flags = self.store.new_object_flags();
-        self.pending_objects.insert(id, PendingObject { stored_len: blob.len() as u64, plain_len, class, members, in_pack: false, pack: None, flags });
+        self.pending_objects.insert(
+            id,
+            PendingObject {
+                stored_len: blob.len() as u64,
+                plain_len,
+                class,
+                members,
+                in_pack: false,
+                pack: None,
+                flags,
+            },
+        );
         if self.unsynced.len() >= SYNC_BATCH_OBJECTS || self.unsynced_bytes >= SYNC_BATCH_BYTES {
             self.flush()?;
         }
@@ -283,7 +337,11 @@ impl<'a> Staging<'a> {
             return Ok(());
         }
         let store: &'a Store = self.store;
-        let items: Vec<(Id, &[u8])> = self.packed.iter().map(|(id, b)| (*id, b.as_slice())).collect();
+        let items: Vec<(Id, &[u8])> = self
+            .packed
+            .iter()
+            .map(|(id, b)| (*id, b.as_slice()))
+            .collect();
         let (locs, pin) = store.pack_append(&items)?;
         drop(items);
         self.pins.absorb(pin);
@@ -304,24 +362,30 @@ impl<'a> Staging<'a> {
         }
         let per = self.unsynced.len().div_ceil(SYNC_THREADS);
         let sync_err: Option<std::io::Error> = if self.unsynced.len() == 1 {
-            self.unsynced[0].file.as_ref().and_then(|f| f.sync_all().err())
+            self.unsynced[0]
+                .file
+                .as_ref()
+                .and_then(|f| f.sync_all().err())
         } else {
             std::thread::scope(|s| {
-            let handles: Vec<_> = self
-                .unsynced
-                .chunks(per)
-                .map(|group| {
-                    s.spawn(move || -> std::io::Result<()> {
-                        for u in group {
-                            if let Some(f) = &u.file {
-                                f.sync_all()?;
+                let handles: Vec<_> = self
+                    .unsynced
+                    .chunks(per)
+                    .map(|group| {
+                        s.spawn(move || -> std::io::Result<()> {
+                            for u in group {
+                                if let Some(f) = &u.file {
+                                    f.sync_all()?;
+                                }
                             }
-                        }
-                        Ok(())
+                            Ok(())
+                        })
                     })
-                })
-                .collect();
-            handles.into_iter().filter_map(|h| h.join().ok().and_then(|r| r.err())).next()
+                    .collect();
+                handles
+                    .into_iter()
+                    .filter_map(|h| h.join().ok().and_then(|r| r.err()))
+                    .next()
             })
         };
         if let Some(e) = sync_err {
@@ -361,26 +425,43 @@ impl<'a> Staging<'a> {
                     .get(id)?
                     .map(|g| ChunkLoc::decode(g.value()))
                     .transpose()?
-                    .ok_or_else(|| StoreError::Invalid(format!("chunk {} not available", id_hex(id))))?;
+                    .ok_or_else(|| {
+                        StoreError::Invalid(format!("chunk {} not available", id_hex(id)))
+                    })?;
                 (loc.object, loc.offset, loc.len)
             }
         };
         if cache.as_ref().map(|c| c.0) != Some(obj) {
             // staged objects are not indexed yet: held in memory, or early-flushed into a pack
             let plain = if let Some((_, blob)) = self.packed.iter().find(|(i, _)| *i == obj) {
-                self.store.decode_blob(&self.store.open_stored(&obj, blob)?)?
-            } else if let Some((loc, len)) = self.pending_objects.get(&obj).and_then(|p| p.pack.map(|l| (l, p.stored_len))) {
-                let raw = self.store.read_packed(&obj, loc, len).map_err(StoreError::Corrupt)?;
-                self.store.decode_blob(&self.store.open_stored(&obj, &raw)?)?
+                self.store
+                    .decode_blob(&self.store.open_stored(&obj, blob)?)?
+            } else if let Some((loc, len)) = self
+                .pending_objects
+                .get(&obj)
+                .and_then(|p| p.pack.map(|l| (l, p.stored_len)))
+            {
+                let raw = self
+                    .store
+                    .read_packed(&obj, loc, len)
+                    .map_err(StoreError::Corrupt)?;
+                self.store
+                    .decode_blob(&self.store.open_stored(&obj, &raw)?)?
             } else {
                 self.store.read_object_plain(&obj)?
             };
             *cache = Some((obj, plain));
         }
-        let plain = &cache.as_ref().map(|c| &c.1).ok_or_else(|| StoreError::Corrupt("cache".into()))?;
+        let plain = &cache
+            .as_ref()
+            .map(|c| &c.1)
+            .ok_or_else(|| StoreError::Corrupt("cache".into()))?;
         let (s, e) = (off as usize, off as usize + len as usize);
         if e > plain.len() || sha256(&plain[s..e]) != *id {
-            return Err(StoreError::Corrupt(format!("chunk {} failed verification", id_hex(id))));
+            return Err(StoreError::Corrupt(format!(
+                "chunk {} failed verification",
+                id_hex(id)
+            )));
         }
         Ok(plain[s..e].to_vec())
     }
@@ -430,7 +511,11 @@ impl<'a> Staging<'a> {
 }
 
 /// Applies one upload's index changes inside a (possibly shared) write transaction.
-pub(crate) fn apply_commit(t: &mut super::index::Tables<'_>, job: &super::group::CommitJob, ts: u64) -> Result<(bool, u64)> {
+pub(crate) fn apply_commit(
+    t: &mut super::index::Tables<'_>,
+    job: &super::group::CommitJob,
+    ts: u64,
+) -> Result<(bool, u64)> {
     let file_id = job.file_id;
     if let Some(mut rec) = t.get_file(&file_id)? {
         let mut pins = t.pins.get(&file_id)?.map(|g| g.value()).unwrap_or(0);
@@ -451,18 +536,22 @@ pub(crate) fn apply_commit(t: &mut super::index::Tables<'_>, job: &super::group:
     for (id, (k, len)) in occ {
         if let Some(loc) = t.get_loc(&id)? {
             if loc.len != len {
-                return Err(StoreError::Corrupt(format!("chunk {} length mismatch", id_hex(&id))));
+                return Err(StoreError::Corrupt(format!(
+                    "chunk {} length mismatch",
+                    id_hex(&id)
+                )));
             }
             t.chunk_ref_add(&id, loc, k)?;
             continue;
         }
-        let (obj, off, clen) = job
-            .pending_chunks
-            .get(&id)
-            .copied()
-            .ok_or_else(|| StoreError::Corrupt(format!("chunk {} neither indexed nor staged", id_hex(&id))))?;
+        let (obj, off, clen) = job.pending_chunks.get(&id).copied().ok_or_else(|| {
+            StoreError::Corrupt(format!("chunk {} neither indexed nor staged", id_hex(&id)))
+        })?;
         if clen != len {
-            return Err(StoreError::Invalid(format!("chunk {} length mismatch", id_hex(&id))));
+            return Err(StoreError::Invalid(format!(
+                "chunk {} length mismatch",
+                id_hex(&id)
+            )));
         }
         match t.get_obj(&obj)? {
             Some(mut o) => {
@@ -473,12 +562,14 @@ pub(crate) fn apply_commit(t: &mut super::index::Tables<'_>, job: &super::group:
                 }
             }
             None => {
-                let p = job
-                    .pending_objects
-                    .get(&obj)
-                    .ok_or_else(|| StoreError::Corrupt(format!("object {} vanished before commit", id_hex(&obj))))?;
+                let p = job.pending_objects.get(&obj).ok_or_else(|| {
+                    StoreError::Corrupt(format!("object {} vanished before commit", id_hex(&obj)))
+                })?;
                 if p.in_pack && p.pack.is_none() {
-                    return Err(StoreError::Corrupt(format!("object {} was not written to a pack", id_hex(&obj))));
+                    return Err(StoreError::Corrupt(format!(
+                        "object {} was not written to a pack",
+                        id_hex(&obj)
+                    )));
                 }
                 t.insert_object(
                     &obj,
@@ -496,14 +587,28 @@ pub(crate) fn apply_commit(t: &mut super::index::Tables<'_>, job: &super::group:
                 )?;
             }
         }
-        let loc = ChunkLoc { object: obj, offset: off, len, refs: 0 };
+        let loc = ChunkLoc {
+            object: obj,
+            offset: off,
+            len,
+            refs: 0,
+        };
         t.put_loc(&id, &loc)?;
         t.chunk_ref_add(&id, loc, k)?;
     }
     for (off, id, len) in &job.chunks {
-        t.mchunks.insert(&index::mchunk_key(&file_id, *off), &index::mchunk_val(id, *len))?;
+        t.mchunks.insert(
+            &index::mchunk_key(&file_id, *off),
+            &index::mchunk_val(id, *len),
+        )?;
     }
-    let rec = FileRec { size: job.size, chunk_count: job.chunks.len() as u64, created_ms: job.created_ms, origin: job.origin, class: job.class };
+    let rec = FileRec {
+        size: job.size,
+        chunk_count: job.chunks.len() as u64,
+        created_ms: job.created_ms,
+        origin: job.origin,
+        class: job.class,
+    };
     t.manifests.insert(&file_id, rec.encode().as_slice())?;
     let pins = if job.pin { 1 } else { 0 };
     if job.pin {
@@ -531,7 +636,11 @@ struct Credit {
 
 impl Credit {
     fn new(cap: u64) -> Credit {
-        Credit { state: Mutex::new((0, false)), cv: Condvar::new(), cap }
+        Credit {
+            state: Mutex::new((0, false)),
+            cv: Condvar::new(),
+            cap,
+        }
     }
 
     /// Waits until `len` more bytes fit; returns the new in-flight total, `None` once aborted.
@@ -613,7 +722,11 @@ impl Store {
                 }
             }
             self.stats.full_rejections.fetch_add(1, Ordering::Relaxed);
-            return Err(StoreError::Full { needed: bytes, used, max });
+            return Err(StoreError::Full {
+                needed: bytes,
+                used,
+                max,
+            });
         }
     }
 
@@ -673,7 +786,11 @@ impl Store {
             stored_bytes,
             new_bytes,
             new_chunks: if duplicate { 0 } else { new_chunks },
-            dedup_chunks: if duplicate { c.chunks.len() as u64 } else { dedup_chunks },
+            dedup_chunks: if duplicate {
+                c.chunks.len() as u64
+            } else {
+                dedup_chunks
+            },
             chunks: c.chunks.len() as u64,
             class: c.class,
             duplicate,
@@ -693,13 +810,19 @@ impl Store {
         let mut chunks: Vec<(u64, Id, u32)> = Vec::new();
         let mut size = 0u64;
         let mut enc: Option<Arc<ObjEncoder>> = None;
-        let sample_max = if opts.sample { self.engine.cfg.sample_bytes_max } else { 0 };
+        let sample_max = if opts.sample {
+            self.engine.cfg.sample_bytes_max
+        } else {
+            0
+        };
         let mut sample: Vec<u8> = Vec::new();
         for item in StreamCDC::new(reader, CDC_MIN, CDC_AVG, CDC_MAX) {
             let c = item.map_err(cdc_err)?;
             let data = c.data;
             hasher.update(&data);
-            let enc = enc.get_or_insert_with(|| Arc::new(self.encoder(classify::classify(&data, opts.content_type.as_deref()))));
+            let enc = enc.get_or_insert_with(|| {
+                Arc::new(self.encoder(classify::classify(&data, opts.content_type.as_deref())))
+            });
             if sample.len() < sample_max {
                 let take = (sample_max - sample.len()).min(data.len());
                 sample.extend_from_slice(&data[..take]);
@@ -711,19 +834,37 @@ impl Store {
             size += len as u64;
         }
         let class = enc.as_ref().map(|e| e.class).unwrap_or(classify::EMPTY);
-        Ok(Chunked { file_id: hasher.finalize().into(), size, chunks, class, sample })
+        Ok(Chunked {
+            file_id: hasher.finalize().into(),
+            size,
+            chunks,
+            class,
+            sample,
+        })
     }
 
     /// The parallel pipeline of [`Store::put_reader`].
-    fn chunk_parallel<'a, R: Read>(&'a self, reader: R, opts: &PutOptions, st: &mut Staging<'a>) -> Result<Chunked> {
+    fn chunk_parallel<'a, R: Read>(
+        &'a self,
+        reader: R,
+        opts: &PutOptions,
+        st: &mut Staging<'a>,
+    ) -> Result<Chunked> {
         let credit = Credit::new(self.cfg.ingest_inflight_bytes.max(1));
-        let mut front = Front { res: Reservation::new(self), decided: HashSet::new(), reuse: Vec::new(), dedup_chunks: 0 };
+        let mut front = Front {
+            res: Reservation::new(self),
+            decided: HashSet::new(),
+            reuse: Vec::new(),
+            dedup_chunks: 0,
+        };
         let (tx, rx) = mpsc::channel::<Submitted>();
         let (chunked, staged) = std::thread::scope(|s| {
             let (credit, stage) = (&credit, &mut *st);
             let stager = s.spawn(move || -> Result<()> {
                 let r = rx.iter().try_for_each(|(id, len, class, res)| {
-                    let blob = res.recv().map_err(|_| StoreError::Corrupt("compression worker vanished".into()))??;
+                    let blob = res
+                        .recv()
+                        .map_err(|_| StoreError::Corrupt("compression worker vanished".into()))??;
                     stage.finish_chunk(id, len, class, blob)?;
                     credit.release(len as u64);
                     Ok(())
@@ -744,7 +885,9 @@ impl Store {
                     }
                     Begin::New => {
                         let total = credit.acquire(len as u64).ok_or_else(stager_gone)?;
-                        self.stats.ingest_inflight_peak.fetch_max(total, Ordering::Relaxed);
+                        self.stats
+                            .ingest_inflight_peak
+                            .fetch_max(total, Ordering::Relaxed);
                         self.stats.pool_chunks.fetch_add(1, Ordering::Relaxed);
                         let (rtx, rrx) = mpsc::sync_channel::<EncodeResult>(1);
                         let class = class_code(enc.class);
@@ -752,9 +895,13 @@ impl Store {
                         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
                             // compress, verify and seal on the pool (encryption scales with it)
                             let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                                super::encode_verified_with(&engine, &enc, &data).map(|b| engine.cfg.keys.seal(crate::crypto::Kind::Object, &id, b))
+                                super::encode_verified_with(&engine, &enc, &data).map(|b| {
+                                    engine.cfg.keys.seal(crate::crypto::Kind::Object, &id, b)
+                                })
                             }))
-                                .unwrap_or_else(|_| Err(StoreError::Corrupt("compression worker panicked".into())));
+                            .unwrap_or_else(|_| {
+                                Err(StoreError::Corrupt("compression worker panicked".into()))
+                            });
                             let _ = rtx.send(r);
                         });
                         if let Err(job) = crate::workers::pool().spawn(job) {
@@ -767,7 +914,9 @@ impl Store {
             });
             // `tx` was moved into the chunker closure and is dropped by now: the stager drains
             // what was submitted and exits
-            let staged = stager.join().unwrap_or_else(|_| Err(StoreError::Corrupt("ingest stager panicked".into())));
+            let staged = stager
+                .join()
+                .unwrap_or_else(|_| Err(StoreError::Corrupt("ingest stager panicked".into())));
             (chunked, staged)
         });
         st.absorb_front(front);
@@ -785,13 +934,28 @@ impl Store {
     pub fn begin_import(&self, manifest: Manifest) -> Result<Import<'_>> {
         let total: u64 = manifest.chunks.iter().map(|c| c.len as u64).sum();
         if total != manifest.size {
-            return Err(StoreError::Invalid(format!("manifest chunk lengths sum to {} but size is {}", total, manifest.size)));
+            return Err(StoreError::Invalid(format!(
+                "manifest chunk lengths sum to {} but size is {}",
+                total, manifest.size
+            )));
         }
-        if manifest.chunks.iter().any(|c| c.len == 0 || c.len as usize > CHUNK_MAX) {
-            return Err(StoreError::Invalid("manifest chunk length out of range".into()));
+        if manifest
+            .chunks
+            .iter()
+            .any(|c| c.len == 0 || c.len as usize > CHUNK_MAX)
+        {
+            return Err(StoreError::Invalid(
+                "manifest chunk length out of range".into(),
+            ));
         }
         let mut st = Staging::new(self);
-        let ids: Vec<Id> = manifest.chunks.iter().map(|c| c.id).collect::<HashSet<_>>().into_iter().collect();
+        let ids: Vec<Id> = manifest
+            .chunks
+            .iter()
+            .map(|c| c.id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         st.res.add_all(&ids);
         let mut missing = HashSet::new();
         {
@@ -803,7 +967,11 @@ impl Store {
                 }
             }
         }
-        Ok(Import { st, manifest, missing })
+        Ok(Import {
+            st,
+            manifest,
+            missing,
+        })
     }
 }
 
@@ -835,7 +1003,12 @@ impl Import<'_> {
     /// It is verified (decode, plaintext SHA-256 = `object_id`, every member's SHA-256 at its
     /// offset) and stored as-is, sealed under this node's active key. `members` are the object's chunks in plaintext order. Returns how many missing
     /// chunks it satisfied (an object that satisfies none is not stored).
-    pub fn add_object(&mut self, object_id: &Id, raw: &[u8], members: &[ChunkEntry]) -> Result<usize> {
+    pub fn add_object(
+        &mut self,
+        object_id: &Id,
+        raw: &[u8],
+        members: &[ChunkEntry],
+    ) -> Result<usize> {
         if raw.len() > OBJECT_MAX_PLAIN + 1024 {
             return Err(StoreError::Invalid("object too large".into()));
         }
@@ -843,14 +1016,19 @@ impl Import<'_> {
         let plain = store.decode_object(object_id, raw)?;
         let total: u64 = members.iter().map(|m| m.len as u64).sum();
         if total != plain.len() as u64 {
-            return Err(StoreError::Invalid("member lengths do not cover the object".into()));
+            return Err(StoreError::Invalid(
+                "member lengths do not cover the object".into(),
+            ));
         }
         let mut off = 0usize;
         let mut useful = Vec::new();
         for m in members {
             let end = off + m.len as usize;
             if sha256(&plain[off..end]) != m.id {
-                return Err(StoreError::Invalid(format!("member {} hash mismatch", id_hex(&m.id))));
+                return Err(StoreError::Invalid(format!(
+                    "member {} hash mismatch",
+                    id_hex(&m.id)
+                )));
             }
             if self.missing.contains(&m.id) && !useful.iter().any(|(id, _, _)| *id == m.id) {
                 useful.push((m.id, off as u32, m.len));
@@ -867,9 +1045,13 @@ impl Import<'_> {
             _ => {
                 let stored = store.seal_object(object_id, raw.to_vec());
                 self.st.admit(stored.len() as u64)?;
-                let class = class_code(classify::classify(&plain[..plain.len().min(64 * 1024)], None));
+                let class = class_code(classify::classify(
+                    &plain[..plain.len().min(64 * 1024)],
+                    None,
+                ));
                 let ids = members.iter().map(|m| (m.id, m.len)).collect();
-                self.st.stage_blob(*object_id, stored, plain.len() as u64, class, ids)?;
+                self.st
+                    .stage_blob(*object_id, stored, plain.len() as u64, class, ids)?;
                 self.st.new_chunks += useful.len() as u64;
             }
         }
@@ -884,7 +1066,10 @@ impl Import<'_> {
     /// Adds one chunk's plaintext (compressed locally with the champion recipe).
     pub fn add_chunk(&mut self, chunk_id: &Id, plain: &[u8]) -> Result<bool> {
         if sha256(plain) != *chunk_id {
-            return Err(StoreError::Invalid(format!("chunk {} hash mismatch", id_hex(chunk_id))));
+            return Err(StoreError::Invalid(format!(
+                "chunk {} hash mismatch",
+                id_hex(chunk_id)
+            )));
         }
         if !self.missing.contains(chunk_id) {
             return Ok(false);
@@ -900,7 +1085,10 @@ impl Import<'_> {
     /// stored is a no-op.
     pub fn commit(mut self) -> Result<PutOutcome> {
         if !self.missing.is_empty() {
-            return Err(StoreError::Invalid(format!("{} chunks still missing", self.missing.len())));
+            return Err(StoreError::Invalid(format!(
+                "{} chunks still missing",
+                self.missing.len()
+            )));
         }
         self.st.flush()?;
         let mut hasher = Sha256::new();
@@ -911,7 +1099,10 @@ impl Import<'_> {
         for (i, c) in self.manifest.chunks.iter().enumerate() {
             let plain = self.st.chunk_plain(&c.id, &mut cache)?;
             if plain.len() != c.len as usize {
-                return Err(StoreError::Invalid(format!("chunk {} length mismatch", id_hex(&c.id))));
+                return Err(StoreError::Invalid(format!(
+                    "chunk {} length mismatch",
+                    id_hex(&c.id)
+                )));
             }
             if i == 0 {
                 class = classify::classify(&plain, None);
@@ -922,11 +1113,26 @@ impl Import<'_> {
         }
         let fid: Id = hasher.finalize().into();
         if fid != self.manifest.file_id {
-            return Err(StoreError::Invalid("chunks do not hash to the manifest file id".into()));
+            return Err(StoreError::Invalid(
+                "chunks do not hash to the manifest file id".into(),
+            ));
         }
-        let (new_chunks, dedup_chunks, stored, new_bytes) = (self.st.new_chunks, self.st.dedup_chunks, self.st.stored_bytes, self.st.new_bytes);
+        let (new_chunks, dedup_chunks, stored, new_bytes) = (
+            self.st.new_chunks,
+            self.st.dedup_chunks,
+            self.st.stored_bytes,
+            self.st.new_bytes,
+        );
         let m = &self.manifest;
-        let (duplicate, pins) = self.st.commit(m.file_id, m.size, &chunks, class, m.created_ms, false, false)?;
+        let (duplicate, pins) = self.st.commit(
+            m.file_id,
+            m.size,
+            &chunks,
+            class,
+            m.created_ms,
+            false,
+            false,
+        )?;
         Ok(PutOutcome {
             file_id: m.file_id,
             size: m.size,

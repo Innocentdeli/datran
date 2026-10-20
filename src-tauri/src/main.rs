@@ -1,8 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Manager, CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayMenuItem};
 use std::env;
+use tauri::{CustomMenuItem, Manager, SystemTray, SystemTrayMenu, SystemTrayMenuItem};
 
 /**
  * Datran desktop shell.
@@ -31,7 +31,7 @@ fn main() {
     // System Tray Setup
     const QUIT: &str = "quit";
     const OPEN: &str = "open";
-    
+
     let quit = CustomMenuItem::new(QUIT.to_string(), "Quit Datran");
     let open = CustomMenuItem::new(OPEN.to_string(), "Open Portal");
     let tray_menu = SystemTrayMenu::new()
@@ -43,24 +43,20 @@ fn main() {
 
     tauri::Builder::default()
         .system_tray(system_tray)
-        .on_system_tray_event(|app, event| {
-            match event {
-                tauri::SystemTrayEvent::MenuItemClick { id, .. } => {
-                    match id.as_str() {
-                        QUIT => {
-                            std::process::exit(0);
-                        }
-                        OPEN => {
-                            if let Some(window) = app.get_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        _ => {}
+        .on_system_tray_event(|app, event| match event {
+            tauri::SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
+                QUIT => {
+                    std::process::exit(0);
+                }
+                OPEN => {
+                    if let Some(window) = app.get_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
                     }
                 }
                 _ => {}
-            }
+            },
+            _ => {}
         })
         .setup(move |app| {
             if let Some(path) = initial_file {

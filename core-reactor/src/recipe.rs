@@ -28,7 +28,14 @@ pub struct Recipe {
 
 impl Recipe {
     pub fn new(codec: Codec, level: i32) -> Recipe {
-        Recipe { codec, level, window_log: None, filter: Filter::None, stride: 0, dict: None }
+        Recipe {
+            codec,
+            level,
+            window_log: None,
+            filter: Filter::None,
+            stride: 0,
+            dict: None,
+        }
     }
 
     pub fn with_filter(mut self, filter: Filter, stride: u8) -> Recipe {
@@ -83,21 +90,40 @@ impl Recipe {
     pub fn validate(&self) -> Result<(), String> {
         let (lo, hi) = Self::level_range(self.codec);
         if self.level < lo || self.level > hi {
-            return Err(format!("level {} out of range {}..={} for {}", self.level, lo, hi, self.codec.name()));
+            return Err(format!(
+                "level {} out of range {}..={} for {}",
+                self.level,
+                lo,
+                hi,
+                self.codec.name()
+            ));
         }
         match (self.window_log, Self::window_range(self.codec)) {
             (None, _) => {}
             (Some(w), Some((wlo, whi))) if w >= wlo && w <= whi => {}
-            (Some(w), _) => return Err(format!("window_log {} invalid for {}", w, self.codec.name())),
+            (Some(w), _) => {
+                return Err(format!(
+                    "window_log {} invalid for {}",
+                    w,
+                    self.codec.name()
+                ))
+            }
         }
         if !codec::valid_filter_stride(self.filter, self.stride) {
-            return Err(format!("stride {} invalid for filter {:?}", self.stride, self.filter));
+            return Err(format!(
+                "stride {} invalid for filter {:?}",
+                self.stride, self.filter
+            ));
         }
         if let Some(d) = &self.dict {
             if self.codec != Codec::Zstd {
                 return Err("dict is only allowed with zstd".into());
             }
-            if d.len() != 64 || !d.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+            if d.len() != 64
+                || !d
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            {
                 return Err("dict must be 64 lowercase hex characters".into());
             }
         }
@@ -149,7 +175,12 @@ impl Recipe {
 
     /// [`Recipe::encode`] with zstd multithreading (see [`codec::encode_with_workers`]); used only
     /// for large `/compress` bodies, never for fitness scoring.
-    pub fn encode_with_workers(&self, data: &[u8], dict: Option<&[u8]>, workers: u32) -> Result<Vec<u8>, String> {
+    pub fn encode_with_workers(
+        &self,
+        data: &[u8],
+        dict: Option<&[u8]>,
+        workers: u32,
+    ) -> Result<Vec<u8>, String> {
         self.validate()?;
         let id = self.dict_id();
         let dict_pair = match (&id, dict) {
@@ -193,7 +224,10 @@ mod tests {
             r#"{"codec":"lz4","level":0,"window_log":null,"filter":"none","stride":0,"dict":null}"#
         );
         assert_eq!(Recipe::from_json_value(&v), Some(r));
-        assert_eq!(Recipe::from_json_value(&json!({"codec":"lz4"})), Some(Recipe::new(Codec::Lz4, 0)));
+        assert_eq!(
+            Recipe::from_json_value(&json!({"codec":"lz4"})),
+            Some(Recipe::new(Codec::Lz4, 0))
+        );
     }
 
     #[test]

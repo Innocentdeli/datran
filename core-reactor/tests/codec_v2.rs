@@ -1,7 +1,9 @@
 mod common;
 
 use common::*;
-use core_reactor::codec::{self, decode_any, decode_v2, Codec, DecodeError, DictId, Filter, HEADER_LEN, STRIDES};
+use core_reactor::codec::{
+    self, decode_any, decode_v2, Codec, DecodeError, DictId, Filter, HEADER_LEN, STRIDES,
+};
 use core_reactor::recipe::Recipe;
 use std::sync::Arc;
 
@@ -57,10 +59,13 @@ fn roundtrip_every_codec_filter_stride_level() {
                 for (f, s) in filter_combos() {
                     let r = Recipe::new(codec, level).with_window(wl).with_filter(f, s);
                     r.validate().unwrap();
-                    let blob = r.encode(&data, None).unwrap_or_else(|e| panic!("{} {:?}: {}", name, r, e));
+                    let blob = r
+                        .encode(&data, None)
+                        .unwrap_or_else(|e| panic!("{} {:?}: {}", name, r, e));
                     assert_eq!(blob[0], 0x10);
                     assert_eq!(blob[2], codec.id());
-                    let out = decode_v2(&blob, LIMIT, &no_dict).unwrap_or_else(|e| panic!("{} {}: {}", name, r.label(), e));
+                    let out = decode_v2(&blob, LIMIT, &no_dict)
+                        .unwrap_or_else(|e| panic!("{} {}: {}", name, r.label(), e));
                     assert_eq!(out, data, "{} {}", name, r.label());
                     assert_eq!(decode_any(&blob, LIMIT, &no_dict).unwrap(), data);
                     count += 1;
@@ -82,14 +87,29 @@ fn roundtrip_with_dictionary() {
     let id = codec::sha256(&dict);
     let lookup = |i: &DictId| if *i == id { Some(dict.clone()) } else { None };
     let mut small_gain = false;
-    for (name, data) in datasets().into_iter().chain([("small_json", small_json(999))]) {
+    for (name, data) in datasets()
+        .into_iter()
+        .chain([("small_json", small_json(999))])
+    {
         for (level, wl) in levels(Codec::Zstd) {
             for (f, s) in filter_combos() {
-                let r = Recipe::new(Codec::Zstd, level).with_window(wl).with_filter(f, s).with_dict(Some(&id));
+                let r = Recipe::new(Codec::Zstd, level)
+                    .with_window(wl)
+                    .with_filter(f, s)
+                    .with_dict(Some(&id));
                 let blob = r.encode(&data, Some(&dict)).unwrap();
                 assert_eq!(&blob[17..49], &id);
-                assert_eq!(decode_v2(&blob, LIMIT, &lookup).unwrap(), data, "{} {}", name, r.label());
-                assert_eq!(decode_v2(&blob, LIMIT, &no_dict), Err(DecodeError::UnknownDict(id)));
+                assert_eq!(
+                    decode_v2(&blob, LIMIT, &lookup).unwrap(),
+                    data,
+                    "{} {}",
+                    name,
+                    r.label()
+                );
+                assert_eq!(
+                    decode_v2(&blob, LIMIT, &no_dict),
+                    Err(DecodeError::UnknownDict(id))
+                );
                 // a different dictionary with the same id must fail the CRC / decode, never succeed wrongly
                 let wrong = Arc::new(vec![0u8; 64]);
                 if !data.is_empty() {
@@ -105,7 +125,10 @@ fn roundtrip_with_dictionary() {
         }
     }
     assert!(small_gain, "dictionary should help a small JSON record");
-    assert!(Recipe::new(Codec::Zstd, 3).with_dict(Some(&id)).encode(b"x", None).is_err());
+    assert!(Recipe::new(Codec::Zstd, 3)
+        .with_dict(Some(&id))
+        .encode(b"x", None)
+        .is_err());
 }
 
 fn valid_blob(codec: Codec, f: Filter, s: u8) -> (Vec<u8>, Vec<u8>) {
@@ -117,7 +140,11 @@ fn valid_blob(codec: Codec, f: Filter, s: u8) -> (Vec<u8>, Vec<u8>) {
 fn assert_invalid(blob: &[u8], limit: usize, what: &str) {
     match decode_v2(blob, limit, &no_dict) {
         Err(DecodeError::Invalid(_)) => {}
-        other => panic!("{}: expected Invalid, got {:?}", what, other.map(|v| v.len())),
+        other => panic!(
+            "{}: expected Invalid, got {:?}",
+            what,
+            other.map(|v| v.len())
+        ),
     }
 }
 
@@ -201,11 +228,16 @@ fn decoder_rejects_every_rule() {
     // dictionary unknown
     let mut b = good.clone();
     b[17..49].copy_from_slice(&[7u8; 32]);
-    assert!(matches!(decode_v2(&b, LIMIT, &no_dict), Err(DecodeError::UnknownDict(id)) if id == [7u8; 32]));
+    assert!(
+        matches!(decode_v2(&b, LIMIT, &no_dict), Err(DecodeError::UnknownDict(id)) if id == [7u8; 32])
+    );
 
     // not a v2 flag through decode_v2; legacy still works through decode_any
     assert_invalid(&[0x02, 1, 2, 3], LIMIT, "legacy via v2");
-    assert_eq!(decode_any(&[0x02, 1, 2, 3], LIMIT, &no_dict).unwrap(), vec![1, 2, 3]);
+    assert_eq!(
+        decode_any(&[0x02, 1, 2, 3], LIMIT, &no_dict).unwrap(),
+        vec![1, 2, 3]
+    );
     assert!(decode_any(&[0x11; 60], LIMIT, &no_dict).is_err());
 }
 
@@ -213,7 +245,9 @@ fn decoder_rejects_every_rule() {
 fn decompression_bombs_are_capped() {
     let zeros = vec![0u8; 8 << 20];
     for codec in [Codec::Lz4, Codec::Deflate, Codec::Zstd, Codec::Brotli] {
-        let mut b = Recipe::new(codec, Recipe::default_level(codec)).encode(&zeros, None).unwrap();
+        let mut b = Recipe::new(codec, Recipe::default_level(codec))
+            .encode(&zeros, None)
+            .unwrap();
         // under a smaller limit the header check rejects it
         assert_invalid(&b, 1 << 20, "bomb limit");
         // a lying small length must also fail, without inflating everything
@@ -230,7 +264,11 @@ fn fuzz_corruptions_never_panic() {
     let mut seeds: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (i, codec) in Codec::ALL.into_iter().enumerate() {
         for (f, s) in [(Filter::None, 0), (Filter::Delta, 2), (Filter::Shuffle, 4)] {
-            let data = if i % 2 == 0 { json_logs(2_000, i as u64) } else { f32_sensor(500, i as u64) };
+            let data = if i % 2 == 0 {
+                json_logs(2_000, i as u64)
+            } else {
+                f32_sensor(500, i as u64)
+            };
             let r = Recipe::new(codec, Recipe::default_level(codec)).with_filter(f, s);
             seeds.push((r.encode(&data, None).unwrap(), data));
         }
@@ -283,7 +321,11 @@ fn fuzz_corruptions_never_panic() {
         }
         match decode_v2(&b, 32 << 20, &lookup) {
             Ok(out) => {
-                assert_eq!(&out, original, "corruption {} decoded to different bytes", i);
+                assert_eq!(
+                    &out, original,
+                    "corruption {} decoded to different bytes",
+                    i
+                );
                 exact += 1;
             }
             Err(_) => errors += 1,
@@ -300,8 +342,16 @@ fn zstd_mt_with_overlapped_verify_is_one_standard_frame() {
     for (level, window) in [(1, None), (3, Some(20))] {
         let b = encode_zstd_mt_verified(level, window, None, &data, 4).unwrap();
         let payload = &b[HEADER_LEN..];
-        assert_eq!(zstd::zstd_safe::find_frame_compressed_size(payload).ok(), Some(payload.len()));
-        assert_eq!(zstd::zstd_safe::get_frame_content_size(payload).ok().flatten(), Some(data.len() as u64));
+        assert_eq!(
+            zstd::zstd_safe::find_frame_compressed_size(payload).ok(),
+            Some(payload.len())
+        );
+        assert_eq!(
+            zstd::zstd_safe::get_frame_content_size(payload)
+                .ok()
+                .flatten(),
+            Some(data.len() as u64)
+        );
         assert_eq!(decode_v2(&b, usize::MAX, &|_| None).unwrap(), data);
         verify_v2(&b, &data, &|_| None).unwrap();
         // the streaming verify rejects a blob that does not match the input

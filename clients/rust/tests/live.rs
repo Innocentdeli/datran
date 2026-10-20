@@ -28,7 +28,10 @@ async fn store_available(c: &Client) -> bool {
     match c.store_stats().await {
         Ok(_) => true,
         Err(e) if e.is_not_found() || e.status() == Some(503) => {
-            eprintln!("SKIPPED: store not available on this reactor (/store/stats -> {:?})", e.status());
+            eprintln!(
+                "SKIPPED: store not available on this reactor (/store/stats -> {:?})",
+                e.status()
+            );
             false
         }
         Err(e) => panic!("store_stats: {}", e),
@@ -57,7 +60,13 @@ async fn compress_roundtrip_and_status() {
     let r = reactor_or_skip!();
     let c = client(&r);
     let data = common::sample_text(5000);
-    let out = c.compress(data.clone(), &UploadOptions::content_type("application/json")).await.unwrap();
+    let out = c
+        .compress(
+            data.clone(),
+            &UploadOptions::content_type("application/json"),
+        )
+        .await
+        .unwrap();
     assert_eq!(out.meta.original_size, data.len() as u64);
     assert_eq!(out.meta.compressed_size, out.data.len() as u64);
     assert!(out.data.len() < data.len());
@@ -65,7 +74,10 @@ async fn compress_roundtrip_and_status() {
     assert!(out.meta.recipe.is_some());
     assert!(!out.meta.content_class.is_empty());
     assert!(out.meta.ratio > 1.0);
-    assert_eq!(c.decompress(out.data.clone()).await.unwrap(), Bytes::from(data));
+    assert_eq!(
+        c.decompress(out.data.clone()).await.unwrap(),
+        Bytes::from(data)
+    );
 
     let s = c.evolution_status().await.unwrap();
     assert!(s.interval_ms > 0);
@@ -77,9 +89,15 @@ async fn streaming_compress_decompress() {
     let r = reactor_or_skip!();
     let c = client(&r);
     let data = common::sample_text(20000);
-    let chunks: Vec<Result<Bytes, std::io::Error>> = data.chunks(10_000).map(|c| Ok(Bytes::copy_from_slice(c))).collect();
+    let chunks: Vec<Result<Bytes, std::io::Error>> = data
+        .chunks(10_000)
+        .map(|c| Ok(Bytes::copy_from_slice(c)))
+        .collect();
     let body = datran_client::Body::wrap_stream(futures_util::stream::iter(chunks));
-    let (meta, mut s) = c.compress_stream(body, &UploadOptions::default().no_sample()).await.unwrap();
+    let (meta, mut s) = c
+        .compress_stream(body, &UploadOptions::default().no_sample())
+        .await
+        .unwrap();
     let mut blob = Vec::new();
     while let Some(b) = s.next().await {
         blob.extend_from_slice(&b.unwrap());
@@ -97,10 +115,16 @@ async fn streaming_compress_decompress() {
 async fn empty_random_and_errors() {
     let r = reactor_or_skip!();
     let c = client(&r);
-    let e = c.compress(Vec::new(), &UploadOptions::default()).await.unwrap();
+    let e = c
+        .compress(Vec::new(), &UploadOptions::default())
+        .await
+        .unwrap();
     assert!(c.decompress(e.data).await.unwrap().is_empty());
     let rnd = common::random_bytes(50_000, 7);
-    let out = c.compress(rnd.clone(), &UploadOptions::default()).await.unwrap();
+    let out = c
+        .compress(rnd.clone(), &UploadOptions::default())
+        .await
+        .unwrap();
     assert_eq!(out.meta.content_class, "media/compressed");
     assert!(out.meta.recipe.is_none());
     assert_eq!(out.meta.format, "legacy-raw");
@@ -121,7 +145,11 @@ async fn empty_random_and_errors() {
 
 #[tokio::test]
 async fn transport_error_on_refused_connection() {
-    let c = Client::builder("http://127.0.0.1:9").max_retries(1).backoff(Duration::from_millis(1)).build().unwrap();
+    let c = Client::builder("http://127.0.0.1:9")
+        .max_retries(1)
+        .backoff(Duration::from_millis(1))
+        .build()
+        .unwrap();
     let e = c.health().await.unwrap_err();
     assert!(matches!(e, datran_client::Error::Transport(_)), "{e:?}");
 }
@@ -136,7 +164,13 @@ async fn store_put_get_range_delete() {
     let mut data = common::sample_text(30000);
     data.extend(common::random_bytes(100_000, 42));
     let fid = sha_hex(&data);
-    let put = c.store_put(data.clone(), &UploadOptions::content_type("application/json")).await.unwrap();
+    let put = c
+        .store_put(
+            data.clone(),
+            &UploadOptions::content_type("application/json"),
+        )
+        .await
+        .unwrap();
     assert_eq!(put.file_id, fid);
     assert_eq!(put.size, data.len() as u64);
     assert!(!put.duplicate);
@@ -159,15 +193,30 @@ async fn store_put_get_range_delete() {
     assert_eq!(h.etag.as_deref(), Some(etag.as_str()));
     assert!(c.store_exists(&fid.to_uppercase()).await.unwrap());
 
-    let g = c.store_get(&fid, Some(ByteRange::Span(1000, 1999))).await.unwrap();
+    let g = c
+        .store_get(&fid, Some(ByteRange::Span(1000, 1999)))
+        .await
+        .unwrap();
     assert_eq!(g.info.status, 206);
     assert_eq!(&g.data[..], &data[1000..2000]);
-    assert_eq!((g.info.start, g.info.end, g.info.total), (1000, Some(1999), Some(data.len() as u64)));
-    let s = c.store_get(&fid, Some(ByteRange::Suffix(777))).await.unwrap();
+    assert_eq!(
+        (g.info.start, g.info.end, g.info.total),
+        (1000, Some(1999), Some(data.len() as u64))
+    );
+    let s = c
+        .store_get(&fid, Some(ByteRange::Suffix(777)))
+        .await
+        .unwrap();
     assert_eq!(&s.data[..], &data[data.len() - 777..]);
-    let f = c.store_get(&fid, Some(ByteRange::From(data.len() as u64 - 10))).await.unwrap();
+    let f = c
+        .store_get(&fid, Some(ByteRange::From(data.len() as u64 - 10)))
+        .await
+        .unwrap();
     assert_eq!(&f.data[..], &data[data.len() - 10..]);
-    let e = c.store_get(&fid, Some(ByteRange::From(data.len() as u64 + 10))).await.unwrap_err();
+    let e = c
+        .store_get(&fid, Some(ByteRange::From(data.len() as u64 + 10)))
+        .await
+        .unwrap_err();
     assert_eq!(e.kind(), Some(ErrorKind::RangeNotSatisfiable));
     assert_eq!(e.api().unwrap().range_total(), Some(data.len() as u64));
 
@@ -177,7 +226,10 @@ async fn store_put_get_range_delete() {
     assert_eq!(sha_hex(&sink), fid);
 
     let d = c.store_delete(&fid).await.unwrap();
-    assert_eq!((d.file_id.as_str(), d.pins, d.deleted), (fid.as_str(), 0, true));
+    assert_eq!(
+        (d.file_id.as_str(), d.pins, d.deleted),
+        (fid.as_str(), 0, true)
+    );
     assert!(c.store_get(&fid, None).await.unwrap_err().is_not_found());
     assert!(!c.store_exists(&fid).await.unwrap());
     assert!(c.store_delete(&fid).await.unwrap_err().is_not_found());
@@ -191,16 +243,31 @@ async fn store_put_file_chunked_dedup_pins_stats() {
         return;
     }
     // A per-run tag on every line keeps every chunk unique, so the first put stores all of it.
-    let tag = format!("\"{:x}-user", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
-    let data = String::from_utf8(common::sample_text(8000)).unwrap().replace("\"user", &tag).into_bytes();
+    let tag = format!(
+        "\"{:x}-user",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let data = String::from_utf8(common::sample_text(8000))
+        .unwrap()
+        .replace("\"user", &tag)
+        .into_bytes();
     let fid = sha_hex(&data);
     let path = std::env::temp_dir().join(format!("datran-rs-up-{}.json", std::process::id()));
     std::fs::write(&path, &data).unwrap();
-    let a = c.store_put_file(&path, &UploadOptions::default()).await.unwrap();
+    let a = c
+        .store_put_file(&path, &UploadOptions::default())
+        .await
+        .unwrap();
     std::fs::remove_file(&path).ok();
     // Unknown length -> chunked transfer encoding.
     let reader = std::io::Cursor::new(data.clone());
-    let b = c.store_put_reader(reader, None, &UploadOptions::default()).await.unwrap();
+    let b = c
+        .store_put_reader(reader, None, &UploadOptions::default())
+        .await
+        .unwrap();
     assert_eq!(a.file_id, fid);
     assert_eq!(b.file_id, fid);
     assert_eq!(b.new_chunks, 0);
@@ -222,7 +289,10 @@ async fn store_put_file_chunked_dedup_pins_stats() {
     // Typed stats while a file is stored.
     let before = c.store_stats().await.unwrap();
     let small = common::sample_text(3000);
-    let p = c.store_put(small.clone(), &UploadOptions::default()).await.unwrap();
+    let p = c
+        .store_put(small.clone(), &UploadOptions::default())
+        .await
+        .unwrap();
     let s = c.store_stats().await.unwrap();
     assert!(s.files >= 1);
     assert!(s.puts > before.puts);
@@ -234,13 +304,27 @@ async fn store_put_file_chunked_dedup_pins_stats() {
     assert!(s.fusion.coaccess_min > 0.0);
     assert!(s.group_commit.as_ref().is_some_and(|g| g.jobs >= 1));
     assert_eq!(s.cluster, None); // single reactor without REACTOR_CLUSTER_TOKEN
-    let nc = Client::builder(&r.url).token(r.token.clone().unwrap_or_default()).max_retries(0).build().unwrap();
+    let nc = Client::builder(&r.url)
+        .token(r.token.clone().unwrap_or_default())
+        .max_retries(0)
+        .build()
+        .unwrap();
     assert_eq!(nc.cluster_status().await.unwrap_err().status(), Some(503));
     c.store_delete(&p.file_id).await.unwrap();
 
-    assert!(c.store_get(&"0".repeat(64), None).await.unwrap_err().is_not_found());
+    assert!(c
+        .store_get(&"0".repeat(64), None)
+        .await
+        .unwrap_err()
+        .is_not_found());
     // Well-formed path segment but not a SHA-256 -> 400 "invalid file id".
-    assert_eq!(c.store_get(&"zz".repeat(32), None).await.unwrap_err().status(), Some(400));
+    assert_eq!(
+        c.store_get(&"zz".repeat(32), None)
+            .await
+            .unwrap_err()
+            .status(),
+        Some(400)
+    );
 }
 
 async fn wait_healthy(c: &Client, peer: &str) -> Option<datran_client::ClusterStatus> {
@@ -257,14 +341,28 @@ async fn wait_healthy(c: &Client, peer: &str) -> Option<datran_client::ClusterSt
 
 #[tokio::test]
 async fn cluster_two_nodes_remote_read_forwarded_delete_and_admin() {
-    let Some(cl) = common::start_cluster(2, 200) else { return };
+    let Some(cl) = common::start_cluster(2, 200) else {
+        return;
+    };
     let (a, b) = (client(&cl.nodes[0]), client(&cl.nodes[1]));
     let a_id = a.cluster_status().await.unwrap().node_id;
     let b_id = b.cluster_status().await.unwrap().node_id;
     assert_ne!(a_id, b_id);
-    let sa = wait_healthy(&a, &b_id).await.expect("A never saw B healthy");
-    wait_healthy(&b, &a_id).await.expect("B never saw A healthy");
-    assert_eq!((sa.cluster_size, sa.min_replicas, sa.min_replicas_effective, sa.gossip_interval_ms), (2, 1, 1, 200));
+    let sa = wait_healthy(&a, &b_id)
+        .await
+        .expect("A never saw B healthy");
+    wait_healthy(&b, &a_id)
+        .await
+        .expect("B never saw A healthy");
+    assert_eq!(
+        (
+            sa.cluster_size,
+            sa.min_replicas,
+            sa.min_replicas_effective,
+            sa.gossip_interval_ms
+        ),
+        (2, 1, 1, 200)
+    );
     let pb = sa.peer(&b_id).unwrap();
     assert_eq!(pb.url, cl.nodes[1].url);
     assert!(!pb.is_self && pb.consecutive_failures == 0 && pb.last_ok_ms.is_some());
@@ -272,10 +370,22 @@ async fn cluster_two_nodes_remote_read_forwarded_delete_and_admin() {
     let mut data = common::sample_text(4000);
     data.extend(common::random_bytes(20_000, 9));
     let fid = sha_hex(&data);
-    assert_eq!(a.store_put(data.clone(), &UploadOptions::default()).await.unwrap().file_id, fid);
+    assert_eq!(
+        a.store_put(data.clone(), &UploadOptions::default())
+            .await
+            .unwrap()
+            .file_id,
+        fid
+    );
     let g = b.store_get(&fid, None).await.unwrap(); // remote read from A
     assert_eq!(&g.data[..], &data[..]);
-    assert_eq!(&b.store_get(&fid, Some(ByteRange::Span(100, 199))).await.unwrap().data[..], &data[100..200]);
+    assert_eq!(
+        &b.store_get(&fid, Some(ByteRange::Span(100, 199)))
+            .await
+            .unwrap()
+            .data[..],
+        &data[100..200]
+    );
     let st = b.store_stats().await.unwrap();
     let m = st.cluster.expect("cluster metrics in /store/stats");
     assert!(m.remote_reads >= 1 && m.remote_read_bytes > 0);
@@ -284,18 +394,33 @@ async fn cluster_two_nodes_remote_read_forwarded_delete_and_admin() {
     let adm = datran_client::ClusterAdmin::new(&cl.nodes[0].url, &cl.cluster_token).unwrap();
     let inv = adm.inventory(None, None).await.unwrap();
     assert!(inv.full && inv.added.contains(&fid) && inv.node_id == a_id);
-    let delta = adm.inventory(Some(inv.version), Some(inv.now_ms)).await.unwrap();
+    let delta = adm
+        .inventory(Some(inv.version), Some(inv.now_ms))
+        .await
+        .unwrap();
     assert!(!delta.full && delta.added.is_empty() && delta.version == inv.version);
     let h = adm.hold(&fid, "sdktest", false, 0).await.unwrap();
     assert!(h.granted && h.expires_ms > 0 && !h.origin_accepted);
-    let refused = adm.hold(&"0".repeat(64), "sdktest", false, 0).await.unwrap();
-    assert_eq!((refused.granted, refused.reason.as_deref()), (false, Some("not held")));
+    let refused = adm
+        .hold(&"0".repeat(64), "sdktest", false, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        (refused.granted, refused.reason.as_deref()),
+        (false, Some("not held"))
+    );
     let bad = datran_client::ClusterAdmin::new(&cl.nodes[0].url, "wrong").unwrap();
-    assert_eq!(bad.inventory(None, None).await.unwrap_err().kind(), Some(ErrorKind::Unauthorized));
+    assert_eq!(
+        bad.inventory(None, None).await.unwrap_err().kind(),
+        Some(ErrorKind::Unauthorized)
+    );
 
     // B does not hold the file: the unpin is forwarded to A (origin)
     let d = b.store_delete(&fid).await.unwrap();
-    assert_eq!((d.pins, d.deleted, d.forwarded_to.as_deref()), (0, true, Some(a_id.as_str())));
+    assert_eq!(
+        (d.pins, d.deleted, d.forwarded_to.as_deref()),
+        (0, true, Some(a_id.as_str()))
+    );
     assert!(a.store_get(&fid, None).await.unwrap_err().is_not_found());
     drop(cl);
 }

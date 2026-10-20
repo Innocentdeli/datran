@@ -87,7 +87,11 @@ pub fn check_record(id: &Id, rec: &[u8]) -> std::result::Result<(), String> {
         return Err("pack record holds a different object".into());
     }
     if u32_at(36) as usize != rec.len() - h {
-        return Err(format!("pack record length {} != index {}", u32_at(36), rec.len() - h));
+        return Err(format!(
+            "pack record length {} != index {}",
+            u32_at(36),
+            rec.len() - h
+        ));
     }
     if u32_at(40) != record_crc(id, &rec[h..]) {
         return Err("pack record CRC mismatch".into());
@@ -107,7 +111,10 @@ fn read_exact_at(f: &File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
     while done < buf.len() {
         let n = f.seek_read(&mut buf[done..], off + done as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "pack ends inside the record"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "pack ends inside the record",
+            ));
         }
         done += n;
     }
@@ -126,7 +133,10 @@ fn write_all_at(f: &File, buf: &[u8], off: u64) -> std::io::Result<()> {
     while done < buf.len() {
         let n = f.seek_write(&buf[done..], off + done as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "pack write returned 0"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "pack write returned 0",
+            ));
         }
         done += n;
     }
@@ -179,7 +189,10 @@ impl PackPin<'_> {
 
 impl<'a> PackPin<'a> {
     pub fn none(store: &'a Store) -> PackPin<'a> {
-        PackPin { store, packs: Vec::new() }
+        PackPin {
+            store,
+            packs: Vec::new(),
+        }
     }
 }
 
@@ -224,7 +237,10 @@ pub struct CompactReport {
 
 impl Store {
     pub(crate) fn pack_path(&self, pack: u64) -> PathBuf {
-        self.cfg.dir.join("packs").join(format!("{:016x}.pack", pack))
+        self.cfg
+            .dir
+            .join("packs")
+            .join(format!("{:016x}.pack", pack))
     }
 
     /// Whether a stored object of `len` bytes goes into a pack.
@@ -236,7 +252,11 @@ impl Store {
         let id = w.next_id.max(1);
         w.next_id = id + 1;
         let path = self.pack_path(id);
-        let f = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
         let mut hdr = [0u8; PACK_HEADER as usize];
         hdr[..8].copy_from_slice(PACK_MAGIC);
         hdr[8..].copy_from_slice(&id.to_le_bytes());
@@ -270,7 +290,9 @@ impl Store {
                 if w.active.is_none() || (w.len + need > max && w.len > PACK_HEADER) {
                     self.open_new_pack(&mut w)?;
                 }
-                let Some((pid, file)) = w.active.clone() else { return Err(StoreError::Db("no active pack".into())) };
+                let Some((pid, file)) = w.active.clone() else {
+                    return Err(StoreError::Db("no active pack".into()));
+                };
                 let start = w.len;
                 let mut end = start;
                 let mut buf = Vec::new();
@@ -279,7 +301,10 @@ impl Store {
                     if !buf.is_empty() && end + size > max {
                         break;
                     }
-                    locs.push(PackLoc { pack: pid, offset: end });
+                    locs.push(PackLoc {
+                        pack: pid,
+                        offset: end,
+                    });
                     encode_record(&items[i].0, items[i].1, &mut buf);
                     end += size;
                     i += 1;
@@ -310,7 +335,11 @@ impl Store {
     /// Makes `blob` durable as object `id` outside the group commit (fusion, unfuse, repair):
     /// appended to the active pack when small, else written as its own file. The pin must be held
     /// until the index transaction that records the location has finished.
-    pub(crate) fn place_blob(&self, id: &Id, blob: &[u8]) -> Result<(Option<PackLoc>, PackPin<'_>)> {
+    pub(crate) fn place_blob(
+        &self,
+        id: &Id,
+        blob: &[u8],
+    ) -> Result<(Option<PackLoc>, PackPin<'_>)> {
         if self.pack_eligible(blob.len()) {
             let (locs, pin) = self.pack_append(&[(*id, blob)])?;
             return Ok((locs.first().copied(), pin));
@@ -335,17 +364,31 @@ impl Store {
         let t = h.tick;
         let out = h.map.entry(pack).or_insert((f, t)).0.clone();
         while h.map.len() > HANDLE_CACHE {
-            let Some(oldest) = h.map.iter().min_by_key(|e| e.1 .1).map(|e| *e.0) else { break };
+            let Some(oldest) = h.map.iter().min_by_key(|e| e.1 .1).map(|e| *e.0) else {
+                break;
+            };
             h.map.remove(&oldest);
         }
         Ok(out)
     }
 
     /// Reads and checks (magic, object id, length, CRC) the record at `loc`; returns its payload.
-    pub(crate) fn read_packed(&self, id: &Id, loc: PackLoc, stored_len: u64) -> std::result::Result<Vec<u8>, String> {
-        let f = self.pack_handle(loc.pack).map_err(|e| format!("pack {} unreadable: {}", loc.pack, e))?;
+    pub(crate) fn read_packed(
+        &self,
+        id: &Id,
+        loc: PackLoc,
+        stored_len: u64,
+    ) -> std::result::Result<Vec<u8>, String> {
+        let f = self
+            .pack_handle(loc.pack)
+            .map_err(|e| format!("pack {} unreadable: {}", loc.pack, e))?;
         let mut buf = vec![0u8; record_size(stored_len) as usize];
-        read_exact_at(&f, &mut buf, loc.offset).map_err(|e| format!("pack {} record at {} unreadable: {}", loc.pack, loc.offset, e))?;
+        read_exact_at(&f, &mut buf, loc.offset).map_err(|e| {
+            format!(
+                "pack {} record at {} unreadable: {}",
+                loc.pack, loc.offset, e
+            )
+        })?;
         check_record(id, &buf)?;
         buf.drain(..RECORD_HEADER as usize);
         Ok(buf)
@@ -378,8 +421,16 @@ impl Store {
         let mut present: HashSet<u64> = HashSet::new();
         for e in std::fs::read_dir(&dir)? {
             let p = e?.path();
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let Some(id) = name.strip_suffix(".pack").and_then(|h| u64::from_str_radix(h, 16).ok()) else { continue };
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let Some(id) = name
+                .strip_suffix(".pack")
+                .and_then(|h| u64::from_str_radix(h, 16).ok())
+            else {
+                continue;
+            };
             max_id = max_id.max(id);
             let Some(row) = rows.get(&id) else {
                 if std::fs::remove_file(&p).is_ok() {
@@ -393,7 +444,11 @@ impl Store {
                 f.set_len(row.end)?;
                 f.sync_all()?;
                 truncated += len - row.end;
-                tracing::warn!("pack {}: truncated {} uncommitted / torn tail bytes", id, len - row.end);
+                tracing::warn!(
+                    "pack {}: truncated {} uncommitted / torn tail bytes",
+                    id,
+                    len - row.end
+                );
             } else if len < row.end {
                 tracing::warn!("pack {}: {} bytes on disk but {} committed; records beyond are lost (scrub quarantines them)", id, len, row.end);
                 continue;
@@ -402,20 +457,34 @@ impl Store {
         }
         for id in rows.keys() {
             if !self.pack_path(*id).exists() {
-                tracing::warn!("pack {} is missing (its objects will be quarantined by reads / scrub)", id);
+                tracing::warn!(
+                    "pack {} is missing (its objects will be quarantined by reads / scrub)",
+                    id
+                );
             }
         }
-        self.packs.startup_truncated_bytes.store(truncated, Ordering::Relaxed);
-        self.packs.startup_removed_packs.store(removed, Ordering::Relaxed);
+        self.packs
+            .startup_truncated_bytes
+            .store(truncated, Ordering::Relaxed);
+        self.packs
+            .startup_removed_packs
+            .store(removed, Ordering::Relaxed);
         if removed > 0 {
             tracing::warn!("startup removed {} pack files without index rows", removed);
         }
         let mut w = lock(&self.packs.writer);
         w.next_id = max_id + 1;
         // continue appending to the newest intact pack that still has room
-        if let Some((&id, row)) = rows.iter().filter(|(id, _)| present.contains(id)).max_by_key(|(id, _)| **id) {
+        if let Some((&id, row)) = rows
+            .iter()
+            .filter(|(id, _)| present.contains(id))
+            .max_by_key(|(id, _)| **id)
+        {
             if id == max_id && row.end < self.cfg.pack_max_bytes {
-                let f = OpenOptions::new().read(true).write(true).open(self.pack_path(id))?;
+                let f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.pack_path(id))?;
                 w.active = Some((id, Arc::new(f)));
                 w.len = row.end;
             }
@@ -431,10 +500,22 @@ impl Store {
     /// Where object `id`'s stored bytes live (test / debugging helper).
     #[doc(hidden)]
     pub fn object_storage(&self, id: &Id) -> Result<Option<ObjectStorage>> {
-        let Some(rec) = self.object_rec(id)? else { return Ok(None) };
+        let Some(rec) = self.object_rec(id)? else {
+            return Ok(None);
+        };
         Ok(Some(match rec.pack {
-            Some(l) => ObjectStorage { path: self.pack_path(l.pack), offset: l.offset + RECORD_HEADER, len: rec.stored_len, pack: Some(l.pack) },
-            None => ObjectStorage { path: self.object_path(id), offset: 0, len: rec.stored_len, pack: None },
+            Some(l) => ObjectStorage {
+                path: self.pack_path(l.pack),
+                offset: l.offset + RECORD_HEADER,
+                len: rec.stored_len,
+                pack: Some(l.pack),
+            },
+            None => ObjectStorage {
+                path: self.object_path(id),
+                offset: 0,
+                len: rec.stored_len,
+                pack: None,
+            },
         }))
     }
 
@@ -459,7 +540,9 @@ impl Store {
             return 0;
         }
         // a running backup may still be copying a retired pack's committed bytes
-        let Ok(_gate) = self.maint_gate.try_read() else { return 0 };
+        let Ok(_gate) = self.maint_gate.try_read() else {
+            return 0;
+        };
         let ts = now();
         let due: Vec<u64> = {
             let mut r = lock(&self.packs.retired);
@@ -470,7 +553,13 @@ impl Store {
         let mut n = 0;
         for pid in due {
             // never delete a pack the index points at (defensive: rows are removed before retiring)
-            let has_row = self.db.begin_read().ok().and_then(|tx| tx.open_table(index::PACKS).ok()?.get(pid).ok().map(|g| g.is_some()));
+            let has_row = self.db.begin_read().ok().and_then(|tx| {
+                tx.open_table(index::PACKS)
+                    .ok()?
+                    .get(pid)
+                    .ok()
+                    .map(|g| g.is_some())
+            });
             if has_row != Some(false) {
                 continue;
             }
@@ -509,7 +598,9 @@ impl Store {
                 .into_iter()
                 .filter(|(pid, r)| {
                     let data = r.end.saturating_sub(PACK_HEADER);
-                    Some(*pid) != active && !inflight.contains_key(pid) && (r.live_objects == 0 || (r.live_bytes as f64) < ratio * data as f64)
+                    Some(*pid) != active
+                        && !inflight.contains_key(pid)
+                        && (r.live_objects == 0 || (r.live_bytes as f64) < ratio * data as f64)
                 })
                 .map(|(pid, _)| pid)
                 .collect()
@@ -524,7 +615,9 @@ impl Store {
                     let (k, v) = r?;
                     let rec = index::ObjectRec::decode(v.value())?;
                     if let Some(l) = rec.pack.filter(|l| set.contains(&l.pack)) {
-                        live.entry(l.pack).or_default().push((*k.value(), l, rec.stored_len));
+                        live.entry(l.pack)
+                            .or_default()
+                            .push((*k.value(), l, rec.stored_len));
                     }
                 }
             }
@@ -554,13 +647,16 @@ impl Store {
                     if batch.is_empty() {
                         continue;
                     }
-                    let items: Vec<(Id, &[u8])> = batch.iter().map(|b| (b.0, b.3.as_slice())).collect();
+                    let items: Vec<(Id, &[u8])> =
+                        batch.iter().map(|b| (b.0, b.3.as_slice())).collect();
                     let (locs, _pin) = self.pack_append(&items)?;
                     self.fail("compact.after_copy")?;
                     let moved = with_write(self, |t| {
                         let mut n = 0u64;
                         for ((id, old, len, _), new) in batch.iter().zip(&locs) {
-                            let Some(mut rec) = t.get_obj(id)? else { continue };
+                            let Some(mut rec) = t.get_obj(id)? else {
+                                continue;
+                            };
                             if rec.pack != Some(*old) || rec.stored_len != *len {
                                 continue; // collected, quarantined or repaired meanwhile: the copy is garbage
                             }
@@ -608,7 +704,10 @@ impl Store {
             bytes += r.end;
             live += r.live_bytes;
             objects += r.live_objects;
-            dead += r.end.saturating_sub(PACK_HEADER).saturating_sub(r.live_bytes);
+            dead += r
+                .end
+                .saturating_sub(PACK_HEADER)
+                .saturating_sub(r.live_bytes);
         }
         let g = |k: &str| m.get(k).copied().unwrap_or(0);
         let ld = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -640,18 +739,30 @@ impl Store {
 
     /// fsck part for packs: rows vs. recomputed live bytes, records readable at their location,
     /// no stray pack files. `live` = recomputed `(bytes, objects)` per pack from the objects table.
-    pub(crate) fn verify_packs(&self, live: &HashMap<u64, (u64, u64)>, problems: &mut dyn FnMut(String)) -> Result<()> {
+    pub(crate) fn verify_packs(
+        &self,
+        live: &HashMap<u64, (u64, u64)>,
+        problems: &mut dyn FnMut(String),
+    ) -> Result<()> {
         let rows = self.pack_rows()?;
         let retired: HashSet<u64> = self.retired_packs().into_iter().collect();
         let row_ids: HashSet<u64> = rows.iter().map(|r| r.0).collect();
         for (pid, r) in &rows {
             let (lb, lo) = live.get(pid).copied().unwrap_or((0, 0));
             if (r.live_bytes, r.live_objects) != (lb, lo) {
-                problems(format!("pack {}: row says {} live bytes / {} objects, recomputed {} / {}", pid, r.live_bytes, r.live_objects, lb, lo));
+                problems(format!(
+                    "pack {}: row says {} live bytes / {} objects, recomputed {} / {}",
+                    pid, r.live_bytes, r.live_objects, lb, lo
+                ));
             }
             match std::fs::metadata(self.pack_path(*pid)) {
                 Ok(md) if md.len() >= r.end => {}
-                Ok(md) => problems(format!("pack {}: file has {} bytes, committed end {}", pid, md.len(), r.end)),
+                Ok(md) => problems(format!(
+                    "pack {}: file has {} bytes, committed end {}",
+                    pid,
+                    md.len(),
+                    r.end
+                )),
                 Err(_) => problems(format!("pack {}: file missing", pid)),
             }
         }
@@ -663,8 +774,14 @@ impl Store {
         if let Ok(rd) = std::fs::read_dir(self.cfg.dir.join("packs")) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                match name.strip_suffix(".pack").and_then(|h| u64::from_str_radix(h, 16).ok()) {
-                    Some(id) if row_ids.contains(&id) || retired.contains(&id) || Some(id) == self.active_pack() => {}
+                match name
+                    .strip_suffix(".pack")
+                    .and_then(|h| u64::from_str_radix(h, 16).ok())
+                {
+                    Some(id)
+                        if row_ids.contains(&id)
+                            || retired.contains(&id)
+                            || Some(id) == self.active_pack() => {}
                     _ => problems(format!("orphan pack file {}", name)),
                 }
             }
@@ -684,7 +801,9 @@ mod tests {
         encode_record(&id, b"hello pack", &mut buf);
         assert_eq!(buf.len() as u64, record_size(10));
         assert!(check_record(&id, &buf).is_ok());
-        assert!(check_record(&[8u8; 32], &buf).unwrap_err().contains("different object"));
+        assert!(check_record(&[8u8; 32], &buf)
+            .unwrap_err()
+            .contains("different object"));
         let mut bad = buf.clone();
         *bad.last_mut().unwrap() ^= 1;
         assert!(check_record(&id, &bad).unwrap_err().contains("CRC"));

@@ -61,7 +61,9 @@ impl Store {
         }
         let ts = now();
         let newly = with_write(self, |t| {
-            let Some(mut rec) = t.get_obj(id)? else { return Ok(None) };
+            let Some(mut rec) = t.get_obj(id)? else {
+                return Ok(None);
+            };
             if rec.quarantined() {
                 return Ok(None);
             }
@@ -92,17 +94,23 @@ impl Store {
                         // (a copy is kept for inspection instead; GC removes both later)
                         match self.maint_gate.try_read() {
                             Ok(_g) => {
-                                let _ = std::fs::rename(self.object_path(id), self.quarantine_path(id));
+                                let _ =
+                                    std::fs::rename(self.object_path(id), self.quarantine_path(id));
                             }
                             Err(_) => {
-                                let _ = std::fs::copy(self.object_path(id), self.quarantine_path(id));
+                                let _ =
+                                    std::fs::copy(self.object_path(id), self.quarantine_path(id));
                             }
                         }
                     }
                 }
                 tracing::warn!("quarantined object {}: {}", id_hex(id), reason);
                 super::lock(&self.scrub).corrupt_found += 1;
-                let hook = self.quarantine_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+                let hook = self
+                    .quarantine_hook
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 if let Some(h) = hook {
                     h(*id);
                 }
@@ -120,8 +128,16 @@ impl Store {
         for r in t.range::<&[u8; 32]>(..)? {
             let (k, v) = r?;
             let b = v.value();
-            let ms = if b.len() >= 8 { u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8])) } else { 0 };
-            out.push((*k.value(), ms, String::from_utf8_lossy(b.get(8..).unwrap_or(&[])).to_string()));
+            let ms = if b.len() >= 8 {
+                u64::from_le_bytes(b[..8].try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
+            out.push((
+                *k.value(),
+                ms,
+                String::from_utf8_lossy(b.get(8..).unwrap_or(&[])).to_string(),
+            ));
         }
         Ok(out)
     }
@@ -151,7 +167,10 @@ impl Store {
             let t = tx.open_table(index::OBJECTS)?;
             let mut budget = 0u64;
             let iter = match &cursor {
-                Some(c) => t.range::<&[u8; 32]>((std::ops::Bound::Excluded(c), std::ops::Bound::Unbounded))?,
+                Some(c) => t.range::<&[u8; 32]>((
+                    std::ops::Bound::Excluded(c),
+                    std::ops::Bound::Unbounded,
+                ))?,
                 None => t.range::<&[u8; 32]>(..)?,
             };
             for r in iter {
@@ -167,7 +186,10 @@ impl Store {
                 wrapped = true;
             }
         }
-        let mut report = ScrubReport { wrapped, ..Default::default() };
+        let mut report = ScrubReport {
+            wrapped,
+            ..Default::default()
+        };
         for (id, rec) in &batch {
             if rec.quarantined() {
                 continue;
@@ -175,7 +197,9 @@ impl Store {
             let mut res = Reservation::new(self);
             res.add(*id);
             // the object may have been collected since the snapshot
-            let Some(cur) = self.object_rec(id)? else { continue };
+            let Some(cur) = self.object_rec(id)? else {
+                continue;
+            };
             if cur.quarantined() {
                 continue;
             }
@@ -214,11 +238,15 @@ impl Store {
     /// of the object's class and verified.
     pub fn repair_object_plain(&self, object_id: &Id, plain: &[u8]) -> Result<()> {
         if sha256(plain) != *object_id {
-            return Err(StoreError::Invalid("repair plaintext does not hash to the object id".into()));
+            return Err(StoreError::Invalid(
+                "repair plaintext does not hash to the object id".into(),
+            ));
         }
         let rec = self.object_rec(object_id)?.ok_or(StoreError::NotFound)?;
         if rec.plain_len != plain.len() as u64 {
-            return Err(StoreError::Invalid("repair plaintext length mismatch".into()));
+            return Err(StoreError::Invalid(
+                "repair plaintext length mismatch".into(),
+            ));
         }
         let enc = self.encoder(super::class_name(rec.class));
         let stored = self.encode_sealed(&enc, object_id, plain)?;
@@ -248,15 +276,23 @@ impl Store {
     /// Installs new stored bytes for an existing object (repair, rekey). With `expect =
     /// Some((pack, stored_len))` the index row is only repointed if the object is still exactly
     /// there and not quarantined (returns false otherwise; the new copy is then garbage).
-    pub(crate) fn install_stored(&self, id: &Id, stored: &[u8], expect: Option<(Option<index::PackLoc>, u64)>) -> Result<bool> {
+    pub(crate) fn install_stored(
+        &self,
+        id: &Id,
+        stored: &[u8],
+        expect: Option<(Option<index::PackLoc>, u64)>,
+    ) -> Result<bool> {
         // rewrites an object file in place / deletes it: never while a backup copies the snapshot
         let Ok(_gate) = self.maint_gate.try_read() else {
-            return Err(StoreError::Busy("an online backup is running; retry when it finished".into()));
+            return Err(StoreError::Busy(
+                "an online backup is running; retry when it finished".into(),
+            ));
         };
         let mut res = Reservation::new(self);
         res.add(*id);
         let file_in_place = !self.pack_eligible(stored.len());
-        let _place = file_in_place.then(|| super::lock(&self.place_locks[id[0] as usize % self.place_locks.len()]));
+        let _place = file_in_place
+            .then(|| super::lock(&self.place_locks[id[0] as usize % self.place_locks.len()]));
         if let Some((pack, len)) = expect {
             match self.object_rec(id)? {
                 Some(r) if r.pack == pack && r.stored_len == len && !r.quarantined() => {}
@@ -302,7 +338,9 @@ impl Store {
             }
             Ok(Some((q, drop_file)))
         })?;
-        let Some((was_quarantined, drop_file)) = outcome else { return Ok(false) };
+        let Some((was_quarantined, drop_file)) = outcome else {
+            return Ok(false);
+        };
         if drop_file {
             let _ = std::fs::remove_file(self.object_path(id));
         }

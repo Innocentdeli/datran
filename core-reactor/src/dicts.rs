@@ -24,7 +24,11 @@ impl DictStore {
     }
 
     pub fn with_keys(dir: impl Into<PathBuf>, keys: Arc<KeyRing>) -> DictStore {
-        DictStore { dir: dir.into(), cache: RwLock::new(HashMap::new()), keys }
+        DictStore {
+            dir: dir.into(),
+            cache: RwLock::new(HashMap::new()),
+            keys,
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -49,7 +53,10 @@ impl DictStore {
             }
         };
         if sha256(&bytes) != *id {
-            tracing::warn!("dictionary {} on disk fails SHA-256 check; ignoring", hex::encode(id));
+            tracing::warn!(
+                "dictionary {} on disk fails SHA-256 check; ignoring",
+                hex::encode(id)
+            );
             return None;
         }
         let arc = Arc::new(bytes);
@@ -79,7 +86,9 @@ impl DictStore {
 
     /// Ids of the dictionary files on disk.
     pub fn list_ids(&self) -> Vec<DictId> {
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return Vec::new() };
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
         rd.flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
@@ -94,15 +103,25 @@ impl DictStore {
     pub fn rekey(&self, id: &DictId) -> Result<bool, String> {
         let path = self.path_for(id);
         let stored = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let Some(active) = self.keys.active_id() else { return Ok(false) };
+        let Some(active) = self.keys.active_id() else {
+            return Ok(false);
+        };
         if crypto::sealed_key_id(&stored) == Some(active) {
             return Ok(false);
         }
-        let plain = self.keys.open(Kind::Dict, id, &stored).map_err(|e| e.to_string())?.into_owned();
+        let plain = self
+            .keys
+            .open(Kind::Dict, id, &stored)
+            .map_err(|e| e.to_string())?
+            .into_owned();
         if sha256(&plain) != *id {
-            return Err(format!("dictionary {} fails SHA-256 check", hex::encode(id)));
+            return Err(format!(
+                "dictionary {} fails SHA-256 check",
+                hex::encode(id)
+            ));
         }
-        crate::state::atomic_write(&path, &self.keys.seal(Kind::Dict, id, plain)).map_err(|e| e.to_string())?;
+        crate::state::atomic_write(&path, &self.keys.seal(Kind::Dict, id, plain))
+            .map_err(|e| e.to_string())?;
         Ok(true)
     }
 

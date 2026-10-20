@@ -176,21 +176,33 @@ impl EvoConfig {
 
     pub fn from_env() -> EvoConfig {
         let mut c = EvoConfig::new(
-            std::env::var("REACTOR_STATE_DIR").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "./reactor-state".into()),
+            std::env::var("REACTOR_STATE_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "./reactor-state".into()),
         );
         if let Ok(v) = std::env::var("REACTOR_PROFILE") {
             match Profile::parse(&v) {
                 Some(p) => c = c.with_profile(p),
-                None => tracing::warn!(value = %v, "unknown REACTOR_PROFILE (expected speed|balanced|ratio); using balanced"),
+                None => {
+                    tracing::warn!(value = %v, "unknown REACTOR_PROFILE (expected speed|balanced|ratio); using balanced")
+                }
             }
         }
         if let Ok(v) = std::env::var("REACTOR_EVOLVE") {
-            c.enabled = !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
+            c.enabled = !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            );
         }
-        if let Some(w) = env_parse::<f64>("REACTOR_WEIGHT_ENCODE").filter(|w| w.is_finite() && *w >= 0.0) {
+        if let Some(w) =
+            env_parse::<f64>("REACTOR_WEIGHT_ENCODE").filter(|w| w.is_finite() && *w >= 0.0)
+        {
             c.w_enc = w;
         }
-        if let Some(w) = env_parse::<f64>("REACTOR_WEIGHT_DECODE").filter(|w| w.is_finite() && *w >= 0.0) {
+        if let Some(w) =
+            env_parse::<f64>("REACTOR_WEIGHT_DECODE").filter(|w| w.is_finite() && *w >= 0.0)
+        {
             c.w_dec = w;
         }
         if let Some(n) = env_parse::<usize>("REACTOR_SAMPLE_BYTES_MAX").filter(|n| *n > 0) {
@@ -204,7 +216,10 @@ impl EvoConfig {
             c.mt_threshold = n;
         }
         if let Ok(v) = std::env::var("REACTOR_OVERLAP_VERIFY") {
-            c.overlap_verify = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            c.overlap_verify = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
         }
         c
     }
@@ -244,12 +259,20 @@ pub fn score_recipe(
     if dict_id.is_some() && dict.is_none() {
         return None;
     }
-    let lookup = |id: &DictId| if Some(*id) == dict_id { dict.clone() } else { None };
+    let lookup = |id: &DictId| {
+        if Some(*id) == dict_id {
+            dict.clone()
+        } else {
+            None
+        }
+    };
     let (mut sum_ln, mut sum_enc, mut sum_dec) = (0.0f64, 0.0f64, 0.0f64);
     let (mut n, mut bytes, mut enc_total, mut dec_total) = (0usize, 0usize, 0.0f64, 0.0f64);
     for s in samples.iter().filter(|s| !s.is_empty()) {
         let t = Instant::now();
-        let blob = recipe.encode(s, dict.as_deref().map(|d| d.as_slice())).ok()?;
+        let blob = recipe
+            .encode(s, dict.as_deref().map(|d| d.as_slice()))
+            .ok()?;
         let enc = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let out = codec::decode_v2(&blob, limit, &lookup).ok()?;
@@ -284,13 +307,27 @@ pub fn score_recipe(
 }
 
 fn cmp_members(a: &Member, b: &Member) -> std::cmp::Ordering {
-    let fa = a.score.as_ref().map(|s| s.fitness).unwrap_or(f64::NEG_INFINITY);
-    let fb = b.score.as_ref().map(|s| s.fitness).unwrap_or(f64::NEG_INFINITY);
-    fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.recipe.cmp(&b.recipe))
+    let fa = a
+        .score
+        .as_ref()
+        .map(|s| s.fitness)
+        .unwrap_or(f64::NEG_INFINITY);
+    let fb = b
+        .score
+        .as_ref()
+        .map(|s| s.fitness)
+        .unwrap_or(f64::NEG_INFINITY);
+    fb.partial_cmp(&fa)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| a.recipe.cmp(&b.recipe))
 }
 
 pub fn crossover(a: &Recipe, b: &Recipe) -> Recipe {
-    Recipe { filter: b.filter, stride: b.stride, ..a.clone() }
+    Recipe {
+        filter: b.filter,
+        stride: b.stride,
+        ..a.clone()
+    }
 }
 
 pub fn mutate(r: &mut Recipe, rng: &mut ChaCha8Rng, class_dict: Option<&str>) {
@@ -298,7 +335,11 @@ pub fn mutate(r: &mut Recipe, rng: &mut ChaCha8Rng, class_dict: Option<&str>) {
     for _ in 0..ops {
         match rng.gen_range(0..100) {
             0..=7 => {
-                let others: Vec<Codec> = Codec::ALL.iter().copied().filter(|c| *c != r.codec).collect();
+                let others: Vec<Codec> = Codec::ALL
+                    .iter()
+                    .copied()
+                    .filter(|c| *c != r.codec)
+                    .collect();
                 let c = others[rng.gen_range(0..others.len())];
                 *r = Recipe::new(c, Recipe::default_level(c)).with_filter(r.filter, r.stride);
             }
@@ -314,14 +355,24 @@ pub fn mutate(r: &mut Recipe, rng: &mut ChaCha8Rng, class_dict: Option<&str>) {
                     r.window_log = match r.window_log {
                         None => Some(rng.gen_range(lo.max(15)..=hi.min(24))),
                         Some(_) if rng.gen_bool(0.2) => None,
-                        Some(w) => Some(if rng.gen_bool(0.5) { w + 1 } else { w - 1 }.clamp(lo, hi)),
+                        Some(w) => {
+                            Some(if rng.gen_bool(0.5) { w + 1 } else { w - 1 }.clamp(lo, hi))
+                        }
                     };
                 }
             }
             60..=84 => {
-                let others: Vec<Filter> = Filter::ALL.iter().copied().filter(|f| *f != r.filter).collect();
+                let others: Vec<Filter> = Filter::ALL
+                    .iter()
+                    .copied()
+                    .filter(|f| *f != r.filter)
+                    .collect();
                 r.filter = others[rng.gen_range(0..others.len())];
-                r.stride = if r.filter == Filter::None { 0 } else { STRIDES[rng.gen_range(0..4)] };
+                r.stride = if r.filter == Filter::None {
+                    0
+                } else {
+                    STRIDES[rng.gen_range(0..4)]
+                };
             }
             85..=94 => {
                 if r.filter != Filter::None {
@@ -331,7 +382,11 @@ pub fn mutate(r: &mut Recipe, rng: &mut ChaCha8Rng, class_dict: Option<&str>) {
             _ => {
                 if r.codec == Codec::Zstd {
                     if let Some(d) = class_dict {
-                        r.dict = if r.dict.is_some() { None } else { Some(d.to_string()) };
+                        r.dict = if r.dict.is_some() {
+                            None
+                        } else {
+                            Some(d.to_string())
+                        };
                     }
                 }
             }
@@ -383,7 +438,11 @@ impl ClassEvo {
             profile
                 .seeds()
                 .into_iter()
-                .map(|recipe| Member { recipe, score: None, origin: "seed".into() })
+                .map(|recipe| Member {
+                    recipe,
+                    score: None,
+                    origin: "seed".into(),
+                })
                 .collect()
         } else {
             Vec::new()
@@ -418,7 +477,9 @@ struct Inner {
 impl Inner {
     fn class(&mut self, class: &'static str) -> &mut ClassEvo {
         let p = self.profile;
-        self.classes.entry(class).or_insert_with(|| ClassEvo::new(class, p))
+        self.classes
+            .entry(class)
+            .or_insert_with(|| ClassEvo::new(class, p))
     }
 }
 
@@ -468,10 +529,17 @@ impl Engine {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0x5eed)
         });
-        let dicts = Arc::new(DictStore::with_keys(cfg.state_dir.join("dicts"), cfg.keys.clone()));
+        let dicts = Arc::new(DictStore::with_keys(
+            cfg.state_dir.join("dicts"),
+            cfg.keys.clone(),
+        ));
         let engine = Engine {
             dicts,
-            inner: Mutex::new(Inner { classes: BTreeMap::new(), rng: ChaCha8Rng::seed_from_u64(seed), profile: cfg.profile }),
+            inner: Mutex::new(Inner {
+                classes: BTreeMap::new(),
+                rng: ChaCha8Rng::seed_from_u64(seed),
+                profile: cfg.profile,
+            }),
             gen_lock: Mutex::new(()),
             save_lock: Mutex::new(()),
             cfg,
@@ -493,14 +561,20 @@ impl Engine {
     fn restore(&self, s: PersistedState) {
         let mut inner = lock(&self.inner);
         for (name, pc) in s.classes {
-            let Some(class) = classify::canonical(&name) else { continue };
+            let Some(class) = classify::canonical(&name) else {
+                continue;
+            };
             let c = inner.class(class);
             c.stats = pc.stats;
             if !classify::is_evolvable(class) {
                 continue;
             }
             let valid = |r: &Recipe| r.validate().is_ok();
-            let pop: Vec<Member> = pc.population.into_iter().filter(|m| valid(&m.recipe)).collect();
+            let pop: Vec<Member> = pc
+                .population
+                .into_iter()
+                .filter(|m| valid(&m.recipe))
+                .collect();
             if !pop.is_empty() {
                 c.population = pop;
             }
@@ -530,7 +604,11 @@ impl Engine {
                 )
             })
             .collect();
-        PersistedState { version: state::STATE_VERSION, saved_at_ms: state::now_ms(), classes }
+        PersistedState {
+            version: state::STATE_VERSION,
+            saved_at_ms: state::now_ms(),
+            classes,
+        }
     }
 
     /// Writes `state.json` atomically (no-op when persistence is disabled).
@@ -560,19 +638,34 @@ impl Engine {
     }
 
     pub fn champion(&self, class: &str) -> Option<Champion> {
-        lock(&self.inner).classes.get(class).and_then(|c| c.champion.clone())
+        lock(&self.inner)
+            .classes
+            .get(class)
+            .and_then(|c| c.champion.clone())
     }
 
     pub fn population(&self, class: &str) -> Vec<Member> {
-        lock(&self.inner).classes.get(class).map(|c| c.population.clone()).unwrap_or_default()
+        lock(&self.inner)
+            .classes
+            .get(class)
+            .map(|c| c.population.clone())
+            .unwrap_or_default()
     }
 
     pub fn pending_immigrants(&self, class: &str) -> Vec<Recipe> {
-        lock(&self.inner).classes.get(class).map(|c| c.pending.clone()).unwrap_or_default()
+        lock(&self.inner)
+            .classes
+            .get(class)
+            .map(|c| c.pending.clone())
+            .unwrap_or_default()
     }
 
     pub fn sample_count(&self, class: &str) -> usize {
-        lock(&self.inner).classes.get(class).map(|c| c.reservoir.samples.len()).unwrap_or(0)
+        lock(&self.inner)
+            .classes
+            .get(class)
+            .map(|c| c.reservoir.samples.len())
+            .unwrap_or(0)
     }
 
     /// The current in-memory samples of a class as `(upload index, bytes)`.
@@ -580,17 +673,31 @@ impl Engine {
         lock(&self.inner)
             .classes
             .get(class)
-            .map(|c| c.reservoir.samples.iter().map(|s| (s.seq, s.data.clone())).collect())
+            .map(|c| {
+                c.reservoir
+                    .samples
+                    .iter()
+                    .map(|s| (s.seq, s.data.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The held-out part of a class reservoir (what recipes are scored on).
     pub fn held_out(&self, class: &str) -> Vec<Arc<Vec<u8>>> {
-        self.reservoir(class).into_iter().filter(|(s, _)| is_held_out(*s)).map(|(_, d)| d).collect()
+        self.reservoir(class)
+            .into_iter()
+            .filter(|(s, _)| is_held_out(*s))
+            .map(|(_, d)| d)
+            .collect()
     }
 
     pub fn class_dicts(&self, class: &str) -> Vec<String> {
-        lock(&self.inner).classes.get(class).map(|c| c.dicts.clone()).unwrap_or_default()
+        lock(&self.inner)
+            .classes
+            .get(class)
+            .map(|c| c.dicts.clone())
+            .unwrap_or_default()
     }
 
     /// Adds an upload prefix to the class reservoir (reservoir sampling, memory only).
@@ -600,13 +707,22 @@ impl Engine {
         }
         let prefix = &data[..data.len().min(self.cfg.sample_bytes_max)];
         let mut guard = lock(&self.inner);
-        let Inner { classes, rng, profile } = &mut *guard;
-        let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class, *profile));
+        let Inner {
+            classes,
+            rng,
+            profile,
+        } = &mut *guard;
+        let c = classes
+            .entry(class)
+            .or_insert_with(|| ClassEvo::new(class, *profile));
         let r = &mut c.reservoir;
         let seq = r.seen;
         r.seen += 1;
         c.stats.samples_seen += 1;
-        let sample = Sample { seq, data: Arc::new(prefix.to_vec()) };
+        let sample = Sample {
+            seq,
+            data: Arc::new(prefix.to_vec()),
+        };
         if r.samples.len() < RESERVOIR_CAP {
             r.samples.push(sample);
             r.version += 1;
@@ -627,7 +743,11 @@ impl Engine {
     /// > 1 only for zstd recipes above `mt_threshold` (0 = single-threaded).
     pub fn mt_workers_for(&self, recipe: &Recipe, len: usize) -> u32 {
         let c = &self.cfg;
-        if recipe.codec == Codec::Zstd && c.mt_threshold > 0 && len > c.mt_threshold && c.mt_workers > 1 {
+        if recipe.codec == Codec::Zstd
+            && c.mt_threshold > 0
+            && len > c.mt_threshold
+            && c.mt_workers > 1
+        {
             c.mt_workers
         } else {
             0
@@ -636,7 +756,12 @@ impl Engine {
 
     /// Classify, encode with the class champion (zstd multithreaded for large bodies, see
     /// [`Engine::mt_workers_for`]), verify the round-trip, fall back to legacy raw.
-    pub fn compress(&self, data: &[u8], mime_hint: Option<&str>, allow_sample: bool) -> CompressOutcome {
+    pub fn compress(
+        &self,
+        data: &[u8],
+        mime_hint: Option<&str>,
+        allow_sample: bool,
+    ) -> CompressOutcome {
         let entropy = DiocomNativeReactor::calculate_entropy(data);
         let class = classify::classify(data, mime_hint);
         let mut note = None;
@@ -658,7 +783,10 @@ impl Engine {
             let dict_slice = dict.as_deref().map(|d| d.as_slice());
             let t = Instant::now();
             // MT zstd without a filter: verify concurrently with the encode (one pass, same check)
-            let overlapped = self.cfg.overlap_verify && workers > 1 && recipe.filter == Filter::None && recipe.validate().is_ok();
+            let overlapped = self.cfg.overlap_verify
+                && workers > 1
+                && recipe.filter == Filter::None
+                && recipe.validate().is_ok();
             let encoded = if overlapped {
                 let id = recipe.dict_id();
                 let pair = match (&id, dict_slice) {
@@ -669,14 +797,38 @@ impl Engine {
             } else {
                 recipe.encode_with_workers(data, dict_slice, workers)
             };
-            crate::metrics::codec_op(if overlapped { "compress_verify" } else { "compress" }, codec_name, data.len() as u64, t.elapsed());
+            crate::metrics::codec_op(
+                if overlapped {
+                    "compress_verify"
+                } else {
+                    "compress"
+                },
+                codec_name,
+                data.len() as u64,
+                t.elapsed(),
+            );
             match encoded {
                 Ok(b) => {
-                    let lookup = |id: &DictId| if Some(*id) == recipe.dict_id() { dict.clone() } else { None };
+                    let lookup = |id: &DictId| {
+                        if Some(*id) == recipe.dict_id() {
+                            dict.clone()
+                        } else {
+                            None
+                        }
+                    };
                     let t = Instant::now();
-                    let verified = if overlapped { Ok(()) } else { codec::verify_v2(&b, data, &lookup) };
+                    let verified = if overlapped {
+                        Ok(())
+                    } else {
+                        codec::verify_v2(&b, data, &lookup)
+                    };
                     if !overlapped {
-                        crate::metrics::codec_op("verify", codec_name, data.len() as u64, t.elapsed());
+                        crate::metrics::codec_op(
+                            "verify",
+                            codec_name,
+                            data.len() as u64,
+                            t.elapsed(),
+                        );
                     }
                     match verified {
                         Ok(()) => {
@@ -711,7 +863,13 @@ impl Engine {
         if allow_sample {
             self.observe(class, data);
         }
-        CompressOutcome { class, recipe: recipe_used, blob, entropy, note }
+        CompressOutcome {
+            class,
+            recipe: recipe_used,
+            blob,
+            entropy,
+            note,
+        }
     }
 
     /// Queues validated recipes from a peer as immigrants; returns how many were new.
@@ -748,11 +906,18 @@ impl Engine {
                 out.push((class.to_string(), ch.recipe.clone(), ch.score.fitness));
                 continue;
             }
-            let mut members: Vec<&Member> =
-                c.population.iter().filter(|m| m.recipe.dict.is_none() && m.score.is_some()).collect();
+            let mut members: Vec<&Member> = c
+                .population
+                .iter()
+                .filter(|m| m.recipe.dict.is_none() && m.score.is_some())
+                .collect();
             members.sort_by(|a, b| cmp_members(a, b));
             if let Some(m) = members.first() {
-                out.push((class.to_string(), m.recipe.clone(), m.score.as_ref().map(|s| s.fitness).unwrap_or(0.0)));
+                out.push((
+                    class.to_string(),
+                    m.recipe.clone(),
+                    m.score.as_ref().map(|s| s.fitness).unwrap_or(0.0),
+                ));
             }
         }
         out
@@ -770,7 +935,9 @@ impl Engine {
             .filter(|(k, c)| {
                 classify::is_evolvable(k)
                     && c.dirty()
-                    && c.last_run.map(|t| t.elapsed() >= self.cfg.interval).unwrap_or(true)
+                    && c.last_run
+                        .map(|t| t.elapsed() >= self.cfg.interval)
+                        .unwrap_or(true)
             })
             .map(|(k, _)| *k)
             .collect()
@@ -813,12 +980,24 @@ impl Engine {
                 return None;
             }
             let samples = c.reservoir.samples.clone();
-            let train: Vec<Sample> = samples.iter().filter(|s| !is_held_out(s.seq)).cloned().collect();
-            let held: Vec<Sample> = samples.iter().filter(|s| is_held_out(s.seq)).cloned().collect();
+            let train: Vec<Sample> = samples
+                .iter()
+                .filter(|s| !is_held_out(s.seq))
+                .cloned()
+                .collect();
+            let held: Vec<Sample> = samples
+                .iter()
+                .filter(|s| is_held_out(s.seq))
+                .cloned()
+                .collect();
             // With no held-out sample yet (a single upload), fall back to samples that no
             // dictionary trained in this process has seen.
             let score_set: Vec<Sample> = if held.is_empty() {
-                samples.iter().filter(|s| !c.trained_seqs.contains(&s.seq)).cloned().collect()
+                samples
+                    .iter()
+                    .filter(|s| !c.trained_seqs.contains(&s.seq))
+                    .cloned()
+                    .collect()
             } else {
                 held.clone()
             };
@@ -828,7 +1007,11 @@ impl Engine {
             let mut candidates: Vec<Member> = c.population.clone();
             for r in std::mem::take(&mut c.pending) {
                 if !candidates.iter().any(|m| m.recipe == r) {
-                    candidates.push(Member { recipe: r, score: None, origin: "immigrant".into() });
+                    candidates.push(Member {
+                        recipe: r,
+                        score: None,
+                        origin: "immigrant".into(),
+                    });
                 }
             }
             let mut sizes: Vec<usize> = samples.iter().map(|s| s.data.len()).collect();
@@ -838,8 +1021,17 @@ impl Engine {
                 && held.len() >= DICT_MIN_HELD_OUT
                 && !train.is_empty()
                 && median < DICT_MAX_MEDIAN
-                && c.dict_trained_at_seen.map(|s| c.reservoir.seen >= s + DICT_RETRAIN_AFTER).unwrap_or(true);
-            (train, score_set, candidates, c.reservoir.version, need_dict, c.reservoir.seen)
+                && c.dict_trained_at_seen
+                    .map(|s| c.reservoir.seen >= s + DICT_RETRAIN_AFTER)
+                    .unwrap_or(true);
+            (
+                train,
+                score_set,
+                candidates,
+                c.reservoir.version,
+                need_dict,
+                c.reservoir.seen,
+            )
         };
 
         // 2. Dictionary training (train split only) + dictionary variants of the top zstd recipes.
@@ -849,15 +1041,24 @@ impl Engine {
             let train_data: Vec<Arc<Vec<u8>>> = train.iter().map(|s| s.data.clone()).collect();
             if let Some(id) = self.train_dict(&train_data) {
                 dict_train_seqs = train.iter().map(|s| s.seq).collect();
-                let mut zstd_members: Vec<&Member> =
-                    candidates.iter().filter(|m| m.recipe.codec == Codec::Zstd).collect();
+                let mut zstd_members: Vec<&Member> = candidates
+                    .iter()
+                    .filter(|m| m.recipe.codec == Codec::Zstd)
+                    .collect();
                 zstd_members.sort_by(|a, b| cmp_members(a, b));
-                let mut variants: Vec<Recipe> =
-                    zstd_members.iter().take(2).map(|m| m.recipe.clone().with_dict(Some(&id))).collect();
+                let mut variants: Vec<Recipe> = zstd_members
+                    .iter()
+                    .take(2)
+                    .map(|m| m.recipe.clone().with_dict(Some(&id)))
+                    .collect();
                 variants.push(Recipe::baseline().with_dict(Some(&id)));
                 for v in variants {
                     if !candidates.iter().any(|m| m.recipe == v) {
-                        candidates.push(Member { recipe: v, score: None, origin: "dict".into() });
+                        candidates.push(Member {
+                            recipe: v,
+                            score: None,
+                            origin: "dict".into(),
+                        });
                     }
                 }
                 dict_trained = Some(hex::encode(id));
@@ -870,7 +1071,14 @@ impl Engine {
         let mut immigrants_scored = 0;
         for m in candidates.iter_mut() {
             let dict = self.dict_bytes(&m.recipe);
-            m.score = score_recipe(&m.recipe, &score_data, dict, self.cfg.w_enc, self.cfg.w_dec, self.cfg.max_output);
+            m.score = score_recipe(
+                &m.recipe,
+                &score_data,
+                dict,
+                self.cfg.w_enc,
+                self.cfg.w_dec,
+                self.cfg.max_output,
+            );
             if m.origin == "immigrant" {
                 immigrants_scored += 1;
             }
@@ -881,9 +1089,15 @@ impl Engine {
         // 4. Selection, crossover, mutation; write back.
         let report = {
             let mut guard = lock(&self.inner);
-            let Inner { classes, rng, profile } = &mut *guard;
+            let Inner {
+                classes,
+                rng,
+                profile,
+            } = &mut *guard;
             let profile = *profile;
-            let c = classes.entry(class).or_insert_with(|| ClassEvo::new(class, profile));
+            let c = classes
+                .entry(class)
+                .or_insert_with(|| ClassEvo::new(class, profile));
             if let Some(d) = &dict_trained {
                 if !c.dicts.contains(d) {
                     c.dicts.push(d.clone());
@@ -918,7 +1132,11 @@ impl Engine {
                 };
                 mutate(&mut child, rng, latest_dict.as_deref());
                 if child.validate().is_ok() && !next.iter().any(|m| m.recipe == child) {
-                    next.push(Member { recipe: child, score: None, origin: "offspring".into() });
+                    next.push(Member {
+                        recipe: child,
+                        score: None,
+                        origin: "offspring".into(),
+                    });
                 }
             }
             c.population = next;
@@ -926,7 +1144,13 @@ impl Engine {
             if let Some(m) = &champion_member {
                 c.champion = Some(Champion {
                     recipe: m.recipe.clone(),
-                    score: m.score.clone().unwrap_or(Score { fitness: 0.0, ratio: 1.0, enc_mib_s: 0.0, dec_mib_s: 0.0, samples: 0 }),
+                    score: m.score.clone().unwrap_or(Score {
+                        fitness: 0.0,
+                        ratio: 1.0,
+                        enc_mib_s: 0.0,
+                        dec_mib_s: 0.0,
+                        samples: 0,
+                    }),
                     generation: c.generation,
                     origin: m.origin.clone(),
                 });
@@ -995,7 +1219,10 @@ pub fn spawn_scheduler(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let tick = engine.cfg.interval.clamp(Duration::from_millis(50), Duration::from_secs(1));
+        let tick = engine
+            .cfg
+            .interval
+            .clamp(Duration::from_millis(50), Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(tick) => {}
@@ -1006,7 +1233,8 @@ pub fn spawn_scheduler(
             }
             for class in engine.due_classes() {
                 let e = engine.clone();
-                if let Err(err) = tokio::task::spawn_blocking(move || e.run_generation(class)).await {
+                if let Err(err) = tokio::task::spawn_blocking(move || e.run_generation(class)).await
+                {
                     tracing::warn!("evolution task failed: {}", err);
                 }
             }

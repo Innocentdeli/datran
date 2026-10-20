@@ -36,8 +36,13 @@ fn store_error(e: StoreError) -> Response {
         )
             .into_response(),
         StoreError::Invalid(m) => error(StatusCode::BAD_REQUEST, m),
-        StoreError::KeyUnavailable(m) | StoreError::Busy(m) => error(StatusCode::SERVICE_UNAVAILABLE, m),
-        StoreError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof || e.kind() == std::io::ErrorKind::ConnectionAborted => {
+        StoreError::KeyUnavailable(m) | StoreError::Busy(m) => {
+            error(StatusCode::SERVICE_UNAVAILABLE, m)
+        }
+        StoreError::Io(e)
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionAborted =>
+        {
             error(StatusCode::BAD_REQUEST, format!("upload aborted: {}", e))
         }
         other => error(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
@@ -47,8 +52,14 @@ fn store_error(e: StoreError) -> Response {
 /// Routes (to be wrapped in the `x-reactor-token` layer by the caller).
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/store/files", put(put_file).layer(DefaultBodyLimit::disable()))
-        .route("/store/files/:file_id", get(get_file).head(get_file).delete(delete_file))
+        .route(
+            "/store/files",
+            put(put_file).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/store/files/:file_id",
+            get(get_file).head(get_file).delete(delete_file),
+        )
         .route("/store/stats", get(stats))
         .route("/store/rekey", axum::routing::post(rekey))
         .route("/store/backup", axum::routing::post(backup))
@@ -67,23 +78,44 @@ struct BackupReq {
 /// `$REACTOR_BACKUP_DIR/<dest>` on the reactor host. Disabled (403) without `REACTOR_BACKUP_DIR`,
 /// so an API token alone can never make the reactor write to arbitrary paths.
 async fn backup(State(st): State<AppState>, Json(req): Json<BackupReq>) -> Response {
-    let Some(store) = st.store.clone() else { return disabled() };
-    let Some(root) = std::env::var_os("REACTOR_BACKUP_DIR").filter(|v| !v.is_empty()).map(std::path::PathBuf::from) else {
-        return error(StatusCode::FORBIDDEN, "online backups over HTTP need REACTOR_BACKUP_DIR on the reactor");
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
+    let Some(root) = std::env::var_os("REACTOR_BACKUP_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        return error(
+            StatusCode::FORBIDDEN,
+            "online backups over HTTP need REACTOR_BACKUP_DIR on the reactor",
+        );
     };
     let rel = |s: &str| super::backup::safe_rel(s).then(|| super::backup::rel_join(&root, s));
-    let Some(dest) = rel(&req.dest) else { return error(StatusCode::BAD_REQUEST, "dest must be a relative path inside REACTOR_BACKUP_DIR") };
+    let Some(dest) = rel(&req.dest) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "dest must be a relative path inside REACTOR_BACKUP_DIR",
+        );
+    };
     let previous = match req.previous.as_deref() {
         Some(p) => match rel(p) {
             Some(p) => Some(p),
-            None => return error(StatusCode::BAD_REQUEST, "previous must be a relative path inside REACTOR_BACKUP_DIR"),
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "previous must be a relative path inside REACTOR_BACKUP_DIR",
+                )
+            }
         },
         None => None,
     };
     match tokio::task::spawn_blocking(move || store.backup(&dest, previous.as_deref())).await {
         Ok(Ok(rep)) => Json(rep).into_response(),
         Ok(Err(e)) => store_error(e),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("backup task failed: {}", e)),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("backup task failed: {}", e),
+        ),
     }
 }
 
@@ -99,7 +131,10 @@ pub struct ChannelReader {
 
 impl ChannelReader {
     pub fn new(rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>) -> ChannelReader {
-        ChannelReader { rx, cur: Bytes::new() }
+        ChannelReader {
+            rx,
+            cur: Bytes::new(),
+        }
     }
 }
 
@@ -120,9 +155,14 @@ impl Read for ChannelReader {
 }
 
 async fn put_file(State(st): State<AppState>, headers: HeaderMap, body: Body) -> Response {
-    let Some(store) = st.store.clone() else { return disabled() };
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
     let opts = PutOptions {
-        content_type: headers.get("x-content-type").and_then(|v| v.to_str().ok()).map(|s| s.chars().take(255).collect()),
+        content_type: headers
+            .get("x-content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.chars().take(255).collect()),
         sample: !headers
             .get("x-reactor-no-sample")
             .and_then(|v| v.to_str().ok())
@@ -132,7 +172,8 @@ async fn put_file(State(st): State<AppState>, headers: HeaderMap, body: Body) ->
     let task = tokio::task::spawn_blocking(move || store.put_reader(ChannelReader::new(rx), &opts));
     let mut stream = body.into_data_stream();
     while let Some(frame) = stream.next().await {
-        let item = frame.map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e.to_string()));
+        let item = frame
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e.to_string()));
         let failed = item.is_err();
         if tx.send(item).await.is_err() || failed {
             break; // the writer stopped early (error) or the client aborted
@@ -142,7 +183,10 @@ async fn put_file(State(st): State<AppState>, headers: HeaderMap, body: Body) ->
     match task.await {
         Ok(Ok(out)) => (StatusCode::OK, Json(out)).into_response(),
         Ok(Err(e)) => store_error(e),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("store task failed: {}", e)),
+        Err(e) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("store task failed: {}", e),
+        ),
     }
 }
 
@@ -160,23 +204,39 @@ pub enum RangeSpec {
 pub fn parse_range(h: Option<&str>, size: u64) -> RangeSpec {
     let Some(h) = h else { return RangeSpec::Full };
     let h = h.trim();
-    let Some(spec) = h.get(..6).filter(|p| p.eq_ignore_ascii_case("bytes=")).map(|_| h[6..].trim()) else {
+    let Some(spec) = h
+        .get(..6)
+        .filter(|p| p.eq_ignore_ascii_case("bytes="))
+        .map(|_| h[6..].trim())
+    else {
         return RangeSpec::Full;
     };
     if spec.contains(',') {
         return RangeSpec::Full;
     }
-    let Some((a, b)) = spec.split_once('-') else { return RangeSpec::Full };
+    let Some((a, b)) = spec.split_once('-') else {
+        return RangeSpec::Full;
+    };
     let (a, b) = (a.trim(), b.trim());
-    let num = |s: &str| if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) { s.parse::<u64>().ok() } else { None };
+    let num = |s: &str| {
+        if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) {
+            s.parse::<u64>().ok()
+        } else {
+            None
+        }
+    };
     if a.is_empty() {
-        let Some(n) = num(b) else { return RangeSpec::Full };
+        let Some(n) = num(b) else {
+            return RangeSpec::Full;
+        };
         if n == 0 || size == 0 {
             return RangeSpec::Unsatisfiable;
         }
         return RangeSpec::Partial(size.saturating_sub(n), size);
     }
-    let Some(start) = num(a) else { return RangeSpec::Full };
+    let Some(start) = num(a) else {
+        return RangeSpec::Full;
+    };
     let end = if b.is_empty() {
         u64::MAX
     } else {
@@ -191,9 +251,18 @@ pub fn parse_range(h: Option<&str>, size: u64) -> RangeSpec {
     RangeSpec::Partial(start, end.min(size))
 }
 
-async fn get_file(State(st): State<AppState>, method: Method, Path(file_id): Path<String>, headers: HeaderMap) -> Response {
-    let Some(store) = st.store.clone() else { return disabled() };
-    let Some(id) = parse_id(&file_id) else { return error(StatusCode::BAD_REQUEST, "invalid file id") };
+async fn get_file(
+    State(st): State<AppState>,
+    method: Method,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
+    let Some(id) = parse_id(&file_id) else {
+        return error(StatusCode::BAD_REQUEST, "invalid file id");
+    };
     let s2 = store.clone();
     let meta = match tokio::task::spawn_blocking(move || s2.file_meta(&id)).await {
         Ok(Ok(Some(m))) => m,
@@ -208,10 +277,16 @@ async fn get_file(State(st): State<AppState>, method: Method, Path(file_id): Pat
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     let size = meta.size;
-    let range = parse_range(headers.get(header::RANGE).and_then(|v| v.to_str().ok()), size);
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        size,
+    );
     let mut h = HeaderMap::new();
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", file_id.to_ascii_lowercase())) {
         h.insert(header::ETAG, v);
     }
@@ -240,19 +315,27 @@ async fn get_file(State(st): State<AppState>, method: Method, Path(file_id): Pat
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(DOWNLOAD_CHANNEL);
     tokio::task::spawn_blocking(move || {
-        let res = store.read_range(&id, start, end, &mut |b| tx.blocking_send(Ok(Bytes::copy_from_slice(b))).is_ok());
+        let res = store.read_range(&id, start, end, &mut |b| {
+            tx.blocking_send(Ok(Bytes::copy_from_slice(b))).is_ok()
+        });
         if let Err(e) = res {
             tracing::warn!("read of {} failed mid-stream: {}", super::id_hex(&id), e);
             let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
     (status, h, Body::from_stream(stream)).into_response()
 }
 
 async fn delete_file(State(st): State<AppState>, Path(file_id): Path<String>) -> Response {
-    let Some(store) = st.store.clone() else { return disabled() };
-    let Some(id) = parse_id(&file_id) else { return error(StatusCode::BAD_REQUEST, "invalid file id") };
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
+    let Some(id) = parse_id(&file_id) else {
+        return error(StatusCode::BAD_REQUEST, "invalid file id");
+    };
     match tokio::task::spawn_blocking(move || store.delete(&id)).await {
         Ok(Ok(Some(out))) => {
             Json(json!({ "file_id": file_id.to_ascii_lowercase(), "pins": out.pins, "deleted": out.deleted })).into_response()
@@ -272,7 +355,9 @@ async fn delete_file(State(st): State<AppState>, Path(file_id): Path<String>) ->
 }
 
 async fn stats(State(st): State<AppState>) -> Response {
-    let Some(store) = st.store.clone() else { return disabled() };
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
     match tokio::task::spawn_blocking(move || store.stats()).await {
         Ok(Ok(mut v)) => {
             if let Some(c) = &st.cluster {
@@ -289,7 +374,9 @@ async fn stats(State(st): State<AppState>) -> Response {
 /// Runs to completion; one run at a time (409 while another is running).
 async fn rekey(State(st): State<AppState>) -> Response {
     static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let Some(store) = st.store.clone() else { return disabled() };
+    let Some(store) = st.store.clone() else {
+        return disabled();
+    };
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return error(StatusCode::CONFLICT, "a rekey is already running");
     }

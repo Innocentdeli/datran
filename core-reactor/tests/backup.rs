@@ -33,7 +33,16 @@ fn open(state_dir: &Path, keys: KeyRing) -> Store {
 }
 
 fn put(store: &Store, data: &[u8]) -> Id {
-    store.put_bytes(data, &PutOptions { content_type: None, sample: false }).unwrap().file_id
+    store
+        .put_bytes(
+            data,
+            &PutOptions {
+                content_type: None,
+                sample: false,
+            },
+        )
+        .unwrap()
+        .file_id
 }
 
 fn doc(i: u64) -> Vec<u8> {
@@ -44,7 +53,12 @@ fn doc(i: u64) -> Vec<u8> {
     }
 }
 
-fn restore_into(src: &Path, dst: &Path, keys: fn() -> KeyRing, force: bool) -> core_reactor::store::Result<backup::RestoreReport> {
+fn restore_into(
+    src: &Path,
+    dst: &Path,
+    keys: fn() -> KeyRing,
+    force: bool,
+) -> core_reactor::store::Result<backup::RestoreReport> {
     let verify = move |state_dir: &Path| {
         let s = open(state_dir, keys());
         s.verify_index(true)
@@ -115,17 +129,32 @@ fn backup_during_concurrent_writes_restores_byte_exact() {
     let files = restored.list_files(None, 100_000).unwrap();
     let originals = originals.into_inner().unwrap();
     for id in before {
-        assert!(files.iter().any(|f| f.file_id == *id), "file written before the backup is missing");
+        assert!(
+            files.iter().any(|f| f.file_id == *id),
+            "file written before the backup is missing"
+        );
     }
-    assert!(!files.iter().any(|f| f.file_id == deleted_before), "file deleted before the snapshot came back");
+    assert!(
+        !files.iter().any(|f| f.file_id == deleted_before),
+        "file deleted before the snapshot came back"
+    );
     for f in &files {
-        let want = originals.get(&f.file_id).expect("restored file was never written");
-        assert_eq!(&restored.read_to_vec(&f.file_id, None).unwrap(), want, "byte mismatch");
+        let want = originals
+            .get(&f.file_id)
+            .expect("restored file was never written");
+        assert_eq!(
+            &restored.read_to_vec(&f.file_id, None).unwrap(),
+            want,
+            "byte mismatch"
+        );
     }
     assert!(restored.verify_index(true).unwrap().ok());
 
     // a non-empty target is refused unless forced
-    assert!(matches!(restore_into(&dest, &target, keys, false), Err(StoreError::Invalid(_))));
+    assert!(matches!(
+        restore_into(&dest, &target, keys, false),
+        Err(StoreError::Invalid(_))
+    ));
     drop(restored);
     restore_into(&dest, &target, keys, true).unwrap();
 }
@@ -149,12 +178,17 @@ fn corrupted_backup_file_is_refused() {
         let mid = b.len() / 2;
         b[mid] ^= 0x01;
         std::fs::write(&p, &b).unwrap();
-        let target = root.path().join(format!("restored-{}", victim.replace('/', "_")));
+        let target = root
+            .path()
+            .join(format!("restored-{}", victim.replace('/', "_")));
         match restore_into(&dest, &target, keys, false) {
             Err(StoreError::Corrupt(msg)) => assert!(msg.contains(&e.path), "{}", msg),
             other => panic!("corrupt backup restored: {:?}", other.map(|_| ())),
         }
-        assert!(!target.join("store").exists(), "half-restored store left behind");
+        assert!(
+            !target.join("store").exists(),
+            "half-restored store left behind"
+        );
         b[mid] ^= 0x01;
         std::fs::write(&p, &b).unwrap();
     }
@@ -175,7 +209,9 @@ fn incremental_backup_copies_only_new_objects() {
     let full = store.backup(&root.path().join("full"), None).unwrap();
     assert_eq!(full.objects_reused, 0);
     // second backup without changes: nothing but the index / state / active pack is copied
-    let same = store.backup(&root.path().join("same"), Some(&root.path().join("full"))).unwrap();
+    let same = store
+        .backup(&root.path().join("same"), Some(&root.path().join("full")))
+        .unwrap();
     assert_eq!(same.objects_copied, 0);
     assert_eq!(same.objects_reused, full.objects_copied);
 
@@ -188,14 +224,32 @@ fn incremental_backup_copies_only_new_objects() {
         new_ids.push(id);
         data.insert(id, d);
     }
-    let inc = store.backup(&root.path().join("inc"), Some(&root.path().join("same"))).unwrap();
+    let inc = store
+        .backup(&root.path().join("inc"), Some(&root.path().join("same")))
+        .unwrap();
     assert_eq!(inc.objects_reused, before_objects, "{:?}", inc);
-    assert!(inc.objects_copied > 0 && inc.objects_copied <= 3 * 3, "{:?}", inc);
-    assert!(inc.bytes_copied < full.bytes_copied, "{:?} vs {:?}", inc, full);
+    assert!(
+        inc.objects_copied > 0 && inc.objects_copied <= 3 * 3,
+        "{:?}",
+        inc
+    );
+    assert!(
+        inc.bytes_copied < full.bytes_copied,
+        "{:?} vs {:?}",
+        inc,
+        full
+    );
     // reused entries point at the backup that physically holds them (one hop)
     let m = read_manifest(&root.path().join("inc")).unwrap();
-    let full_abs = std::fs::canonicalize(root.path().join("full")).unwrap().to_string_lossy().to_string();
-    assert!(m.files.iter().filter(|f| f.path.starts_with("store/objects/")).any(|f| f.base.as_deref() == Some(full_abs.as_str())));
+    let full_abs = std::fs::canonicalize(root.path().join("full"))
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(m
+        .files
+        .iter()
+        .filter(|f| f.path.starts_with("store/objects/"))
+        .any(|f| f.base.as_deref() == Some(full_abs.as_str())));
     drop(store);
 
     let target = root.path().join("restored");
@@ -213,5 +267,11 @@ fn incremental_backup_copies_only_new_objects() {
     for n in ["full", "same", "inc"] {
         std::fs::rename(root.path().join(n), moved.join(n)).unwrap();
     }
-    restore_into(&moved.join("inc"), &root.path().join("restored2"), keys, false).unwrap();
+    restore_into(
+        &moved.join("inc"),
+        &root.path().join("restored2"),
+        keys,
+        false,
+    )
+    .unwrap();
 }

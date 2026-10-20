@@ -13,8 +13,22 @@ use std::time::Instant;
 
 fn text(n: usize) -> Vec<u8> {
     let words: [&[u8]; 16] = [
-        b"the", b"reactor", b"chunk", b"stream", b"of", b"and", b"datran", b"pack", b"index", b"commit", b"verify",
-        b"object", b"to", b"a", b"compress", b"store",
+        b"the",
+        b"reactor",
+        b"chunk",
+        b"stream",
+        b"of",
+        b"and",
+        b"datran",
+        b"pack",
+        b"index",
+        b"commit",
+        b"verify",
+        b"object",
+        b"to",
+        b"a",
+        b"compress",
+        b"store",
     ];
     let mut s: u64 = 0x2545_f491_4f6c_dd1d;
     let mut out = Vec::with_capacity(n + 16);
@@ -39,11 +53,19 @@ fn no_dict(_: &DictId) -> Option<Arc<Vec<u8>>> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let n_mib: usize = args.first().and_then(|v| v.parse().ok()).unwrap_or(256);
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let workers: u32 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(cores as u32);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let workers: u32 = args
+        .get(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(cores as u32);
     let data = text(n_mib << 20);
     let mib = data.len() as f64 / (1024.0 * 1024.0);
-    println!("{} MiB text, {} logical cores, MT workers {}", n_mib, cores, workers);
+    println!(
+        "{} MiB text, {} logical cores, MT workers {}",
+        n_mib, cores, workers
+    );
 
     let engine = |w: u32| {
         let mut c = EvoConfig::new(std::env::temp_dir().join("core-reactor-compress-bench"));
@@ -57,10 +79,18 @@ fn main() {
         let t = Instant::now();
         let out = e.compress(&data, Some("text/plain"), false);
         let s = t.elapsed().as_secs_f64();
-        let r = out.recipe.as_ref().map(|r| r.label()).unwrap_or_else(|| "raw".into());
+        let r = out
+            .recipe
+            .as_ref()
+            .map(|r| r.label())
+            .unwrap_or_else(|| "raw".into());
         let payload = &out.blob[HEADER_LEN..];
-        let frames_ok = zstd::zstd_safe::find_frame_compressed_size(payload).ok() == Some(payload.len());
-        assert_eq!(codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(), data);
+        let frames_ok =
+            zstd::zstd_safe::find_frame_compressed_size(payload).ok() == Some(payload.len());
+        assert_eq!(
+            codec::decode_any(&out.blob, usize::MAX, &no_dict).unwrap(),
+            data
+        );
         println!(
             "Engine::compress {:<16} {:>8.3} s {:>9.1} MiB/s  ratio {:.3}x  recipe {}  single frame {}",
             label,
@@ -78,11 +108,22 @@ fn main() {
     let t = Instant::now();
     let _ = core_reactor::reactor::DiocomNativeReactor::calculate_entropy(&data);
     let _ = core_reactor::classify::classify(&data, Some("text/plain"));
-    println!("stage classify+entropy: {:.1} MiB/s", mib / t.elapsed().as_secs_f64());
+    println!(
+        "stage classify+entropy: {:.1} MiB/s",
+        mib / t.elapsed().as_secs_f64()
+    );
     for (label, recipe, w) in [
         ("lz4 (speed seed)", Recipe::new(codec::Codec::Lz4, 0), 0u32),
-        ("zstd-1 MT (speed default)", Recipe::new(codec::Codec::Zstd, 1), workers),
-        ("zstd-3 MT (balanced default)", Recipe::new(codec::Codec::Zstd, 3), workers),
+        (
+            "zstd-1 MT (speed default)",
+            Recipe::new(codec::Codec::Zstd, 1),
+            workers,
+        ),
+        (
+            "zstd-3 MT (balanced default)",
+            Recipe::new(codec::Codec::Zstd, 3),
+            workers,
+        ),
     ] {
         let t = Instant::now();
         let b = recipe.encode_with_workers(&data, None, w).unwrap();
@@ -108,11 +149,23 @@ fn main() {
         let b = codec::encode_zstd_mt_verified(level, None, None, &data, workers).unwrap();
         let s = t.elapsed().as_secs_f64();
         let payload = &b[HEADER_LEN..];
-        assert_eq!(zstd::zstd_safe::find_frame_compressed_size(payload).ok(), Some(payload.len()));
-        println!("stage zstd-{} MT encode with overlapped verify: {:>8.1} MiB/s ratio {:.3}x", level, mib / s, data.len() as f64 / b.len() as f64);
+        assert_eq!(
+            zstd::zstd_safe::find_frame_compressed_size(payload).ok(),
+            Some(payload.len())
+        );
+        println!(
+            "stage zstd-{} MT encode with overlapped verify: {:>8.1} MiB/s ratio {:.3}x",
+            level,
+            mib / s,
+            data.len() as f64 / b.len() as f64
+        );
     }
-    for profile in [core_reactor::evolution::Profile::Speed, core_reactor::evolution::Profile::Balanced] {
-        let mut c = EvoConfig::new(std::env::temp_dir().join("core-reactor-compress-bench")).with_profile(profile);
+    for profile in [
+        core_reactor::evolution::Profile::Speed,
+        core_reactor::evolution::Profile::Balanced,
+    ] {
+        let mut c = EvoConfig::new(std::env::temp_dir().join("core-reactor-compress-bench"))
+            .with_profile(profile);
         c.persist = false;
         c.mt_workers = workers;
         c.max_output = usize::MAX;
@@ -126,7 +179,10 @@ fn main() {
             s,
             mib / s,
             data.len() as f64 / out.blob.len() as f64,
-            out.recipe.as_ref().map(|r| r.label()).unwrap_or_else(|| "raw".into())
+            out.recipe
+                .as_ref()
+                .map(|r| r.label())
+                .unwrap_or_else(|| "raw".into())
         );
     }
     for level in [3, 9] {
@@ -141,16 +197,27 @@ fn main() {
                 base = s;
             } else {
                 let payload = &b[HEADER_LEN..];
-                assert_eq!(zstd::zstd_safe::find_frame_compressed_size(payload).ok(), Some(payload.len()));
+                assert_eq!(
+                    zstd::zstd_safe::find_frame_compressed_size(payload).ok(),
+                    Some(payload.len())
+                );
                 assert_eq!(codec::decode_v2(&b, usize::MAX, &no_dict).unwrap(), data);
             }
             line.push_str(&format!(
                 "  {} {:.3} s {:.1} MiB/s ratio {:.3}x{}",
-                if w == 0 { "ST".to_string() } else { format!("MT{}", w) },
+                if w == 0 {
+                    "ST".to_string()
+                } else {
+                    format!("MT{}", w)
+                },
                 s,
                 mib / s,
                 data.len() as f64 / b.len() as f64,
-                if w == 0 { String::new() } else { format!(" (speedup {:.2}x)", base / s) }
+                if w == 0 {
+                    String::new()
+                } else {
+                    format!(" (speedup {:.2}x)", base / s)
+                }
             ));
         }
         println!("{}", line);

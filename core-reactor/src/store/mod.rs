@@ -44,13 +44,13 @@ pub mod scrub;
 use crate::classify;
 use crate::codec::{self, Codec, DecodeError, DictId, HEADER_LEN};
 use crate::crypto::{CryptoError, KeyRing, Kind};
-use std::borrow::Cow;
 use crate::evolution::Engine;
 use crate::recipe::Recipe;
 use crate::state::now_ms;
 use index::{meta, ObjectRec, PackLoc, Tables};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -96,11 +96,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn class_code(class: &str) -> u8 {
-    classify::CLASSES.iter().position(|c| *c == class).map(|i| i as u8).unwrap_or(u8::MAX)
+    classify::CLASSES
+        .iter()
+        .position(|c| *c == class)
+        .map(|i| i as u8)
+        .unwrap_or(u8::MAX)
 }
 
 fn class_name(code: u8) -> &'static str {
-    classify::CLASSES.get(code as usize).copied().unwrap_or(classify::BINARY_STRUCTURED)
+    classify::CLASSES
+        .get(code as usize)
+        .copied()
+        .unwrap_or(classify::BINARY_STRUCTURED)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -111,7 +118,11 @@ fn class_name(code: u8) -> &'static str {
 pub enum StoreError {
     NotFound,
     /// Capacity exhausted and nothing could be evicted (HTTP 507).
-    Full { needed: u64, used: u64, max: u64 },
+    Full {
+        needed: u64,
+        used: u64,
+        max: u64,
+    },
     /// Stored data failed verification (the object is quarantined).
     Corrupt(String),
     /// Bad input (manifest, object or chunk from a caller / peer).
@@ -134,7 +145,11 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::NotFound => write!(f, "not found"),
             StoreError::Full { needed, used, max } => {
-                write!(f, "store full: need {} bytes, {} of {} bytes used", needed, used, max)
+                write!(
+                    f,
+                    "store full: need {} bytes, {} of {} bytes used",
+                    needed, used, max
+                )
             }
             StoreError::Corrupt(m) => write!(f, "corrupt data: {}", m),
             StoreError::Invalid(m) => write!(f, "invalid input: {}", m),
@@ -163,7 +178,14 @@ macro_rules! db_err {
         }
     )*};
 }
-db_err!(redb::Error, redb::DatabaseError, redb::TransactionError, redb::TableError, redb::StorageError, redb::CommitError);
+db_err!(
+    redb::Error,
+    redb::DatabaseError,
+    redb::TransactionError,
+    redb::TableError,
+    redb::StorageError,
+    redb::CommitError
+);
 
 impl From<DecodeError> for StoreError {
     fn from(e: DecodeError) -> Self {
@@ -211,7 +233,9 @@ impl From<String> for VerifyFail {
 impl From<StoreError> for VerifyFail {
     fn from(e: StoreError) -> Self {
         match e {
-            StoreError::KeyUnavailable(_) | StoreError::UnknownDict(_) => VerifyFail::Unavailable(e.to_string()),
+            StoreError::KeyUnavailable(_) | StoreError::UnknownDict(_) => {
+                VerifyFail::Unavailable(e.to_string())
+            }
             e => VerifyFail::Corrupt(e.to_string()),
         }
     }
@@ -312,12 +336,17 @@ impl StoreConfig {
             c.scrub_bytes = n;
         }
         if let Ok(v) = std::env::var("REACTOR_FUSION") {
-            c.fusion = !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off");
+            c.fusion = !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            );
         }
         if let Some(ms) = env_parse::<u64>("REACTOR_FUSE_INTERVAL_MS") {
             c.fusion_interval = Duration::from_millis(ms.max(100));
         }
-        if let Some(n) = env_parse::<f64>("REACTOR_FUSE_COACCESS_MIN").filter(|n| n.is_finite() && *n > 0.0) {
+        if let Some(n) =
+            env_parse::<f64>("REACTOR_FUSE_COACCESS_MIN").filter(|n| n.is_finite() && *n > 0.0)
+        {
             c.coaccess_min = n;
         }
         if let Some(ms) = env_parse::<u64>("REACTOR_GROUP_COMMIT_MS") {
@@ -586,19 +615,27 @@ impl Store {
             }
             for entry in std::fs::read_dir(&shard)? {
                 let p = entry?.path();
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 if name.ends_with(".tmp") {
                     if std::fs::remove_file(&p).is_ok() {
                         temps += 1;
                     }
                     continue;
                 }
-                let Some(id) = name.strip_suffix(".obj").and_then(parse_id) else { continue };
+                let Some(id) = name.strip_suffix(".obj").and_then(parse_id) else {
+                    continue;
+                };
                 let stale = match objects.get(&id)? {
                     None => true,
                     Some(g) => {
                         let rec = ObjectRec::decode(g.value())?;
-                        if rec.pack.is_none() && !rec.quarantined() && std::fs::metadata(&p).map(|m| m.len()).ok() != Some(rec.stored_len) {
+                        if rec.pack.is_none()
+                            && !rec.quarantined()
+                            && std::fs::metadata(&p).map(|m| m.len()).ok() != Some(rec.stored_len)
+                        {
                             mismatched.push(id);
                         }
                         rec.pack.is_some()
@@ -617,7 +654,11 @@ impl Store {
         self.stats.startup_orphans.store(orphans, Ordering::Relaxed);
         self.stats.startup_temps.store(temps, Ordering::Relaxed);
         if orphans + temps > 0 {
-            tracing::info!("startup sweep removed {} orphan objects and {} temp files", orphans, temps);
+            tracing::info!(
+                "startup sweep removed {} orphan objects and {} temp files",
+                orphans,
+                temps
+            );
         }
         Ok(())
     }
@@ -626,13 +667,17 @@ impl Store {
     /// renamed the new file into place but crashed before its index commit. If the file verifies
     /// (AEAD + decode + hash) the row adopts its length and key slot; otherwise scrub quarantines it.
     fn reconcile_file_object(&self, id: &Id) -> Result<()> {
-        let Ok(bytes) = std::fs::read(self.object_path(id)) else { return Ok(()) };
+        let Ok(bytes) = std::fs::read(self.object_path(id)) else {
+            return Ok(());
+        };
         if self.decode_stored(id, &bytes).is_err() {
             return Ok(());
         }
         let (len, slot) = (bytes.len() as u64, self.slot_of(&bytes));
         with_write(self, |t| {
-            let Some(mut rec) = t.get_obj(id)? else { return Ok(()) };
+            let Some(mut rec) = t.get_obj(id)? else {
+                return Ok(());
+            };
             if rec.pack.is_some() || rec.stored_len == len {
                 return Ok(());
             }
@@ -649,7 +694,11 @@ impl Store {
             rec.stored_len = len;
             t.put_obj(id, &rec)
         })?;
-        tracing::info!("startup: object {} adopted its rewritten file ({} bytes)", id_hex(id), len);
+        tracing::info!(
+            "startup: object {} adopted its rewritten file ({} bytes)",
+            id_hex(id),
+            len
+        );
         Ok(())
     }
 
@@ -661,14 +710,20 @@ impl Store {
     }
 
     pub fn eviction_policy(&self) -> Arc<dyn EvictionPolicy> {
-        self.policy.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Called (from the scrub / read thread) with every newly quarantined object id, so data
     /// gravity can re-fetch it from a peer and call [`Store::repair_object_raw`] /
     /// [`Store::repair_object_plain`].
     pub fn set_quarantine_hook(&self, h: Option<QuarantineHook>) {
-        *self.quarantine_hook.write().unwrap_or_else(|e| e.into_inner()) = h;
+        *self
+            .quarantine_hook
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = h;
     }
 
     /// Installs (or clears) the read hook (see [`ReadHook`]).
@@ -677,7 +732,11 @@ impl Store {
     }
 
     pub(crate) fn notify_read(&self, file_id: &Id, bytes: u64) {
-        let hook = self.read_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let hook = self
+            .read_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(h) = hook {
             h(file_id, bytes);
         }
@@ -692,7 +751,11 @@ impl Store {
 
     fn fail(&self, point: &'static str) -> Result<()> {
         if self.fail_armed.load(Ordering::Relaxed) {
-            let hook = self.fail_hook.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let hook = self
+                .fail_hook
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             if hook.is_some_and(|h| h(point)) {
                 self.crashed.store(true, Ordering::SeqCst);
                 return Err(StoreError::Injected(point));
@@ -734,7 +797,9 @@ impl Store {
             return;
         }
         let Ok(tx) = self.db.begin_read() else { return };
-        let Ok(objects) = tx.open_table(index::OBJECTS) else { return };
+        let Ok(objects) = tx.open_table(index::OBJECTS) else {
+            return;
+        };
         for id in free {
             if matches!(objects.get(id), Ok(None)) {
                 let _ = std::fs::remove_file(self.object_path(id));
@@ -758,7 +823,10 @@ impl Store {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(dir)?;
         let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let tmp = dir.join(format!(".{}.{}.{}.tmp", name, std::process::id(), n));
         let res = (|| -> std::io::Result<()> {
             let mut f = std::fs::File::create(&tmp)?;
@@ -809,7 +877,10 @@ impl Store {
 
     /// Key id of a slot (`None` for 0 = plaintext / unknown).
     pub(crate) fn slot_key_id(&self, slot: u8) -> Option<&str> {
-        self.key_slots.iter().find(|(_, s)| **s == slot).map(|(k, _)| k.as_str())
+        self.key_slots
+            .iter()
+            .find(|(_, s)| **s == slot)
+            .map(|(k, _)| k.as_str())
     }
 
     /// Blob-v2 (transport form) of an object's stored bytes: decrypts an envelope (AEAD tag
@@ -829,7 +900,10 @@ impl Store {
     pub fn decode_object(&self, object_id: &Id, raw: &[u8]) -> Result<Vec<u8>> {
         let plain = self.decode_blob(raw)?;
         if sha256(&plain) != *object_id {
-            return Err(StoreError::Corrupt(format!("object {} plaintext hash mismatch", id_hex(object_id))));
+            return Err(StoreError::Corrupt(format!(
+                "object {} plaintext hash mismatch",
+                id_hex(object_id)
+            )));
         }
         Ok(plain)
     }
@@ -844,19 +918,25 @@ impl Store {
         for _ in 0..4 {
             let rec = self.object_rec(id)?;
             let loc = rec.as_ref().and_then(|r| r.pack.map(|p| (p, r.stored_len)));
-            if last.as_ref().is_some_and(|(prev, _)| *prev == loc.map(|l| l.0)) {
+            if last
+                .as_ref()
+                .is_some_and(|(prev, _)| *prev == loc.map(|l| l.0))
+            {
                 break;
             }
             let r = match loc {
                 Some((l, len)) => self.read_packed(id, l, len),
-                None => std::fs::read(self.object_path(id)).map_err(|e| format!("object file unreadable: {}", e)),
+                None => std::fs::read(self.object_path(id))
+                    .map_err(|e| format!("object file unreadable: {}", e)),
             };
             match r {
                 Ok(b) => return Ok(Ok(b)),
                 Err(e) => last = Some((loc.map(|l| l.0), e)),
             }
         }
-        Ok(Err(last.map(|l| l.1).unwrap_or_else(|| "object unreadable".into())))
+        Ok(Err(last
+            .map(|l| l.1)
+            .unwrap_or_else(|| "object unreadable".into())))
     }
 
     /// Reads and decodes a local object (pack record or file); failure quarantines the object.
@@ -868,7 +948,10 @@ impl Store {
                 return Err(StoreError::Corrupt(reason));
             }
         };
-        match self.open_stored(id, &blob).and_then(|b| self.decode_blob(&b)) {
+        match self
+            .open_stored(id, &blob)
+            .and_then(|b| self.decode_blob(&b))
+        {
             Ok(p) => Ok(p),
             Err(e @ (StoreError::UnknownDict(_) | StoreError::KeyUnavailable(_))) => Err(e),
             Err(e) => {
@@ -882,7 +965,11 @@ impl Store {
     /// Encoder for a content class: the class champion recipe (raw for non-evolvable classes).
     fn encoder(&self, class: &'static str) -> ObjEncoder {
         if !classify::is_evolvable(class) {
-            return ObjEncoder { class, recipe: Recipe::new(Codec::Raw, 0), dict: None };
+            return ObjEncoder {
+                class,
+                recipe: Recipe::new(Codec::Raw, 0),
+                dict: None,
+            };
         }
         let mut recipe = self.engine.champion_recipe(class);
         let mut dict = None;
@@ -892,7 +979,11 @@ impl Store {
                 recipe = self.engine.default_recipe();
             }
         }
-        ObjEncoder { class, recipe, dict }
+        ObjEncoder {
+            class,
+            recipe,
+            dict,
+        }
     }
 
     /// Encodes with the encoder's recipe, verifies the round-trip; falls back to raw v2 when the
@@ -927,10 +1018,18 @@ impl Store {
     pub fn file_meta(&self, file_id: &Id) -> Result<Option<FileMeta>> {
         let tx = self.read_tx()?;
         let m = tx.open_table(index::MANIFESTS)?;
-        let Some(rec) = m.get(file_id)?.map(|g| index::FileRec::decode(g.value())).transpose()? else {
+        let Some(rec) = m
+            .get(file_id)?
+            .map(|g| index::FileRec::decode(g.value()))
+            .transpose()?
+        else {
             return Ok(None);
         };
-        let pins = tx.open_table(index::PINS)?.get(file_id)?.map(|g| g.value()).unwrap_or(0);
+        let pins = tx
+            .open_table(index::PINS)?
+            .get(file_id)?
+            .map(|g| g.value())
+            .unwrap_or(0);
         Ok(Some(FileMeta {
             file_id: *file_id,
             size: rec.size,
@@ -953,7 +1052,9 @@ impl Store {
         let pins = tx.open_table(index::PINS)?;
         let mut out = Vec::new();
         let iter = match after {
-            Some(a) => m.range::<&[u8; 32]>((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded))?,
+            Some(a) => {
+                m.range::<&[u8; 32]>((std::ops::Bound::Excluded(a), std::ops::Bound::Unbounded))?
+            }
             None => m.range::<&[u8; 32]>(..)?,
         };
         for r in iter {
@@ -981,7 +1082,13 @@ impl Store {
         Ok(self.chunk_refs(file_id)?.map(|(meta, refs)| Manifest {
             file_id: *file_id,
             size: meta.size,
-            chunks: refs.iter().map(|r| ChunkEntry { id: r.id, len: r.len }).collect(),
+            chunks: refs
+                .iter()
+                .map(|r| ChunkEntry {
+                    id: r.id,
+                    len: r.len,
+                })
+                .collect(),
             created_ms: meta.created_ms,
         }))
     }
@@ -990,10 +1097,18 @@ impl Store {
     pub fn chunk_refs(&self, file_id: &Id) -> Result<Option<(FileMeta, Vec<ChunkRef>)>> {
         let tx = self.read_tx()?;
         let m = tx.open_table(index::MANIFESTS)?;
-        let Some(rec) = m.get(file_id)?.map(|g| index::FileRec::decode(g.value())).transpose()? else {
+        let Some(rec) = m
+            .get(file_id)?
+            .map(|g| index::FileRec::decode(g.value()))
+            .transpose()?
+        else {
             return Ok(None);
         };
-        let pins = tx.open_table(index::PINS)?.get(file_id)?.map(|g| g.value()).unwrap_or(0);
+        let pins = tx
+            .open_table(index::PINS)?
+            .get(file_id)?
+            .map(|g| g.value())
+            .unwrap_or(0);
         let mc = tx.open_table(index::MANIFEST_CHUNKS)?;
         let locs = tx.open_table(index::CHUNK_LOC)?;
         let mut out = Vec::with_capacity(rec.chunk_count as usize);
@@ -1006,8 +1121,16 @@ impl Store {
                 .get(&id)?
                 .map(|g| index::ChunkLoc::decode(g.value()))
                 .transpose()?
-                .ok_or_else(|| StoreError::Corrupt(format!("chunk {} has no location", id_hex(&id))))?;
-            out.push(ChunkRef { id, len, file_offset: index::mchunk_key_offset(k.value()), object_id: loc.object, object_offset: loc.offset });
+                .ok_or_else(|| {
+                    StoreError::Corrupt(format!("chunk {} has no location", id_hex(&id)))
+                })?;
+            out.push(ChunkRef {
+                id,
+                len,
+                file_offset: index::mchunk_key_offset(k.value()),
+                object_id: loc.object,
+                object_offset: loc.offset,
+            });
         }
         let meta = FileMeta {
             file_id: *file_id,
@@ -1024,10 +1147,19 @@ impl Store {
     pub fn object_meta(&self, object_id: &Id) -> Result<Option<ObjectMeta>> {
         let tx = self.read_tx()?;
         let objects = tx.open_table(index::OBJECTS)?;
-        let Some(rec) = objects.get(object_id)?.map(|g| ObjectRec::decode(g.value())).transpose()? else {
+        let Some(rec) = objects
+            .get(object_id)?
+            .map(|g| ObjectRec::decode(g.value()))
+            .transpose()?
+        else {
             return Ok(None);
         };
-        let members = rec.members.iter().zip(&rec.lens).map(|(id, len)| ChunkEntry { id: *id, len: *len }).collect();
+        let members = rec
+            .members
+            .iter()
+            .zip(&rec.lens)
+            .map(|(id, len)| ChunkEntry { id: *id, len: *len })
+            .collect();
         Ok(Some(ObjectMeta {
             object_id: *object_id,
             stored_len: rec.stored_len,
@@ -1052,9 +1184,14 @@ impl Store {
     pub fn get_object_raw(&self, object_id: &Id) -> Result<Option<Vec<u8>>> {
         let mut res = Reservation::new(self);
         res.add(*object_id);
-        let Some(rec) = self.object_rec(object_id)? else { return Ok(None) };
+        let Some(rec) = self.object_rec(object_id)? else {
+            return Ok(None);
+        };
         if rec.quarantined() {
-            return Err(StoreError::Corrupt(format!("object {} is quarantined", id_hex(object_id))));
+            return Err(StoreError::Corrupt(format!(
+                "object {} is quarantined",
+                id_hex(object_id)
+            )));
         }
         let raw = match self.read_stored(object_id)? {
             Ok(r) => r,
@@ -1076,7 +1213,10 @@ impl Store {
 
     fn object_rec(&self, id: &Id) -> Result<Option<ObjectRec>> {
         let tx = self.read_tx()?;
-        tx.open_table(index::OBJECTS)?.get(id)?.map(|g| ObjectRec::decode(g.value())).transpose()
+        tx.open_table(index::OBJECTS)?
+            .get(id)?
+            .map(|g| ObjectRec::decode(g.value()))
+            .transpose()
     }
 
     /// Inventory delta log: events with version > `since` (at most `limit`) and the current version.
@@ -1093,12 +1233,24 @@ impl Store {
             if b.len() != 33 {
                 continue;
             }
-            let kind = if b[0] == index::LOG_ADD { FileEventKind::Added } else { FileEventKind::Removed };
+            let kind = if b[0] == index::LOG_ADD {
+                FileEventKind::Added
+            } else {
+                FileEventKind::Removed
+            };
             let mut id = [0u8; 32];
             id.copy_from_slice(&b[1..]);
-            out.push(FileEvent { version: k.value(), kind, file_id: id });
+            out.push(FileEvent {
+                version: k.value(),
+                kind,
+                file_id: id,
+            });
         }
-        let version = tx.open_table(index::META)?.get(meta::INVENTORY_VERSION)?.map(|g| g.value()).unwrap_or(0);
+        let version = tx
+            .open_table(index::META)?
+            .get(meta::INVENTORY_VERSION)?
+            .map(|g| g.value())
+            .unwrap_or(0);
         Ok((out, version))
     }
 
@@ -1126,7 +1278,10 @@ impl Store {
 
     pub fn tombstone(&self, file_id: &Id) -> Result<Option<u64>> {
         let tx = self.read_tx()?;
-        Ok(tx.open_table(index::TOMBSTONES)?.get(file_id)?.map(|g| g.value()))
+        Ok(tx
+            .open_table(index::TOMBSTONES)?
+            .get(file_id)?
+            .map(|g| g.value()))
     }
 
     pub fn capacity(&self) -> Result<Capacity> {
@@ -1154,7 +1309,12 @@ impl Store {
                 tx.open_table(index::ACCESS)?.len()?,
             )
         };
-        let (logical, unique, physical, live) = (g(meta::LOGICAL), g(meta::UNIQUE), g(meta::PHYSICAL), g(meta::LIVE));
+        let (logical, unique, physical, live) = (
+            g(meta::LOGICAL),
+            g(meta::UNIQUE),
+            g(meta::PHYSICAL),
+            g(meta::LIVE),
+        );
         let ratio = |a: u64, b: u64| if b == 0 { 1.0 } else { a as f64 / b as f64 };
         let s = &self.stats;
         let ld = |a: &AtomicU64| a.load(Ordering::Relaxed);
@@ -1227,11 +1387,19 @@ impl Store {
         let mut by_key = serde_json::Map::new();
         let mut missing: Vec<String> = Vec::new();
         for (k, n) in m {
-            let Some(slot) = k.strip_prefix(meta::ENC_OBJECTS_PREFIX).and_then(|s| s.parse::<u8>().ok()) else { continue };
+            let Some(slot) = k
+                .strip_prefix(meta::ENC_OBJECTS_PREFIX)
+                .and_then(|s| s.parse::<u8>().ok())
+            else {
+                continue;
+            };
             if slot == 0 || *n == 0 {
                 continue;
             }
-            let name = self.slot_key_id(slot).map(|s| s.to_string()).unwrap_or_else(|| format!("slot-{}", slot));
+            let name = self
+                .slot_key_id(slot)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("slot-{}", slot));
             if !keys.has_key(&name) {
                 missing.push(name.clone());
             }
@@ -1270,7 +1438,8 @@ impl Store {
         tokio::spawn(async move {
             let tick = Duration::from_millis(250);
             let start = tokio::time::Instant::now();
-            let (mut last_gc, mut last_flush, mut last_scrub, mut last_fuse) = (start, start, start, start);
+            let (mut last_gc, mut last_flush, mut last_scrub, mut last_fuse) =
+                (start, start, start, start);
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(tick) => {}
@@ -1345,19 +1514,33 @@ impl Store {
             files += 1;
             logical += rec.size;
             let (mut n, mut expect_off) = (0u64, 0u64);
-            for r in mc.range::<&[u8; 40]>(&index::mchunk_key(&fid, 0)..=&index::mchunk_key(&fid, u64::MAX))? {
+            for r in mc.range::<&[u8; 40]>(
+                &index::mchunk_key(&fid, 0)..=&index::mchunk_key(&fid, u64::MAX),
+            )? {
                 let (k, v) = r?;
                 let off = index::mchunk_key_offset(k.value());
                 let (cid, len) = index::mchunk_val_decode(v.value());
                 if off != expect_off {
-                    p(format!("file {}: chunk at {} expected {}", id_hex(&fid), off, expect_off));
+                    p(format!(
+                        "file {}: chunk at {} expected {}",
+                        id_hex(&fid),
+                        off,
+                        expect_off
+                    ));
                 }
                 expect_off = off + len as u64;
                 n += 1;
                 *occurrences.entry(cid).or_insert(0) += 1;
             }
             if n != rec.chunk_count || expect_off != rec.size {
-                p(format!("file {}: {} chunks / {} bytes, header says {} / {}", id_hex(&fid), n, expect_off, rec.chunk_count, rec.size));
+                p(format!(
+                    "file {}: {} chunks / {} bytes, header says {} / {}",
+                    id_hex(&fid),
+                    n,
+                    expect_off,
+                    rec.chunk_count,
+                    rec.size
+                ));
             }
         }
         // every manifest_chunks row belongs to a manifest
@@ -1368,7 +1551,10 @@ impl Store {
             fid.copy_from_slice(&k.value()[..32]);
             if prev != Some(fid) {
                 if manifests.get(&fid)?.is_none() {
-                    p(format!("manifest_chunks rows for unknown file {}", id_hex(&fid)));
+                    p(format!(
+                        "manifest_chunks rows for unknown file {}",
+                        id_hex(&fid)
+                    ));
                 }
                 prev = Some(fid);
             }
@@ -1382,16 +1568,37 @@ impl Store {
             chunks += 1;
             let occ = occurrences.remove(&cid).unwrap_or(0);
             if loc.refs != occ {
-                p(format!("chunk {}: refs {} but {} manifest occurrences", id_hex(&cid), loc.refs, occ));
+                p(format!(
+                    "chunk {}: refs {} but {} manifest occurrences",
+                    id_hex(&cid),
+                    loc.refs,
+                    occ
+                ));
             }
-            match objects.get(&loc.object)?.map(|g| ObjectRec::decode(g.value())).transpose()? {
-                None => p(format!("chunk {} points at missing object {}", id_hex(&cid), id_hex(&loc.object))),
+            match objects
+                .get(&loc.object)?
+                .map(|g| ObjectRec::decode(g.value()))
+                .transpose()?
+            {
+                None => p(format!(
+                    "chunk {} points at missing object {}",
+                    id_hex(&cid),
+                    id_hex(&loc.object)
+                )),
                 Some(o) => {
                     if loc.offset as u64 + loc.len as u64 > o.plain_len {
-                        p(format!("chunk {} lies outside object {}", id_hex(&cid), id_hex(&loc.object)));
+                        p(format!(
+                            "chunk {} lies outside object {}",
+                            id_hex(&cid),
+                            id_hex(&loc.object)
+                        ));
                     }
                     if o.member_span(&cid) != Some((loc.offset, loc.len)) {
-                        p(format!("chunk {} not a member of object {} at its offset", id_hex(&cid), id_hex(&loc.object)));
+                        p(format!(
+                            "chunk {} not a member of object {} at its offset",
+                            id_hex(&cid),
+                            id_hex(&loc.object)
+                        ));
                     }
                 }
             }
@@ -1400,12 +1607,17 @@ impl Store {
             }
         }
         for (cid, n) in occurrences {
-            p(format!("chunk {} referenced {} times but not indexed", id_hex(&cid), n));
+            p(format!(
+                "chunk {} referenced {} times but not indexed",
+                id_hex(&cid),
+                n
+            ));
         }
         let pack_rows: HashMap<u64, index::PackRec> = self.pack_rows()?.into_iter().collect();
         let mut pack_live: HashMap<u64, (u64, u64)> = HashMap::new();
         let mut slot_counts: HashMap<u8, u64> = HashMap::new();
-        let (mut objs, mut supers, mut physical, mut live, mut unique) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut objs, mut supers, mut physical, mut live, mut unique) =
+            (0u64, 0u64, 0u64, 0u64, 0u64);
         for r in objects.range::<&[u8; 32]>(..)? {
             let (k, v) = r?;
             let oid = *k.value();
@@ -1418,7 +1630,12 @@ impl Store {
             }
             let lv = obj_live.remove(&oid).unwrap_or(0);
             if o.refcount != lv {
-                p(format!("object {}: refcount {} but {} live chunks", id_hex(&oid), o.refcount, lv));
+                p(format!(
+                    "object {}: refcount {} but {} live chunks",
+                    id_hex(&oid),
+                    o.refcount,
+                    lv
+                ));
             }
             if o.refcount > 0 {
                 live += o.stored_len;
@@ -1426,10 +1643,18 @@ impl Store {
             }
             let queued = gcq.get(&oid)?.is_some();
             if queued != (o.refcount == 0) {
-                p(format!("object {}: refcount {} but gc_queued={}", id_hex(&oid), o.refcount, queued));
+                p(format!(
+                    "object {}: refcount {} but gc_queued={}",
+                    id_hex(&oid),
+                    o.refcount,
+                    queued
+                ));
             }
             if o.quarantined() && o.pack.is_some() {
-                p(format!("object {}: quarantined but still linked into pack", id_hex(&oid)));
+                p(format!(
+                    "object {}: quarantined but still linked into pack",
+                    id_hex(&oid)
+                ));
             }
             if !o.quarantined() {
                 match o.pack {
@@ -1438,9 +1663,21 @@ impl Store {
                         e.0 += pack::record_size(o.stored_len);
                         e.1 += 1;
                         match pack_rows.get(&l.pack) {
-                            Some(r) if l.offset >= pack::PACK_HEADER && l.offset + pack::record_size(o.stored_len) <= r.end => {}
-                            Some(r) => p(format!("object {}: record at pack {} @ {} beyond committed end {}", id_hex(&oid), l.pack, l.offset, r.end)),
-                            None => p(format!("object {}: pack {} has no row", id_hex(&oid), l.pack)),
+                            Some(r)
+                                if l.offset >= pack::PACK_HEADER
+                                    && l.offset + pack::record_size(o.stored_len) <= r.end => {}
+                            Some(r) => p(format!(
+                                "object {}: record at pack {} @ {} beyond committed end {}",
+                                id_hex(&oid),
+                                l.pack,
+                                l.offset,
+                                r.end
+                            )),
+                            None => p(format!(
+                                "object {}: pack {} has no row",
+                                id_hex(&oid),
+                                l.pack
+                            )),
                         }
                         if !deep {
                             if let Err(e) = self.read_packed(&oid, l, o.stored_len) {
@@ -1450,7 +1687,12 @@ impl Store {
                     }
                     None => match std::fs::metadata(self.object_path(&oid)) {
                         Ok(md) if md.len() == o.stored_len => {}
-                        Ok(md) => p(format!("object {}: file has {} bytes, index {}", id_hex(&oid), md.len(), o.stored_len)),
+                        Ok(md) => p(format!(
+                            "object {}: file has {} bytes, index {}",
+                            id_hex(&oid),
+                            md.len(),
+                            o.stored_len
+                        )),
                         Err(_) => p(format!("object {}: file missing", id_hex(&oid))),
                     },
                 }
@@ -1464,7 +1706,10 @@ impl Store {
         for r in gcq.range::<&[u8; 32]>(..)? {
             let (k, _) = r?;
             if objects.get(k.value())?.is_none() {
-                p(format!("gc_queue entry for unknown object {}", id_hex(k.value())));
+                p(format!(
+                    "gc_queue entry for unknown object {}",
+                    id_hex(k.value())
+                ));
             }
         }
         for (k, want) in [
@@ -1482,7 +1727,10 @@ impl Store {
             }
         }
         for slot in 0..=index::MAX_KEY_SLOT {
-            let (k, want) = (meta::enc_objects(slot), slot_counts.get(&slot).copied().unwrap_or(0));
+            let (k, want) = (
+                meta::enc_objects(slot),
+                slot_counts.get(&slot).copied().unwrap_or(0),
+            );
             let have = mg(&k)?;
             if have != want {
                 p(format!("counter {} = {}, recomputed {}", k, have, want));
@@ -1496,9 +1744,16 @@ impl Store {
             }
             for e in std::fs::read_dir(&shard)? {
                 let path = e?.path();
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 match name.strip_suffix(".obj").and_then(parse_id) {
-                    Some(id) => match objects.get(&id)?.map(|g| ObjectRec::decode(g.value())).transpose()? {
+                    Some(id) => match objects
+                        .get(&id)?
+                        .map(|g| ObjectRec::decode(g.value()))
+                        .transpose()?
+                    {
                         Some(o) if o.pack.is_none() => {}
                         Some(_) => p(format!("stale file {} for a packed object", name)),
                         None => p(format!("orphan file {}", name)),
@@ -1521,7 +1776,9 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e @ VerifyFail::Unavailable(_)) => Err(e),
             Err(e) => match self.object_rec(id) {
-                Ok(Some(cur)) if cur.pack != rec.pack || cur.stored_len != rec.stored_len => self.verify_object_at(id, &cur),
+                Ok(Some(cur)) if cur.pack != rec.pack || cur.stored_len != rec.stored_len => {
+                    self.verify_object_at(id, &cur)
+                }
                 _ => Err(e),
             },
         }
@@ -1534,14 +1791,24 @@ impl Store {
     fn verify_object_at(&self, id: &Id, rec: &ObjectRec) -> std::result::Result<(), VerifyFail> {
         let raw = match rec.pack {
             Some(l) => self.read_packed(id, l, rec.stored_len)?,
-            None => std::fs::read(self.object_path(id)).map_err(|e| format!("unreadable: {}", e))?,
+            None => {
+                std::fs::read(self.object_path(id)).map_err(|e| format!("unreadable: {}", e))?
+            }
         };
         if rec.pack.is_some() && raw.len() as u64 != rec.stored_len {
-            return Err(VerifyFail::Corrupt(format!("stored length {} != index {}", raw.len(), rec.stored_len)));
+            return Err(VerifyFail::Corrupt(format!(
+                "stored length {} != index {}",
+                raw.len(),
+                rec.stored_len
+            )));
         }
         let plain = self.decode_stored(id, &raw)?;
         if plain.len() as u64 != rec.plain_len {
-            return Err(VerifyFail::Corrupt(format!("plain length {} != index {}", plain.len(), rec.plain_len)));
+            return Err(VerifyFail::Corrupt(format!(
+                "plain length {} != index {}",
+                plain.len(),
+                rec.plain_len
+            )));
         }
         Ok(())
     }
@@ -1557,7 +1824,9 @@ fn init_key_slots(db: &Database, active: Option<&str>) -> Result<(HashMap<String
         let mut slots: HashMap<String, u8> = HashMap::new();
         for r in t.meta.range::<&str>(meta::KEY_SLOT_PREFIX..)? {
             let (k, v) = r?;
-            let Some(id) = k.value().strip_prefix(meta::KEY_SLOT_PREFIX) else { break };
+            let Some(id) = k.value().strip_prefix(meta::KEY_SLOT_PREFIX) else {
+                break;
+            };
             slots.insert(id.to_string(), v.value() as u8);
         }
         let active_slot = match active {
@@ -1567,7 +1836,10 @@ fn init_key_slots(db: &Database, active: Option<&str>) -> Result<(HashMap<String
                 None => {
                     let s = slots.values().copied().max().unwrap_or(0) + 1;
                     if s > index::MAX_KEY_SLOT {
-                        return Err(StoreError::Invalid(format!("more than {} distinct key ids were used with this store", index::MAX_KEY_SLOT)));
+                        return Err(StoreError::Invalid(format!(
+                            "more than {} distinct key ids were used with this store",
+                            index::MAX_KEY_SLOT
+                        )));
                     }
                     t.meta.insert(meta::key_slot(id).as_str(), s as u64)?;
                     slots.insert(id.to_string(), s);
@@ -1579,7 +1851,9 @@ fn init_key_slots(db: &Database, active: Option<&str>) -> Result<(HashMap<String
             let mut counts: HashMap<u8, u64> = HashMap::new();
             for r in t.objects.range::<&[u8; 32]>(..)? {
                 let (_, v) = r?;
-                *counts.entry(ObjectRec::decode(v.value())?.key_slot()).or_insert(0) += 1;
+                *counts
+                    .entry(ObjectRec::decode(v.value())?.key_slot())
+                    .or_insert(0) += 1;
             }
             for (slot, n) in counts {
                 t.meta.insert(meta::enc_objects(slot).as_str(), n)?;
@@ -1597,21 +1871,34 @@ fn decode_blob_with(engine: &Engine, blob: &[u8]) -> Result<Vec<u8>> {
     if blob.first() != Some(&codec::FLAG_RECIPE) {
         return Err(StoreError::Corrupt("object is not a blob-v2".into()));
     }
-    Ok(codec::decode_v2(blob, OBJECT_MAX_PLAIN, &|id: &DictId| engine.dicts.get(id))?)
+    Ok(codec::decode_v2(blob, OBJECT_MAX_PLAIN, &|id: &DictId| {
+        engine.dicts.get(id)
+    })?)
 }
 
 /// Encodes with the encoder's recipe (single-threaded codec), verifies the round-trip; falls back
 /// to raw v2 when the recipe fails, does not verify, or is not smaller. Pure function of
 /// (`enc`, `data`), so it can run on any thread.
-pub(crate) fn encode_verified_with(engine: &Engine, enc: &ObjEncoder, data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn encode_verified_with(
+    engine: &Engine,
+    enc: &ObjEncoder,
+    data: &[u8],
+) -> Result<Vec<u8>> {
     if enc.recipe.codec != Codec::Raw {
-        if let Ok(b) = enc.recipe.encode(data, enc.dict.as_deref().map(|d| d.as_slice())) {
-            if b.len() < data.len() + HEADER_LEN && decode_blob_with(engine, &b).is_ok_and(|p| p == data) {
+        if let Ok(b) = enc
+            .recipe
+            .encode(data, enc.dict.as_deref().map(|d| d.as_slice()))
+        {
+            if b.len() < data.len() + HEADER_LEN
+                && decode_blob_with(engine, &b).is_ok_and(|p| p == data)
+            {
                 return Ok(b);
             }
         }
     }
-    let raw = Recipe::new(Codec::Raw, 0).encode(data, None).map_err(StoreError::Invalid)?;
+    let raw = Recipe::new(Codec::Raw, 0)
+        .encode(data, None)
+        .map_err(StoreError::Invalid)?;
     if decode_blob_with(engine, &raw)? != data {
         return Err(StoreError::Corrupt("raw round-trip failed".into()));
     }
@@ -1640,7 +1927,11 @@ pub(crate) struct Reservation<'a> {
 
 impl<'a> Reservation<'a> {
     pub fn new(store: &'a Store) -> Reservation<'a> {
-        Reservation { store, ids: Vec::new(), created: Vec::new() }
+        Reservation {
+            store,
+            ids: Vec::new(),
+            created: Vec::new(),
+        }
     }
     pub fn add(&mut self, id: Id) {
         self.store.reserve(&[id]);
@@ -1673,7 +1964,10 @@ impl Drop for Reservation<'_> {
 }
 
 /// Wraps a write transaction's tables plus a commit helper (keeps call sites short).
-pub(crate) fn with_write<T>(store: &Store, f: impl FnOnce(&mut Tables<'_>) -> Result<T>) -> Result<T> {
+pub(crate) fn with_write<T>(
+    store: &Store,
+    f: impl FnOnce(&mut Tables<'_>) -> Result<T>,
+) -> Result<T> {
     let tx = store.db.begin_write()?;
     let out = {
         let mut t = Tables::open(&tx)?;

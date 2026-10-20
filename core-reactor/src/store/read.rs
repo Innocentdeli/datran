@@ -26,10 +26,19 @@ impl Store {
     /// Streams bytes `[start, end)` of a file into `sink` (called with verified slices, at most
     /// one chunk at a time). `sink` returning false cancels the read (`Ok`). Errors:
     /// `NotFound`, `Invalid` (range), `Corrupt` (verification failed; object quarantined).
-    pub fn read_range(&self, file_id: &Id, start: u64, end: u64, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<ReadStats> {
+    pub fn read_range(
+        &self,
+        file_id: &Id,
+        start: u64,
+        end: u64,
+        sink: &mut dyn FnMut(&[u8]) -> bool,
+    ) -> Result<ReadStats> {
         let meta = self.file_meta(file_id)?.ok_or(StoreError::NotFound)?;
         if start > end || end > meta.size {
-            return Err(StoreError::Invalid(format!("range {}..{} outside file of {} bytes", start, end, meta.size)));
+            return Err(StoreError::Invalid(format!(
+                "range {}..{} outside file of {} bytes",
+                start, end, meta.size
+            )));
         }
         let mut stats = ReadStats::default();
         let mut pos = start;
@@ -48,7 +57,13 @@ impl Store {
                     .next_back()
                     .transpose()?
                     .map(|(k, _)| index::mchunk_key_offset(k.value()))
-                    .ok_or_else(|| StoreError::Corrupt(format!("file {}: no chunk at offset {}", id_hex(file_id), pos)))?;
+                    .ok_or_else(|| {
+                        StoreError::Corrupt(format!(
+                            "file {}: no chunk at offset {}",
+                            id_hex(file_id),
+                            pos
+                        ))
+                    })?;
                 let from = index::mchunk_key(file_id, first);
                 let to = index::mchunk_key(file_id, end);
                 let mut v = Vec::with_capacity(READ_BATCH);
@@ -63,7 +78,11 @@ impl Store {
                 v
             };
             if rows.is_empty() {
-                return Err(StoreError::Corrupt(format!("file {}: manifest ends before offset {}", id_hex(file_id), pos)));
+                return Err(StoreError::Corrupt(format!(
+                    "file {}: manifest ends before offset {}",
+                    id_hex(file_id),
+                    pos
+                )));
             }
             // 2. reserve, then resolve locations
             let mut res = Reservation::new(self);
@@ -78,7 +97,9 @@ impl Store {
                         .get(cid)?
                         .map(|g| ChunkLoc::decode(g.value()))
                         .transpose()?
-                        .ok_or_else(|| StoreError::Corrupt(format!("chunk {} has no location", id_hex(cid))))?;
+                        .ok_or_else(|| {
+                            StoreError::Corrupt(format!("chunk {} has no location", id_hex(cid)))
+                        })?;
                     v.push(loc);
                 }
                 v
@@ -86,7 +107,11 @@ impl Store {
             // 3. decode, verify, emit
             for ((off, cid, len), loc) in rows.iter().zip(locs.iter()) {
                 if *off > pos || off + *len as u64 <= pos {
-                    return Err(StoreError::Corrupt(format!("file {}: manifest gap at {}", id_hex(file_id), pos)));
+                    return Err(StoreError::Corrupt(format!(
+                        "file {}: manifest gap at {}",
+                        id_hex(file_id),
+                        pos
+                    )));
                 }
                 if cache.as_ref().map(|c| c.0) != Some(loc.object) {
                     let plain = self.read_object_plain(&loc.object)?;
@@ -118,9 +143,13 @@ impl Store {
             res.release();
         }
         self.stats.reads.fetch_add(1, Ordering::Relaxed);
-        self.stats.read_bytes.fetch_add(stats.bytes, Ordering::Relaxed);
+        self.stats
+            .read_bytes
+            .fetch_add(stats.bytes, Ordering::Relaxed);
         if stats.chunks > stats.objects_decoded {
-            self.stats.reads_saved_pending.fetch_add(stats.chunks - stats.objects_decoded, Ordering::Relaxed);
+            self.stats
+                .reads_saved_pending
+                .fetch_add(stats.chunks - stats.objects_decoded, Ordering::Relaxed);
         }
         self.record_access(&accessed);
         self.notify_read(file_id, stats.bytes);
@@ -131,7 +160,10 @@ impl Store {
     pub fn read_to_vec(&self, file_id: &Id, range: Option<(u64, u64)>) -> Result<Vec<u8>> {
         let (s, e) = match range {
             Some(r) => r,
-            None => (0, self.file_meta(file_id)?.ok_or(StoreError::NotFound)?.size),
+            None => (
+                0,
+                self.file_meta(file_id)?.ok_or(StoreError::NotFound)?.size,
+            ),
         };
         let mut out = Vec::with_capacity((e.saturating_sub(s)).min(64 << 20) as usize);
         self.read_range(file_id, s, e, &mut |b| {

@@ -41,7 +41,10 @@ impl Env {
 }
 
 fn opts() -> PutOptions {
-    PutOptions { content_type: None, sample: false }
+    PutOptions {
+        content_type: None,
+        sample: false,
+    }
 }
 
 fn assert_consistent(s: &Store) {
@@ -70,7 +73,8 @@ fn stat(s: &Store, path: &[&str]) -> f64 {
     for p in path {
         v = v[*p].clone();
     }
-    v.as_f64().unwrap_or_else(|| panic!("stat {:?} missing", path))
+    v.as_f64()
+        .unwrap_or_else(|| panic!("stat {:?} missing", path))
 }
 
 /// Deterministic generator that never materializes the file; hashes what it produces.
@@ -84,7 +88,16 @@ impl Read for GenReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use sha2::Digest;
         let n = (buf.len() as u64).min(self.remaining).min(64 * 1024) as usize;
-        let words: [&[u8]; 8] = [b"alpha ", b"chunk ", b"reactor ", b"datran ", b"store ", b"zeta ", b"\n", b"omega "];
+        let words: [&[u8]; 8] = [
+            b"alpha ",
+            b"chunk ",
+            b"reactor ",
+            b"datran ",
+            b"store ",
+            b"zeta ",
+            b"\n",
+            b"omega ",
+        ];
         let mut i = 0;
         while i < n {
             if self.rng.below(50) == 0 {
@@ -118,12 +131,18 @@ fn roundtrip_small_empty_and_reopen() {
     assert_eq!(out.file_id, sha256(&json));
     assert_eq!(out.class, "text/json");
     assert!(out.chunks >= 2 && out.new_chunks == out.chunks);
-    assert!(out.stored_bytes < json.len() as u64 / 3, "json should compress: {}", out.stored_bytes);
+    assert!(
+        out.stored_bytes < json.len() as u64 / 3,
+        "json should compress: {}",
+        out.stored_bytes
+    );
     assert_eq!(s.read_to_vec(&out.file_id, None).unwrap(), json);
     let m = s.get_manifest(&out.file_id).unwrap().unwrap();
     assert_eq!(m.size, json.len() as u64);
     assert!(m.chunks.iter().all(|c| (c.len as usize) <= CDC_MAX));
-    assert!(m.chunks[..m.chunks.len() - 1].iter().all(|c| c.len as usize >= 16 * 1024));
+    assert!(m.chunks[..m.chunks.len() - 1]
+        .iter()
+        .all(|c| c.len as usize >= 16 * 1024));
     let v = serde_json::to_value(&m).unwrap();
     assert_eq!(v["file_id"], hex::encode(out.file_id));
     assert!(v["chunks"][0]["id"].is_string() && v["chunks"][0]["len"].is_number());
@@ -144,7 +163,11 @@ fn large_file_streams_in_and_out() {
     let s = env.open();
     let size = 50u64 << 20;
     let hasher = Arc::new(Mutex::new(sha2::Sha256::new()));
-    let gen = GenReader { remaining: size, rng: Lcg(99), hasher: hasher.clone() };
+    let gen = GenReader {
+        remaining: size,
+        rng: Lcg(99),
+        hasher: hasher.clone(),
+    };
     let t = std::time::Instant::now();
     let out = s.put_reader(gen, &opts()).unwrap();
     let put_s = t.elapsed().as_secs_f64();
@@ -168,7 +191,10 @@ fn large_file_streams_in_and_out() {
     assert_eq!(got, expect);
     assert_eq!(st.bytes, size);
     assert!(max_slice <= CDC_MAX, "slice {}", max_slice);
-    println!("50 MiB: put {:.2}s, get {:.2}s, stored {} bytes, {} chunks", put_s, get_s, out.stored_bytes, out.chunks);
+    println!(
+        "50 MiB: put {:.2}s, get {:.2}s, stored {} bytes, {} chunks",
+        put_s, get_s, out.stored_bytes, out.chunks
+    );
     // cancellation stops early
     let mut seen = 0u64;
     s.read_range(&out.file_id, 0, size, &mut |b| {
@@ -194,13 +220,23 @@ fn dedup_across_files_with_shared_regions() {
     let (fa, fb) = (mk(1, 2), mk(3, 4));
     let a = s.put_bytes(&fa, &opts()).unwrap();
     let b = s.put_bytes(&fb, &opts()).unwrap();
-    assert!(b.dedup_chunks >= 15, "dedup {} of {}", b.dedup_chunks, b.chunks);
+    assert!(
+        b.dedup_chunks >= 15,
+        "dedup {} of {}",
+        b.dedup_chunks,
+        b.chunks
+    );
     assert!(b.stored_bytes < a.stored_bytes / 2);
     let logical = stat(&s, &["logical_bytes"]);
     let unique = stat(&s, &["unique_bytes"]);
     let physical = stat(&s, &["live_physical_bytes"]);
     assert_eq!(logical as usize, fa.len() + fb.len());
-    assert!(unique < logical * 0.75, "unique {} logical {}", unique, logical);
+    assert!(
+        unique < logical * 0.75,
+        "unique {} logical {}",
+        unique,
+        logical
+    );
     assert!(physical < unique, "compression on top of dedup");
     assert!(stat(&s, &["dedup_ratio"]) > 1.3);
     // new_bytes = plaintext of newly stored chunks, so per-upload compression is exact under dedup
@@ -255,9 +291,18 @@ fn range_reads_edge_cases() {
     // reading one chunk decodes exactly one object
     let st = s.read_range(&id, 10, 20, &mut |_| true).unwrap();
     assert_eq!((st.chunks, st.objects_decoded), (1, 1));
-    assert!(matches!(s.read_to_vec(&id, Some((0, n + 1))), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.read_to_vec(&id, Some((5, 4))), Err(StoreError::Invalid(_))));
-    assert!(matches!(s.read_to_vec(&[0u8; 32], None), Err(StoreError::NotFound)));
+    assert!(matches!(
+        s.read_to_vec(&id, Some((0, n + 1))),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.read_to_vec(&id, Some((5, 4))),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.read_to_vec(&[0u8; 32], None),
+        Err(StoreError::NotFound)
+    ));
 }
 
 #[test]
@@ -284,7 +329,10 @@ fn delete_tombstone_gc_and_grace() {
     assert!(s.file_meta(&a.file_id).unwrap().is_none());
     assert!(s.tombstone(&a.file_id).unwrap().is_some());
     assert!(s.delete(&a.file_id).unwrap().is_none());
-    assert!(matches!(s.read_to_vec(&a.file_id, None), Err(StoreError::NotFound)));
+    assert!(matches!(
+        s.read_to_vec(&a.file_id, None),
+        Err(StoreError::NotFound)
+    ));
     assert_eq!(s.read_to_vec(&b.file_id, None).unwrap(), fb);
     assert!(stat(&s, &["gc", "queue_objects"]) >= 1.0);
     assert_consistent(&s);
@@ -334,7 +382,11 @@ fn capacity_limit_rejects_when_nothing_evictable() {
     assert_consistent(&s);
     assert_eq!(stat(&s, &["files"]), 1.0);
     // dedup'd content still fits; deleting frees live capacity immediately
-    assert!(s.put_bytes(&random_bytes(600_000, 1), &opts()).unwrap().duplicate);
+    assert!(
+        s.put_bytes(&random_bytes(600_000, 1), &opts())
+            .unwrap()
+            .duplicate
+    );
     s.delete(&a.file_id).unwrap();
     s.delete(&a.file_id).unwrap();
     assert!(s.put_bytes(&random_bytes(600_000, 2), &opts()).is_ok());
@@ -358,8 +410,14 @@ fn eviction_policy_hook_drops_replicas() {
     assert!(dst.file_meta(&fid).unwrap().is_none(), "replica evicted");
     assert_eq!(stat(&dst, &["evictions"]), 1.0);
     // origin + pinned is not evictable
-    assert!(matches!(dst.put_bytes(&random_bytes(600_000, 7), &opts()), Err(StoreError::Full { .. })));
-    assert_eq!(dst.read_to_vec(&other.file_id, None).unwrap().len(), 600_000);
+    assert!(matches!(
+        dst.put_bytes(&random_bytes(600_000, 7), &opts()),
+        Err(StoreError::Full { .. })
+    ));
+    assert_eq!(
+        dst.read_to_vec(&other.file_id, None).unwrap().len(),
+        600_000
+    );
     assert_consistent(&dst);
 }
 
@@ -376,7 +434,11 @@ fn corruption_is_detected_quarantined_and_repaired() {
     s.set_quarantine_hook(Some(Arc::new(move |oid| h2.lock().unwrap().push(oid))));
     let obj_path = |oid: &Id| {
         let h = hex::encode(oid);
-        env.cfg.dir.join("objects").join(&h[..2]).join(format!("{}.obj", h))
+        env.cfg
+            .dir
+            .join("objects")
+            .join(&h[..2])
+            .join(format!("{}.obj", h))
     };
     // 1. read path detects a flipped payload byte
     let victim = refs[1];
@@ -398,7 +460,11 @@ fn corruption_is_detected_quarantined_and_repaired() {
     let b2 = std::fs::read(&p2).unwrap();
     std::fs::write(&p2, &b2[..b2.len() / 2]).unwrap();
     let rep = s.scrub_step(u64::MAX).unwrap();
-    assert!(rep.corrupt.contains(&hex::encode(victim2.object_id)), "{:?}", rep);
+    assert!(
+        rep.corrupt.contains(&hex::encode(victim2.object_id)),
+        "{:?}",
+        rep
+    );
     assert!(rep.wrapped);
     assert_eq!(s.quarantined().unwrap().len(), 2);
     assert_eq!(stat(&s, &["scrub", "quarantined"]), 2.0);
@@ -407,13 +473,16 @@ fn corruption_is_detected_quarantined_and_repaired() {
     assert!(s.get_object_raw(&victim.object_id).is_err());
     // 3. repair (as data gravity would, from a peer copy of the plaintext / raw object)
     let off = victim.file_offset as usize;
-    s.repair_object_plain(&victim.object_id, &data[off..off + victim.len as usize]).unwrap();
+    s.repair_object_plain(&victim.object_id, &data[off..off + victim.len as usize])
+        .unwrap();
     let off2 = victim2.file_offset as usize;
     let other_env = Env::new();
     let peer = other_env.open();
     peer.put_bytes(&data, &opts()).unwrap();
     let raw = peer.get_object_raw(&victim2.object_id).unwrap().unwrap();
-    assert!(s.repair_object_raw(&victim2.object_id, &raw[..raw.len() - 1]).is_err());
+    assert!(s
+        .repair_object_raw(&victim2.object_id, &raw[..raw.len() - 1])
+        .is_err());
     s.repair_object_raw(&victim2.object_id, &raw).unwrap();
     let _ = off2;
     assert!(s.quarantined().unwrap().is_empty());
@@ -453,7 +522,9 @@ fn concurrent_puts_reads_and_gc() {
             for round in 0..3 {
                 let a = s.put_bytes(&same, &opts()).unwrap();
                 let b = s.put_bytes(&mine, &opts()).unwrap();
-                if s.read_to_vec(&a.file_id, None).unwrap() != same || s.read_to_vec(&b.file_id, None).unwrap() != mine {
+                if s.read_to_vec(&a.file_id, None).unwrap() != same
+                    || s.read_to_vec(&b.file_id, None).unwrap() != mine
+                {
                     errors.fetch_add(1, Ordering::Relaxed);
                 }
                 if round < 2 {
@@ -502,19 +573,33 @@ fn fusion_structural_signal_measured_gain_and_exact_reads() {
     assert!(rep.fused >= 1, "{:?}", rep);
     for (_, cur, fused, accepted) in &rep.evaluated {
         if *accepted {
-            assert!((*fused as f64) <= *cur as f64 * 0.95, "accepted without 5% gain");
+            assert!(
+                (*fused as f64) <= *cur as f64 * 0.95,
+                "accepted without 5% gain"
+            );
         }
     }
     assert!(rep.bytes_saved > 0);
     let live1 = stat(&s, &["live_physical_bytes"]);
-    assert_eq!(live0 - live1, rep.bytes_saved as f64, "measured saving is real");
+    assert_eq!(
+        live0 - live1,
+        rep.bytes_saved as f64,
+        "measured saving is real"
+    );
     assert!(stat(&s, &["super_chunks"]) >= 1.0);
     assert_eq!(stat(&s, &["fusion", "fusions"]), rep.fused as f64);
     assert_eq!(s.read_to_vec(&a, None).unwrap(), fa);
     assert_eq!(s.read_to_vec(&b, None).unwrap(), fb);
     // ranges through the super-chunk are exact too
-    for (x, y) in [(200_000u64, 200_100u64), (500_000, 900_000), (0, fa.len() as u64)] {
-        assert_eq!(s.read_to_vec(&a, Some((x, y))).unwrap(), &fa[x as usize..y as usize]);
+    for (x, y) in [
+        (200_000u64, 200_100u64),
+        (500_000, 900_000),
+        (0, fa.len() as u64),
+    ] {
+        assert_eq!(
+            s.read_to_vec(&a, Some((x, y))).unwrap(),
+            &fa[x as usize..y as usize]
+        );
     }
     s.flush_access().unwrap();
     assert!(stat(&s, &["fusion", "reads_saved"]) > 0.0);
@@ -542,7 +627,11 @@ fn fusion_rejects_runs_without_gain() {
     s.put_bytes(&fa, &opts()).unwrap();
     s.put_bytes(&fb, &opts()).unwrap();
     let rep = s.run_fusion_pass().unwrap();
-    assert!(rep.candidates >= 1 && rep.rejected >= 1 && rep.fused == 0, "{:?}", rep);
+    assert!(
+        rep.candidates >= 1 && rep.rejected >= 1 && rep.fused == 0,
+        "{:?}",
+        rep
+    );
     assert_eq!(stat(&s, &["super_chunks"]), 0.0);
     assert_consistent(&s);
 }
@@ -585,13 +674,19 @@ fn unfuse_when_members_are_read_individually() {
         .1
         .into_iter()
         .map(|r| r.object_id)
-        .find(|o| s.object_meta(o).unwrap().is_some_and(|m| m.members.len() > 1 && m.plain_len > 1 << 20))
+        .find(|o| {
+            s.object_meta(o)
+                .unwrap()
+                .is_some_and(|m| m.members.len() > 1 && m.plain_len > 1 << 20)
+        })
         .expect("a super-chunk > 1 MiB");
     // read members one at a time, many times
     let refs = s.chunk_refs(&a).unwrap().unwrap().1;
     for _ in 0..6 {
         for r in refs.iter().filter(|r| r.object_id == big) {
-            let st = s.read_range(&a, r.file_offset + 5, r.file_offset + 50, &mut |_| true).unwrap();
+            let st = s
+                .read_range(&a, r.file_offset + 5, r.file_offset + 50, &mut |_| true)
+                .unwrap();
             assert_eq!(st.chunks, 1);
         }
     }
@@ -599,7 +694,13 @@ fn unfuse_when_members_are_read_individually() {
     assert_eq!(rep.unfused, 1, "{:?}", rep);
     assert_eq!(rep.fused, 0, "hysteresis: a solo-read run is not re-fused");
     assert_eq!(stat(&s, &["fusion", "unfusions"]), 1.0);
-    assert!(s.chunk_refs(&a).unwrap().unwrap().1.iter().all(|r| r.object_id != big));
+    assert!(s
+        .chunk_refs(&a)
+        .unwrap()
+        .unwrap()
+        .1
+        .iter()
+        .all(|r| r.object_id != big));
     assert_eq!(s.read_to_vec(&a, None).unwrap(), fa);
     assert_consistent(&s);
     s.gc_with_grace(0).unwrap();
@@ -615,7 +716,11 @@ fn crash_at(s: &Store, point: &'static str) {
 #[test]
 fn crash_safety_of_writes() {
     // file layout: temp files / renames (packed writes: tests/packs.rs)
-    for point in ["write.before_rename", "write.before_commit", "write.after_commit"] {
+    for point in [
+        "write.before_rename",
+        "write.before_commit",
+        "write.after_commit",
+    ] {
         let env = Env::new();
         let s = env.open_files_only();
         let keep = json_logs(300_000, 1);
@@ -634,10 +739,15 @@ fn crash_safety_of_writes() {
         if committed {
             assert_eq!(s.read_to_vec(&fid, None).unwrap(), data);
         } else {
-            let swept = stat(&s, &["gc", "startup_orphans_removed"]) + stat(&s, &["gc", "startup_temp_files_removed"]);
+            let swept = stat(&s, &["gc", "startup_orphans_removed"])
+                + stat(&s, &["gc", "startup_temp_files_removed"]);
             assert!(swept > 0.0, "{}: crash debris swept", point);
             // the upload can simply be retried
-            assert_eq!(s.read_to_vec(&s.put_bytes(&data, &opts()).unwrap().file_id, None).unwrap(), data);
+            assert_eq!(
+                s.read_to_vec(&s.put_bytes(&data, &opts()).unwrap().file_id, None)
+                    .unwrap(),
+                data
+            );
         }
         assert_eq!(s.read_to_vec(&kid, None).unwrap(), keep, "no data loss");
         assert_consistent(&s);
@@ -646,7 +756,13 @@ fn crash_safety_of_writes() {
 
 #[test]
 fn crash_safety_of_fusion_and_gc() {
-    for point in ["fuse.after_object", "fuse.after_commit", "gc.after_commit", "delete.after_commit", "unfuse.after_objects"] {
+    for point in [
+        "fuse.after_object",
+        "fuse.after_commit",
+        "gc.after_commit",
+        "delete.after_commit",
+        "unfuse.after_objects",
+    ] {
         let env = Env::new();
         let s = env.open();
         let (fa, fb) = fusion_corpus();
@@ -654,7 +770,10 @@ fn crash_safety_of_fusion_and_gc() {
         let b = s.put_bytes(&fb, &opts()).unwrap().file_id;
         match point {
             "gc.after_commit" | "delete.after_commit" => {
-                let c = s.put_bytes(&random_bytes(400_000, 3), &opts()).unwrap().file_id;
+                let c = s
+                    .put_bytes(&random_bytes(400_000, 3), &opts())
+                    .unwrap()
+                    .file_id;
                 if point == "gc.after_commit" {
                     s.delete(&c).unwrap();
                     crash_at(&s, point);
@@ -666,15 +785,31 @@ fn crash_safety_of_fusion_and_gc() {
             }
             "unfuse.after_objects" => {
                 assert!(s.run_fusion_pass().unwrap().fused >= 1);
-                let sup = s.chunk_refs(&a).unwrap().unwrap().1.into_iter().map(|r| r.object_id).find(|o| {
-                    s.object_meta(o).unwrap().is_some_and(|m| m.members.len() > 1)
-                });
+                let sup = s
+                    .chunk_refs(&a)
+                    .unwrap()
+                    .unwrap()
+                    .1
+                    .into_iter()
+                    .map(|r| r.object_id)
+                    .find(|o| {
+                        s.object_meta(o)
+                            .unwrap()
+                            .is_some_and(|m| m.members.len() > 1)
+                    });
                 crash_at(&s, point);
-                assert!(matches!(s.unfuse(&sup.unwrap()), Err(StoreError::Injected(_))));
+                assert!(matches!(
+                    s.unfuse(&sup.unwrap()),
+                    Err(StoreError::Injected(_))
+                ));
             }
             _ => {
                 crash_at(&s, point);
-                assert!(matches!(s.run_fusion_pass(), Err(StoreError::Injected(_))), "{}", point);
+                assert!(
+                    matches!(s.run_fusion_pass(), Err(StoreError::Injected(_))),
+                    "{}",
+                    point
+                );
             }
         }
         drop(s);
@@ -688,7 +823,8 @@ fn crash_safety_of_fusion_and_gc() {
         if point == "fuse.after_object" {
             assert_eq!(stat(&s, &["super_chunks"]), 0.0);
             // debris = an orphan object file, or (small super-chunk) an uncommitted pack tail
-            let debris = stat(&s, &["gc", "startup_orphans_removed"]) + stat(&s, &["packs", "startup_truncated_bytes"]);
+            let debris = stat(&s, &["gc", "startup_orphans_removed"])
+                + stat(&s, &["packs", "startup_truncated_bytes"]);
             assert!(debris >= 1.0);
         }
         // the store keeps working: fusion + GC complete normally after the crash
@@ -715,7 +851,11 @@ fn import_from(src: &Store, dst: &Store, fid: &Id) {
         let members: Vec<ChunkEntry> = meta.members.clone();
         imp.add_object(&o, &raw, &members).unwrap();
     }
-    assert!(imp.is_complete(), "missing {:?}", imp.missing_chunks().len());
+    assert!(
+        imp.is_complete(),
+        "missing {:?}",
+        imp.missing_chunks().len()
+    );
     imp.commit().unwrap();
 }
 
@@ -758,11 +898,16 @@ fn replica_import_api_for_gravity() {
     assert!(imp.commit().is_err());
     let mut imp = empty.begin_import(bad).unwrap();
     for c in src.get_manifest(&a).unwrap().unwrap().chunks {
-        imp.add_chunk(&c.id, &src.read_chunk(&c.id).unwrap()).unwrap();
+        imp.add_chunk(&c.id, &src.read_chunk(&c.id).unwrap())
+            .unwrap();
     }
     assert!(matches!(imp.commit(), Err(StoreError::Invalid(_))));
     assert_consistent(&empty);
-    assert_eq!(empty.stats().unwrap()["objects"], 0, "aborted import left nothing behind");
+    assert_eq!(
+        empty.stats().unwrap()["objects"],
+        0,
+        "aborted import left nothing behind"
+    );
     // tombstone from a peer beats the older replica
     assert!(dst.apply_tombstone(&a, u64::MAX / 2).unwrap());
     assert!(dst.file_meta(&a).unwrap().is_none());
@@ -774,12 +919,27 @@ fn evolution_sampling_follows_header() {
     let env = Env::new();
     let s = env.open();
     let json = json_logs(100_000, 4);
-    s.put_bytes(&json, &PutOptions { content_type: Some("application/json".into()), sample: false }).unwrap();
+    s.put_bytes(
+        &json,
+        &PutOptions {
+            content_type: Some("application/json".into()),
+            sample: false,
+        },
+    )
+    .unwrap();
     assert_eq!(env.engine.sample_count("text/json"), 0);
-    s.put_bytes(&json_logs(100_000, 5), &PutOptions { content_type: Some("application/json".into()), sample: true }).unwrap();
+    s.put_bytes(
+        &json_logs(100_000, 5),
+        &PutOptions {
+            content_type: Some("application/json".into()),
+            sample: true,
+        },
+    )
+    .unwrap();
     assert_eq!(env.engine.sample_count("text/json"), 1);
     // after evolution, new objects use the champion recipe and still read back exactly
-    s.put_bytes(&json_logs(120_000, 6), &PutOptions::default()).unwrap();
+    s.put_bytes(&json_logs(120_000, 6), &PutOptions::default())
+        .unwrap();
     env.engine.run_generation("text/json").unwrap();
     let data = json_logs(200_000, 8);
     let id = s.put_bytes(&data, &opts()).unwrap().file_id;

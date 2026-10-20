@@ -345,7 +345,9 @@ pub struct ClusterStatus {
 impl ClusterStatus {
     /// The peer with this node id, if known.
     pub fn peer(&self, node_id: &str) -> Option<&ClusterPeer> {
-        self.peers.iter().find(|p| p.node_id.as_deref() == Some(node_id))
+        self.peers
+            .iter()
+            .find(|p| p.node_id.as_deref() == Some(node_id))
     }
 }
 

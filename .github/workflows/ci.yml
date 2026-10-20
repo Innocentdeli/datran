@@ -43,11 +43,12 @@ jobs:
         with:
           workspaces: core-reactor -> target
           key: lint
-      # TODO: make blocking once the tree is rustfmt-clean (cargo fmt currently reports diffs
-      # in core-reactor, clients/rust and src-tauri; there is no rustfmt.toml).
-      - name: cargo fmt --check (non-blocking)
-        continue-on-error: true
-        run: cargo fmt --all --check
+      # All three Rust crates are rustfmt-clean; formatting drift fails CI.
+      - name: cargo fmt --check
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path ../clients/rust/Cargo.toml --check
+          cargo fmt --manifest-path ../src-tauri/Cargo.toml --check
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

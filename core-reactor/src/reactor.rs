@@ -134,9 +134,15 @@ impl DiocomNativeReactor {
             && deflate_compressed.len() < lz4_compressed.len()
             && deflate_compressed.len() < data.len()
         {
-            ("zlib_fast".to_string(), Self::frame(FLAG_ZLIB, &deflate_compressed))
+            (
+                "zlib_fast".to_string(),
+                Self::frame(FLAG_ZLIB, &deflate_compressed),
+            )
         } else if lz4_compressed.len() < data.len() {
-            ("lz4_flex".to_string(), Self::frame(FLAG_LZ4, &lz4_compressed))
+            (
+                "lz4_flex".to_string(),
+                Self::frame(FLAG_LZ4, &lz4_compressed),
+            )
         } else {
             ("raw".to_string(), Self::frame(FLAG_RAW, data))
         };
@@ -269,10 +275,7 @@ impl DiocomNativeReactor {
                     .read_to_end(&mut decompressed)
                     .map_err(|e| format!("Zlib decompress failed: {}", e))?;
                 if decompressed.len() > limit {
-                    return Err(format!(
-                        "Zlib output exceeds limit of {} bytes",
-                        limit
-                    ));
+                    return Err(format!("Zlib output exceeds limit of {} bytes", limit));
                 }
                 Ok(decompressed)
             }
@@ -396,7 +399,9 @@ mod tests {
     }
 
     fn text(n: usize) -> Vec<u8> {
-        let words = ["alpha ", "beta ", "gamma ", "delta ", "reactor ", "datran ", "chunk\n"];
+        let words = [
+            "alpha ", "beta ", "gamma ", "delta ", "reactor ", "datran ", "chunk\n",
+        ];
         let picks = lcg_bytes(n, 42);
         let mut out = Vec::with_capacity(n + 16);
         let mut i = 0usize;
@@ -415,7 +420,9 @@ mod tests {
     /// 64-byte pattern of 64 distinct symbols repeated: entropy 6.0, and LZ4 beats deflate
     /// because deflate's match length tops out at 258 bytes.
     fn lz4_favoured(n: usize) -> Vec<u8> {
-        let pattern: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37).wrapping_add(11)).collect();
+        let pattern: Vec<u8> = (0..64u8)
+            .map(|i| i.wrapping_mul(37).wrapping_add(11))
+            .collect();
         pattern.iter().cycle().take(n).copied().collect()
     }
 
@@ -437,7 +444,10 @@ mod tests {
     fn roundtrip_empty_and_one_byte() {
         assert_eq!(roundtrip(&[]), FLAG_RAW);
         assert_eq!(roundtrip(&[0x42]), FLAG_RAW);
-        assert_eq!(DiocomNativeReactor::decompress(&[]).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            DiocomNativeReactor::decompress(&[]).unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]
@@ -450,7 +460,7 @@ mod tests {
         assert_eq!(roundtrip(&vec![0u8; 10_000]), FLAG_SYMBIT); // 1 symbol
         assert_eq!(roundtrip(&symbit_data(10_001, 2)), FLAG_SYMBIT); // 1-bit
         assert_eq!(roundtrip(&symbit_data(10_003, 4)), FLAG_SYMBIT); // 2-bit
-        // 4-bit (entropy must be < 3.0, so skew the distribution)
+                                                                     // 4-bit (entropy must be < 3.0, so skew the distribution)
         let mut skewed = symbit_data(10_005, 2);
         for i in (0..skewed.len()).step_by(13) {
             skewed[i] = b'a' + (i % 12) as u8;
@@ -499,7 +509,12 @@ mod tests {
         let mut p = symbit_header(1, 64, &[1, 2]);
         p.extend_from_slice(&[0xAA; 8]);
         assert!(DiocomNativeReactor::decompress_with_limit(&p, 63).is_err());
-        assert_eq!(DiocomNativeReactor::decompress_with_limit(&p, 64).unwrap().len(), 64);
+        assert_eq!(
+            DiocomNativeReactor::decompress_with_limit(&p, 64)
+                .unwrap()
+                .len(),
+            64
+        );
         // truncated packed data
         let mut p = symbit_header(2, 100, &[1, 2, 3, 4]);
         p.extend_from_slice(&[0x1B; 10]);
@@ -548,7 +563,10 @@ mod tests {
         assert!(DiocomNativeReactor::decompress(&[FLAG_ZLIB, 0xFF, 0xFF, 0xFF]).is_err());
 
         // Bomb: 64 MiB of zeros deflates to ~64 KiB; must be rejected under a 1 MiB limit.
-        let bomb = DiocomNativeReactor::frame(FLAG_ZLIB, &DiocomNativeReactor::deflate(&vec![0u8; 64 << 20]));
+        let bomb = DiocomNativeReactor::frame(
+            FLAG_ZLIB,
+            &DiocomNativeReactor::deflate(&vec![0u8; 64 << 20]),
+        );
         assert!(bomb.len() < 1 << 20);
         let err = DiocomNativeReactor::decompress_with_limit(&bomb, 1 << 20).unwrap_err();
         assert!(err.contains("exceeds limit"), "{}", err);
@@ -580,7 +598,11 @@ mod tests {
         }
         assert!(count >= 5, "expected TS fixtures, found {}", count);
         for flag in [FLAG_SYMBIT, FLAG_ZLIB, FLAG_RAW] {
-            assert!(seen_flags.contains(&flag), "no TS fixture with flag {}", flag);
+            assert!(
+                seen_flags.contains(&flag),
+                "no TS fixture with flag {}",
+                flag
+            );
         }
     }
 
@@ -619,7 +641,10 @@ mod tests {
         for (name, data) in [
             ("lz4_forced_text", text(150_000)),
             ("lz4_forced_random", lcg_bytes(20_000, 5)),
-            ("lz4_forced_small", b"abcabcabcabcabcabcabcabcabcabcX".to_vec()),
+            (
+                "lz4_forced_small",
+                b"abcabcabcabcabcabcabcabcabcabcX".to_vec(),
+            ),
         ] {
             let c = DiocomNativeReactor::frame(FLAG_LZ4, &lz4_flex::compress_prepend_size(&data));
             assert_eq!(DiocomNativeReactor::decompress(&c).unwrap(), data);
