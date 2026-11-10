@@ -7,6 +7,7 @@ import Footer from '@/components/layout/Footer';
 import StatCard from '@/components/ui/StatCard';
 import { Activity, HardDrive, Download, Users, Dna, Radar, Database } from 'lucide-react';
 import { formatFileSize, formatTimestamp } from '@/lib/utils';
+import ModerationPanel from '@/components/features/ModerationPanel';
 
 interface AdminStats {
     totalFiles: number;
@@ -823,6 +824,8 @@ export default function AdminDashboard() {
                         </div>
                     </div>
                 </div>
+
+                <ModerationPanel />
 
                 <EvolutionPanel />
 

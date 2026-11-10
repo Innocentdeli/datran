@@ -21,40 +21,54 @@ function ipFromAuthorizeReq(req: unknown): string {
 // NextAuth configuration. Lives outside app/api/auth/[...nextauth]/route.ts because route modules may only export
 // HTTP handlers and route config. Credentials / passkey / sign-up checks: src/lib/auth/credentials.ts.
 
-export const authOptions: NextAuthOptions = {
-    providers: [
+const configuredProviders: NextAuthOptions['providers'] = [];
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    configuredProviders.push(
         GoogleProvider({
-            clientId: process.env.GOOGLE_CLIENT_ID || "",
-            clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
-        }),
-        FacebookProvider({
-            clientId: process.env.FACEBOOK_CLIENT_ID || "",
-            clientSecret: process.env.FACEBOOK_CLIENT_SECRET || "",
-        }),
-        CredentialsProvider({
-            name: "Credentials",
-            credentials: {
-                email: { label: "Email", type: "text" },
-                password: { label: "Password", type: "password" },
-                isSignUp: { label: "Sign Up", type: "text" }, // Hidden flag
-                // Single-use token issued by /api/auth/webauthn/authenticate after a verified assertion
-                passkeyToken: { label: "Passkey", type: "text" }
-            },
-            async authorize(credentials, req) {
-                // diocom_auth_attempts_total{method=password|passkey|signup, result}
-                const method = credentials?.passkeyToken ? 'passkey' : credentials?.isSignUp === 'true' ? 'signup' : 'password';
-                try {
-                    const user = await authorizeCredentials(credentials, ipFromAuthorizeReq(req));
-                    recordAuth(method, user ? 'success' : 'failure');
-                    if (user) setRequestUser(user.id);
-                    return user;
-                } catch (e) {
-                    recordAuth(method, e instanceof Error && e.message.startsWith('Too many attempts') ? 'rate_limited' : 'failure');
-                    throw e;
-                }
-            }
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
         })
-    ],
+    );
+}
+
+if (process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET) {
+    configuredProviders.push(
+        FacebookProvider({
+            clientId: process.env.FACEBOOK_CLIENT_ID,
+            clientSecret: process.env.FACEBOOK_CLIENT_SECRET,
+        })
+    );
+}
+
+configuredProviders.push(
+    CredentialsProvider({
+        name: "Credentials",
+        credentials: {
+            email: { label: "Email", type: "text" },
+            password: { label: "Password", type: "password" },
+            isSignUp: { label: "Sign Up", type: "text" }, // Hidden flag
+            // Single-use token issued by /api/auth/webauthn/authenticate after a verified assertion
+            passkeyToken: { label: "Passkey", type: "text" }
+        },
+        async authorize(credentials, req) {
+            // diocom_auth_attempts_total{method=password|passkey|signup, result}
+            const method = credentials?.passkeyToken ? 'passkey' : credentials?.isSignUp === 'true' ? 'signup' : 'password';
+            try {
+                const user = await authorizeCredentials(credentials, ipFromAuthorizeReq(req));
+                recordAuth(method, user ? 'success' : 'failure');
+                if (user) setRequestUser(user.id);
+                return user;
+            } catch (e) {
+                recordAuth(method, e instanceof Error && e.message.startsWith('Too many attempts') ? 'rate_limited' : 'failure');
+                throw e;
+            }
+        }
+    })
+);
+
+export const authOptions: NextAuthOptions = {
+    providers: configuredProviders,
     session: {
         strategy: 'jwt',
     },

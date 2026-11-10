@@ -2,26 +2,30 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /** Non-secret app settings (secrets such as tokens live in SecureStore, see src/auth/session.ts). */
 export interface Settings {
-    /** Server origin, e.g. "http://192.168.1.20:3001". API paths are appended by the api client. */
+    /** Server origin, e.g. "https://datran.app" or "http://localhost:3001". API paths are appended by the api client. */
     serverUrl: string;
     /**
      * Upload without signing in. The server accepts this only while ALLOW_ANONYMOUS_UPLOADS is not "false".
-     * Until the server offers a mobile token endpoint this is the only working mode.
      */
     anonymousUploads: boolean;
+    /** Default expiration duration in hours for new upload links (e.g. 24, 72, 168). */
+    defaultExpiryHours: number;
+    /** Tactile haptic feedback on interactions. */
+    hapticsEnabled: boolean;
 }
 
 const STORAGE_KEY = 'diocom.settings.v1';
 
-// localhost only works in a simulator/browser on the dev machine; on a device use the machine's LAN address.
 export const DEFAULT_SETTINGS: Settings = {
-    serverUrl: 'http://localhost:3001',
+    serverUrl: process.env.EXPO_PUBLIC_API_URL || 'https://colt-nonembryonic-phraseologically.ngrok-free.dev',
     anonymousUploads: true,
+    defaultExpiryHours: 72,
+    hapticsEnabled: true,
 };
 
 /**
  * Normalises user input to a bare origin + optional base path: trims, drops trailing slashes and a pasted
- * "/api/ingest" suffix (the old app stored the full endpoint). Returns null when it is not an http(s) URL.
+ * "/api/ingest" suffix. Returns null when it is not an http(s) URL.
  */
 export function normalizeServerUrl(input: string): string | null {
     let url = input.trim().replace(/\/+$/, '');
@@ -45,6 +49,12 @@ export async function loadSettings(): Promise<Settings> {
             serverUrl: serverUrl ?? DEFAULT_SETTINGS.serverUrl,
             anonymousUploads:
                 typeof parsed.anonymousUploads === 'boolean' ? parsed.anonymousUploads : DEFAULT_SETTINGS.anonymousUploads,
+            defaultExpiryHours:
+                typeof parsed.defaultExpiryHours === 'number' && parsed.defaultExpiryHours > 0
+                    ? parsed.defaultExpiryHours
+                    : DEFAULT_SETTINGS.defaultExpiryHours,
+            hapticsEnabled:
+                typeof parsed.hapticsEnabled === 'boolean' ? parsed.hapticsEnabled : DEFAULT_SETTINGS.hapticsEnabled,
         };
     } catch {
         return DEFAULT_SETTINGS;

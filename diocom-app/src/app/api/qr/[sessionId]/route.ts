@@ -59,7 +59,7 @@ async function handleGET(req: Request, { params }: { params: Promise<{ sessionId
   }
 }
 
-// PATCH /api/qr/[sessionId] — update session state (waiting -> paired -> complete)
+// PATCH /api/qr/[sessionId] — update session state and/or append fileIds
 async function handlePATCH(request: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const limited = await enforceRateLimit(request, 'qr-patch', LIMIT);
   if (limited) return limited;
@@ -68,21 +68,51 @@ async function handlePATCH(request: Request, { params }: { params: Promise<{ ses
     const { sessionId } = await params;
     const body = await request.json().catch(() => ({}));
     const status = (body as { status?: unknown }).status;
-    if (typeof status !== 'string' || !['paired', 'complete'].includes(status)) {
-      return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
-    }
+    const incomingFileIds = (body as { fileIds?: unknown }).fileIds;
 
     const row = await loadSession(sessionId);
     if (!row) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     if (Number(row.expires_at) < Date.now()) {
       return NextResponse.json({ error: 'Session expired' }, { status: 410 });
     }
-    if (!(TRANSITIONS[row.status] || []).includes(status)) {
-      return NextResponse.json({ error: 'Invalid transition' }, { status: 409 });
+
+    let nextStatus = row.status;
+    if (status) {
+      if (typeof status !== 'string' || !['paired', 'complete'].includes(status)) {
+        return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
+      }
+      if (!(TRANSITIONS[row.status] || []).includes(status)) {
+        return NextResponse.json({ error: 'Invalid transition' }, { status: 409 });
+      }
+      nextStatus = status;
     }
 
-    await db.query('UPDATE qr_sessions SET status = $1 WHERE id = $2', [status, sessionId]);
-    return NextResponse.json({ success: true });
+    let fileIds: string[] = [];
+    try {
+      fileIds = typeof row.file_ids === 'string' ? JSON.parse(row.file_ids) : (row.file_ids || []);
+    } catch {
+      fileIds = [];
+    }
+
+    let fileIdsChanged = false;
+    if (Array.isArray(incomingFileIds)) {
+      const validIncoming = incomingFileIds.filter((x): x is string => typeof x === 'string' && x.length > 0);
+      const combined = Array.from(new Set([...fileIds, ...validIncoming])).slice(0, 50);
+      fileIds = combined;
+      fileIdsChanged = true;
+    }
+
+    const fileIdsJson = JSON.stringify(fileIds);
+
+    if (status && fileIdsChanged) {
+      await db.query('UPDATE qr_sessions SET status = $1, file_ids = $2 WHERE id = $3', [nextStatus, fileIdsJson, sessionId]);
+    } else if (status) {
+      await db.query('UPDATE qr_sessions SET status = $1 WHERE id = $2', [nextStatus, sessionId]);
+    } else if (fileIdsChanged) {
+      await db.query('UPDATE qr_sessions SET file_ids = $1 WHERE id = $2', [fileIdsJson, sessionId]);
+    }
+
+    return NextResponse.json({ success: true, status: nextStatus, fileIds });
   } catch (e) {
     getLogger().error({ err: e }, 'qr PATCH');
     return NextResponse.json({ error: 'Failed to update session' }, { status: 500 });

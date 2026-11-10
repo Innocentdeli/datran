@@ -1,24 +1,26 @@
-import { useState } from 'react';
-import { Linking, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Linking, Share, StyleSheet, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 
-import { colors, shared } from '../theme';
+import { space } from '../theme';
+import { Button, IconButton, useToast } from '../ui';
 
 interface LinkActionsProps {
     link: string;
     filename: string;
+    /** `full` = labelled buttons (success screen); `compact` = icon buttons (list rows). */
+    variant?: 'full' | 'compact';
 }
 
-/** Copy / share / open buttons for a share link. */
-export function LinkActions({ link, filename }: LinkActionsProps) {
-    const [note, setNote] = useState<string | null>(null);
+/** Copy / share / open for a share link. Feedback goes through the global toast. */
+export function LinkActions({ link, filename, variant = 'full' }: LinkActionsProps) {
+    const toast = useToast();
 
     const copy = async () => {
         try {
             await Clipboard.setStringAsync(link);
-            setNote('Link copied');
+            toast.show('Link copied to clipboard');
         } catch {
-            setNote('Could not copy the link');
+            toast.show('Could not copy the link', 'error');
         }
     };
 
@@ -35,40 +37,33 @@ export function LinkActions({ link, filename }: LinkActionsProps) {
         try {
             await Linking.openURL(link);
         } catch {
-            setNote('Could not open the link');
+            toast.show('Could not open the link', 'error');
         }
     };
 
-    return (
-        <View>
-            <View style={styles.row}>
-                <TouchableOpacity style={[shared.secondaryButton, styles.action]} onPress={copy} accessibilityRole="button">
-                    <Text style={shared.secondaryButtonText}>Copy</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[shared.secondaryButton, styles.action]} onPress={share} accessibilityRole="button">
-                    <Text style={shared.secondaryButtonText}>Share</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[shared.secondaryButton, styles.action]} onPress={open} accessibilityRole="link">
-                    <Text style={shared.secondaryButtonText}>Open</Text>
-                </TouchableOpacity>
+    if (variant === 'compact') {
+        return (
+            <View style={styles.compact}>
+                <IconButton icon="copy-outline" label={`Copy link for ${filename}`} onPress={copy} size={36} />
+                <IconButton icon="share-outline" label={`Share ${filename}`} onPress={share} size={36} />
             </View>
-            {note ? <Text style={styles.note}>{note}</Text> : null}
+        );
+    }
+
+    return (
+        <View style={styles.full}>
+            <Button label="Copy link" icon="copy-outline" onPress={copy} size="lg" fullWidth />
+            <View style={styles.row}>
+                <Button label="Share" icon="share-outline" variant="secondary" onPress={share} style={styles.flex} fullWidth />
+                <Button label="Open" icon="open-outline" variant="secondary" onPress={open} accessibilityRole="link" style={styles.flex} fullWidth />
+            </View>
         </View>
     );
 }
 
 const styles = StyleSheet.create({
-    row: {
-        flexDirection: 'row',
-        gap: 8,
-    },
-    action: {
-        flex: 1,
-        paddingVertical: 10,
-    },
-    note: {
-        color: colors.textMuted,
-        fontSize: 12,
-        marginTop: 8,
-    },
+    full: { gap: space.sm },
+    row: { flexDirection: 'row', gap: space.sm },
+    flex: { flex: 1 },
+    compact: { flexDirection: 'row', gap: space.sm },
 });

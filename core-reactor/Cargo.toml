@@ -2,6 +2,7 @@
 name = "core-reactor"
 version = "2.0.0"
 edition = "2021"
+default-run = "core-reactor"
 description = "Datran core reactor: HTTP compression service (legacy LZ4/deflate/symbit blobs, blob v2 with zstd/brotli/deflate/lz4 and delta/shuffle filters) that evolves per-content-class compression recipes on sampled uploads and exchanges them with peer reactors"
 authors = ["titan"]
 

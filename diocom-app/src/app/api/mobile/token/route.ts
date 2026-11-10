@@ -23,12 +23,19 @@ async function handlePOST(req: Request) {
         return NextResponse.json({ error: 'invalid_request', message: 'Invalid JSON' }, { status: 400, headers: NO_STORE });
     }
     const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
-    const method = body.passkeyToken ? 'mobile_passkey' : 'mobile_password';
+    const isSignUp = body.isSignUp === true || body.isSignUp === 'true';
+    const method = body.passkeyToken ? 'mobile_passkey' : isSignUp ? 'mobile_signup' : 'mobile_password';
     try {
         const user = await authorizeCredentials(
-            { email: str(body.email), password: str(body.password), passkeyToken: str(body.passkeyToken) },
+            {
+                email: str(body.email),
+                password: str(body.password),
+                username: str(body.username),
+                isSignUp: isSignUp ? 'true' : undefined,
+                passkeyToken: str(body.passkeyToken),
+            },
             getClientIp(req),
-            { allowSignUp: false },
+            { allowSignUp: isSignUp },
         );
         if (!user) {
             recordAuth(method, 'failure');
@@ -40,7 +47,14 @@ async function handlePOST(req: Request) {
         recordAuth(method, 'success');
         recordMobileToken('issue', 'ok');
         AuditLogger.record({ userId: user.id, action: 'USER_SIGNIN', resource: 'AUTH_MOBILE', details: 'Mobile app signed in (token issued)' });
-        return NextResponse.json(pair, { headers: NO_STORE });
+        return NextResponse.json({
+            ...pair,
+            user: {
+                id: user.id,
+                email: user.email,
+                username: user.username,
+            },
+        }, { headers: NO_STORE });
     } catch (e) {
         if (e instanceof CredentialsError) {
             recordAuth(method, e.rateLimited ? 'rate_limited' : 'failure');

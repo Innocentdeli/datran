@@ -3,16 +3,18 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { Zap, FolderOpen, CreditCard } from 'lucide-react';
+import { UploadCloud, Radio, FolderOpen, Inbox, CreditCard } from 'lucide-react';
 import AuthStatus from '@/components/features/AuthStatus';
 import InboxPanel from '@/components/features/InboxPanel';
 import BrandMark from '@/components/ui/BrandMark';
 import { cn } from '@/lib/utils';
 
 const NAV = [
-  { href: '/lobby', label: 'Live Lobby', icon: Zap },
+  { href: '/send', label: 'Send', icon: UploadCloud },
+  { href: '/radar', label: 'Beam', icon: Radio },
   { href: '/spaces', label: 'Spaces', icon: FolderOpen },
-  { href: '/billing', label: 'Billing', icon: CreditCard },
+  { href: '/dashboard/requests', label: 'Requests', icon: Inbox },
+  { href: '/billing', label: 'Pricing', icon: CreditCard },
 ];
 
 export default function Header() {

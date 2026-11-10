@@ -1,24 +1,26 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth/options';
+import { getRequestUser, requireRequestUser } from '@/lib/auth/requestUser';
 import db from '@/db';
 import { toPublicFile } from '@/db/files';
 import { withObservability } from '@/lib/observability';
 
 // GET /api/spaces/[slug] — get space details + members + files
-async function handleGET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleGET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const session = await getServerSession(authOptions);
+  let callerUser = null;
+  try {
+    callerUser = await getRequestUser(req);
+  } catch {}
   
   const spaceRes = await db.query('SELECT * FROM spaces WHERE slug = $1', [slug]);
   const space = spaceRes.rows[0];
   if (!space) return NextResponse.json({ error: 'Space not found' }, { status: 404 });
 
   let isMember = null;
-  if (session?.user?.id) {
+  if (callerUser?.id) {
     const memberRes = await db.query(
       'SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2',
-      [space.id, session.user.id]
+      [space.id, callerUser.id]
     );
     isMember = memberRes.rows[0];
   }
@@ -53,12 +55,12 @@ async function handleGET(_req: Request, { params }: { params: Promise<{ slug: st
 }
 
 // DELETE /api/spaces/[slug] — delete space (owner only)
-async function handleDELETE(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleDELETE(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(req);
+  if (user instanceof NextResponse) return user;
 
-  const spaceRes = await db.query('SELECT * FROM spaces WHERE slug = $1 AND owner_id = $2', [slug, session.user.id]);
+  const spaceRes = await db.query('SELECT * FROM spaces WHERE slug = $1 AND owner_id = $2', [slug, user.id]);
   const space = spaceRes.rows[0];
   if (!space) return NextResponse.json({ error: 'Not found or unauthorized' }, { status: 404 });
 

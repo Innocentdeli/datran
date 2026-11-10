@@ -110,6 +110,13 @@ async function handleGET(request: Request) {
         return new NextResponse('File not found', { status: 404, headers: { 'Accept-Ranges': 'bytes' } });
     }
 
+    if (fileRecord.is_disabled) {
+        return new NextResponse(
+            `File disabled: ${fileRecord.disabled_reason || 'This file has been disabled for violating Datran Acceptable Use Policy.'}`,
+            { status: 410, headers: { 'Accept-Ranges': 'bytes' } }
+        );
+    }
+
     if (fileRecord.expires_at && Date.now() > Number(fileRecord.expires_at)) {
         return new NextResponse('File has expired', { status: 410, headers: { 'Accept-Ranges': 'bytes' } });
     }

@@ -37,12 +37,24 @@ export const TABLE_NAMES = [
     'qr_sessions', 'access_events',
     // 0003
     'subscriptions', 'processed_events', 'credit_purchases', 'user_usage', 'usage_monthly', 'refresh_tokens',
+    // 0005
+    'abuse_reports', 'password_resets',
+    // 0006
+    'file_requests', 'file_request_uploads',
+    // 0007
+    'file_recipients',
+    // 0008
+    'user_brands',
+    // 0009
+    'file_reviews', 'file_review_comments',
+    // 0010
+    'api_keys',
 ] as const;
 
 /** Column defaults from migrations/0001_initial.sql (applied to INSERTs that omit the column). */
 const DEFAULTS: Record<string, Row> = {
-    users: { role: 'user' },
-    files: { is_external: 0, downloads: 0, is_encrypted: 0, last_accessed_at: null, reactor_class: null, reactor_recipe: null },
+    users: { role: 'user', is_banned: 0, ban_reason: null, email_verified: 0 },
+    files: { is_external: 0, downloads: 0, is_encrypted: 0, is_disabled: 0, disabled_reason: null, malware_status: 'clean', last_accessed_at: null, reactor_class: null, reactor_recipe: null, require_email_otp: 0, sender_email: null, custom_message: null },
     swarm_nodes: { status: 'active' },
     user_credits: { balance: 0, total_earned: 0, total_spent: 0 },
     inboxes: { status: 'pending' },
@@ -56,6 +68,15 @@ const DEFAULTS: Record<string, Row> = {
     user_usage: { storage_bytes: 0, uploads_count: 0 },
     usage_monthly: { egress_bytes: 0, credited_egress_bytes: 0, uploads_count: 0 },
     refresh_tokens: { rotated_at: null, replaced_by: null, revoked_at: null },
+    abuse_reports: { status: 'pending', details: null, reporter_email: null, ip_address: null, resolved_at: null },
+    password_resets: { used_at: null },
+    file_requests: { is_active: 1, upload_count: 0, total_bytes: 0, destination_space_id: null, max_file_size: null, expires_at: null, password_hash: null, recipient_public_key: null },
+    file_request_uploads: { status: 'received', uploader_name: null, uploader_email: null, uploader_note: null },
+    file_recipients: { status: 'sent', opened_at: null, downloaded_at: null, otp_code_hash: null, otp_expires_at: null, otp_verified_at: null },
+    user_brands: { brand_name: null, brand_logo_url: null, brand_color: null, brand_wallpaper_url: null, brand_tagline: null, custom_domain: null, custom_domain_status: 'pending' },
+    file_reviews: { status: 'pending', reviewer_email: null, decision_note: null },
+    file_review_comments: { author_email: null, timestamp_seconds: null, coord_x: null, coord_y: null, resolved: 0 },
+    api_keys: { last_used_at: null, expires_at: null },
 };
 
 /** Primary keys (for duplicate detection on plain INSERT). */
@@ -67,6 +88,10 @@ const PRIMARY_KEYS: Record<string, string[]> = {
     user_usage: ['user_id'],
     usage_monthly: ['subject', 'period'],
     credit_purchases: ['payment_intent'],
+    user_brands: ['user_id'],
+    file_reviews: ['id'],
+    file_review_comments: ['id'],
+    api_keys: ['id'],
 };
 
 /** Whitespace/case-insensitive canonical form used for matching. */
@@ -115,6 +140,10 @@ const EXACT: [string, Handler][] = [
     ['SELECT * FROM users WHERE id = $1', (t, p) => rows(t.users.filter((r) => r.id === p[0]))],
     ['SELECT id, name, username FROM users WHERE username = $1',
         (t, p) => rows(t.users.filter((r) => r.username === p[0]).map((r) => pick(r, ['id', 'name', 'username'])))],
+    ['SELECT * FROM users WHERE LOWER(username) = $1',
+        (t, p) => rows(t.users.filter((r) => String(r.username ?? '').toLowerCase() === p[0]))],
+    ['SELECT * FROM users WHERE username = $1',
+        (t, p) => rows(t.users.filter((r) => r.username === p[0]))],
     ['SELECT id, name, username, image FROM users WHERE username ILIKE $1 AND username IS NOT NULL LIMIT 10',
         (t, p) => rows(t.users.filter((r) => r.username != null && ilikeContains(r.username, p[0])).slice(0, 10)
             .map((r) => pick(r, ['id', 'name', 'username', 'image'])))],
@@ -211,10 +240,14 @@ const EXACT: [string, Handler][] = [
     ['SELECT * FROM lobby_sessions WHERE code = $1', (t, p) => rows(t.lobby_sessions.filter((r) => r.code === p[0]))],
     ['UPDATE lobby_sessions SET joiner_id = $1, status = $2 WHERE code = $3',
         (t, p) => update(t.lobby_sessions, (r) => r.code === p[2], (r) => { r.joiner_id = p[0]; r.status = p[1]; })],
+    ['UPDATE lobby_sessions SET file_ids = $1 WHERE code = $2',
+        (t, p) => update(t.lobby_sessions, (r) => r.code === p[1], (r) => { r.file_ids = p[0]; })],
     ["UPDATE lobby_sessions SET status = 'complete' WHERE code = $1",
         (t, p) => update(t.lobby_sessions, (r) => r.code === p[0], (r) => { r.status = 'complete'; })],
     ['SELECT * FROM qr_sessions WHERE id = $1', (t, p) => rows(t.qr_sessions.filter((r) => r.id === p[0]))],
     ['UPDATE qr_sessions SET status = $1 WHERE id = $2', (t, p) => update(t.qr_sessions, (r) => r.id === p[1], (r) => { r.status = p[0]; })],
+    ['UPDATE qr_sessions SET status = $1, file_ids = $2 WHERE id = $3', (t, p) => update(t.qr_sessions, (r) => r.id === p[2], (r) => { r.status = p[0]; r.file_ids = p[1]; })],
+    ['UPDATE qr_sessions SET file_ids = $1 WHERE id = $2', (t, p) => update(t.qr_sessions, (r) => r.id === p[1], (r) => { r.file_ids = p[0]; })],
 
     // --- spaces ---
     ['SELECT * FROM spaces WHERE owner_id = $1 ORDER BY created_at DESC', (t, p) => rows(t.spaces.filter((r) => r.owner_id === p[0]).sort(byDesc('created_at')))],
@@ -345,12 +378,129 @@ const EXACT: [string, Handler][] = [
     ['UPDATE refresh_tokens SET rotated_at = $1, replaced_by = $2 WHERE id = $3 AND rotated_at IS NULL AND revoked_at IS NULL',
         (t, p) => update(t.refresh_tokens, (r) => r.id === p[2] && r.rotated_at == null && r.revoked_at == null, (r) => { r.rotated_at = p[0]; r.replaced_by = p[1]; })],
     ['DELETE FROM refresh_tokens WHERE expires_at < $1', (t, p) => remove(t, 'refresh_tokens', (r) => num(r.expires_at) < num(p[0]))],
+
+    // --- abuse & moderation (0005) ---
+    ['SELECT * FROM abuse_reports ORDER BY created_at DESC LIMIT $1',
+        (t, p) => rows(t.abuse_reports.sort(byDesc('created_at')).slice(0, num(p[0])))],
+    ['SELECT * FROM abuse_reports WHERE status = $1 ORDER BY created_at DESC LIMIT $2',
+        (t, p) => rows(t.abuse_reports.filter((r) => r.status === p[0]).sort(byDesc('created_at')).slice(0, num(p[1])))],
+    ['UPDATE abuse_reports SET status = $1, resolved_at = $2 WHERE id = $3',
+        (t, p) => update(t.abuse_reports, (r) => r.id === p[2], (r) => { r.status = p[0]; r.resolved_at = p[1]; })],
+    ['UPDATE files SET is_disabled = $1, disabled_reason = $2 WHERE share_id = $3',
+        (t, p) => update(t.files, (r) => r.share_id === p[2], (r) => { r.is_disabled = p[0]; r.disabled_reason = p[1]; })],
+    ['UPDATE users SET is_banned = $1, ban_reason = $2 WHERE id = $3',
+        (t, p) => update(t.users, (r) => r.id === p[2], (r) => { r.is_banned = p[0]; r.ban_reason = p[1]; })],
+    ['SELECT is_disabled, disabled_reason FROM files WHERE share_id = $1',
+        (t, p) => rows(t.files.filter((r) => r.share_id === p[0]).map((r) => pick(r, ['is_disabled', 'disabled_reason'])))],
+    ['SELECT * FROM password_resets WHERE token_hash = $1 AND expires_at > $2 AND used_at IS NULL',
+        (t, p) => rows(t.password_resets.filter((r) => r.token_hash === p[0] && num(r.expires_at) > num(p[1]) && r.used_at == null))],
+    ['UPDATE password_resets SET used_at = $1 WHERE id = $2',
+        (t, p) => update(t.password_resets, (r) => r.id === p[1], (r) => { r.used_at = p[0]; })],
+    ['UPDATE users SET password_hash = $1 WHERE id = $2',
+        (t, p) => update(t.users, (r) => r.id === p[1], (r) => { r.password_hash = p[0]; })],
+
+    // --- file requests (0006) ---
+    ['SELECT * FROM file_requests WHERE user_id = $1 ORDER BY created_at DESC',
+        (t, p) => rows(t.file_requests.filter((r) => r.user_id === p[0]).sort(byDesc('created_at')))],
+    ['SELECT * FROM file_requests WHERE id = $1 AND user_id = $2',
+        (t, p) => rows(t.file_requests.filter((r) => r.id === p[0] && r.user_id === p[1]))],
+    ['SELECT * FROM file_requests WHERE slug = $1',
+        (t, p) => rows(t.file_requests.filter((r) => r.slug === p[0]))],
+    ['SELECT fr.*, u.name as requester_name, u.email as requester_email FROM file_requests fr JOIN users u ON u.id = fr.user_id WHERE fr.slug = $1',
+        (t, p) => {
+            const req = t.file_requests.find((r) => r.slug === p[0]);
+            if (!req) return rows([]);
+            const u = t.users.find((user) => user.id === req.user_id);
+            return rows([{ ...req, requester_name: u?.name || 'Anonymous', requester_email: u?.email || '' }]);
+        }],
+    ['UPDATE file_requests SET is_active = $1, updated_at = $2 WHERE id = $3 AND user_id = $4',
+        (t, p) => update(t.file_requests, (r) => r.id === p[2] && r.user_id === p[3], (r) => { r.is_active = p[0]; r.updated_at = p[1]; })],
+    ['DELETE FROM file_requests WHERE id = $1 AND user_id = $2',
+        (t, p) => remove(t, 'file_requests', (r) => r.id === p[0] && r.user_id === p[1])],
+    ['UPDATE file_requests SET upload_count = upload_count + 1, total_bytes = total_bytes + $1, updated_at = $2 WHERE id = $3',
+        (t, p) => update(t.file_requests, (r) => r.id === p[2], (r) => { r.upload_count = num(r.upload_count) + 1; r.total_bytes = num(r.total_bytes) + num(p[0]); r.updated_at = p[1]; })],
+    ['SELECT fru.*, f.original_name, f.file_size, f.mime_type, f.is_encrypted FROM file_request_uploads fru JOIN files f ON f.share_id = fru.file_id WHERE fru.request_id = $1 ORDER BY fru.uploaded_at DESC',
+        (t, p) => {
+            const uploads = t.file_request_uploads.filter((r) => r.request_id === p[0]).sort(byDesc('uploaded_at'));
+            return rows(uploads.map((u) => {
+                const f = t.files.find((file) => file.share_id === u.file_id);
+                return {
+                    ...u,
+                    original_name: f?.original_name || '',
+                    file_size: f?.file_size || 0,
+                    mime_type: f?.mime_type || '',
+                    is_encrypted: f?.is_encrypted || 0
+                };
+            }));
+        }],
+    ['SELECT * FROM file_request_uploads WHERE request_id = $1 ORDER BY uploaded_at DESC',
+        (t, p) => rows(t.file_request_uploads.filter((r) => r.request_id === p[0]).sort(byDesc('uploaded_at')))],
+    ['UPDATE file_request_uploads SET status = $1 WHERE id = $2',
+        (t, p) => update(t.file_request_uploads, (r) => r.id === p[1], (r) => { r.status = p[0]; })],
+
+    // --- email delivery tracking & OTP (0007) ---
+    ['SELECT * FROM file_recipients WHERE file_id = $1 ORDER BY sent_at ASC',
+        (t, p) => rows(t.file_recipients.filter((r) => r.file_id === p[0]).sort(byAsc('sent_at')))],
+    ['SELECT * FROM file_recipients WHERE file_id = $1 AND token = $2',
+        (t, p) => rows(t.file_recipients.filter((r) => r.file_id === p[0] && r.token === p[1]))],
+    ['SELECT * FROM file_recipients WHERE file_id = $1 AND email = $2',
+        (t, p) => rows(t.file_recipients.filter((r) => r.file_id === p[0] && r.email === p[1]))],
+    ['UPDATE file_recipients SET opened_at = $1, status = \'opened\' WHERE id = $2 AND opened_at IS NULL',
+        (t, p) => update(t.file_recipients, (r) => r.id === p[1] && r.opened_at == null, (r) => { r.opened_at = p[0]; r.status = 'opened'; })],
+    ['UPDATE file_recipients SET downloaded_at = $1, status = \'downloaded\' WHERE id = $2 AND downloaded_at IS NULL',
+        (t, p) => update(t.file_recipients, (r) => r.id === p[1] && r.downloaded_at == null, (r) => { r.downloaded_at = p[0]; r.status = 'downloaded'; })],
+    ['UPDATE file_recipients SET otp_code_hash = $1, otp_expires_at = $2 WHERE id = $3',
+        (t, p) => update(t.file_recipients, (r) => r.id === p[2], (r) => { r.otp_code_hash = p[0]; r.otp_expires_at = p[1]; })],
+    ['UPDATE file_recipients SET otp_verified_at = $1 WHERE id = $2',
+        (t, p) => update(t.file_recipients, (r) => r.id === p[1], (r) => { r.otp_verified_at = p[0]; })],
+    ['UPDATE files SET require_email_otp = $1, sender_email = $2, custom_message = $3 WHERE share_id = $4',
+        (t, p) => update(t.files, (r) => r.share_id === p[3], (r) => { r.require_email_otp = p[0]; r.sender_email = p[1]; r.custom_message = p[2]; })],
+
+    // --- custom branding & custom domains (0008) ---
+    ['SELECT * FROM user_brands WHERE user_id = $1',
+        (t, p) => rows(t.user_brands.filter((r) => r.user_id === p[0]))],
+    ['SELECT * FROM user_brands WHERE custom_domain = $1',
+        (t, p) => rows(t.user_brands.filter((r) => r.custom_domain === p[0]))],
+    ['UPDATE user_brands SET custom_domain_status = $1, updated_at = $2 WHERE user_id = $3',
+        (t, p) => update(t.user_brands, (r) => r.user_id === p[2], (r) => { r.custom_domain_status = p[0]; r.updated_at = p[1]; })],
+    ['DELETE FROM user_brands WHERE user_id = $1',
+        (t, p) => remove(t, 'user_brands', (r) => r.user_id === p[0])],
+
+    // --- file reviews & feedback (0009) ---
+    ['SELECT * FROM file_reviews WHERE file_id = $1 ORDER BY updated_at DESC',
+        (t, p) => rows(t.file_reviews.filter((r) => r.file_id === p[0]).sort(byDesc('updated_at')))],
+    ['SELECT * FROM file_reviews WHERE file_id = $1 AND reviewer_name = $2',
+        (t, p) => rows(t.file_reviews.filter((r) => r.file_id === p[0] && r.reviewer_name === p[1]))],
+    ['UPDATE file_reviews SET status = $1, decision_note = $2, updated_at = $3 WHERE id = $4',
+        (t, p) => update(t.file_reviews, (r) => r.id === p[3], (r) => { r.status = p[0]; r.decision_note = p[1]; r.updated_at = p[2]; })],
+    ['SELECT * FROM file_review_comments WHERE file_id = $1 ORDER BY created_at ASC',
+        (t, p) => rows(t.file_review_comments.filter((r) => r.file_id === p[0]).sort(byAsc('created_at')))],
+    ['UPDATE file_review_comments SET resolved = $1 WHERE id = $2',
+        (t, p) => update(t.file_review_comments, (r) => r.id === p[1], (r) => { r.resolved = p[0]; })],
+
+    // --- developer API keys (0010) ---
+    ['SELECT * FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC',
+        (t, p) => rows(t.api_keys.filter((r) => r.user_id === p[0]).sort(byDesc('created_at')))],
+    ['SELECT * FROM api_keys WHERE key_hash = $1',
+        (t, p) => rows(t.api_keys.filter((r) => r.key_hash === p[0]))],
+    ['UPDATE api_keys SET last_used_at = $1 WHERE id = $2',
+        (t, p) => update(t.api_keys, (r) => r.id === p[1], (r) => { r.last_used_at = p[0]; })],
+    ['DELETE FROM api_keys WHERE id = $1 AND user_id = $2',
+        (t, p) => remove(t, 'api_keys', (r) => r.id === p[0] && r.user_id === p[1])],
 ];
 
 const EXACT_MAP = new Map<string, Handler>(EXACT.map(([sql, h]) => [normalizeSql(sql), h]));
 
 /** ON CONFLICT clauses supported per table (normalised), applied to the existing row. */
 const CONFLICTS: Record<string, { clause: string; key: string[]; onConflict: (existing: Row, incoming: Row) => Row[] }[]> = {
+    user_brands: [{
+        clause: 'ON CONFLICT (user_id) DO UPDATE SET brand_name = EXCLUDED.brand_name, brand_logo_url = EXCLUDED.brand_logo_url, brand_color = EXCLUDED.brand_color, brand_wallpaper_url = EXCLUDED.brand_wallpaper_url, brand_tagline = EXCLUDED.brand_tagline, custom_domain = EXCLUDED.custom_domain, custom_domain_status = EXCLUDED.custom_domain_status, updated_at = EXCLUDED.updated_at',
+        key: ['user_id'],
+        onConflict: (e, n) => {
+            Object.assign(e, n);
+            return [e];
+        },
+    }],
     chunks: [{ clause: 'ON CONFLICT (HASH) DO NOTHING', key: ['hash'], onConflict: () => [] }],
     swarm_nodes: [{
         clause: "ON CONFLICT(ID) DO UPDATE SET LAST_PULSE = EXCLUDED.LAST_PULSE, STATUS = 'ACTIVE'", key: ['id'],

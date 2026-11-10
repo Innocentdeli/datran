@@ -20,12 +20,21 @@ export interface StoredTokens {
     accessExpiresAt: number;
     /** Server the tokens belong to (refresh/revoke go there). */
     serverUrl?: string;
+    /** Email of the signed-in user. */
+    email?: string;
+    /** Unique @handle of the signed-in user. */
+    username?: string;
 }
 
 interface TokenResponse {
     accessToken: string;
     accessExpiresIn: number;
     refreshToken: string;
+    user?: {
+        id: string;
+        email?: string;
+        username?: string | null;
+    };
 }
 
 export class AuthError extends Error {
@@ -69,6 +78,8 @@ export async function loadTokens(): Promise<StoredTokens | null> {
             refreshToken: t.refreshToken,
             accessExpiresAt: t.accessExpiresAt,
             serverUrl: typeof t.serverUrl === 'string' ? t.serverUrl : undefined,
+            email: typeof t.email === 'string' ? t.email : undefined,
+            username: typeof t.username === 'string' ? t.username : undefined,
         };
     } catch {
         return null;
@@ -85,8 +96,15 @@ export async function clearTokens(): Promise<void> {
     await SecureStore.deleteItemAsync(TOKENS_KEY);
 }
 
-function toStored(r: TokenResponse, serverUrl: string): StoredTokens {
-    return { accessToken: r.accessToken, refreshToken: r.refreshToken, accessExpiresAt: Date.now() + r.accessExpiresIn * 1000, serverUrl };
+function toStored(r: TokenResponse, serverUrl: string, email?: string, username?: string): StoredTokens {
+    return {
+        accessToken: r.accessToken,
+        refreshToken: r.refreshToken,
+        accessExpiresAt: Date.now() + r.accessExpiresIn * 1000,
+        serverUrl,
+        email: r.user?.email || email,
+        username: r.user?.username || username,
+    };
 }
 
 function isTokenResponse(v: unknown): v is TokenResponse {
@@ -116,7 +134,7 @@ export async function signIn(serverUrl: string, email: string, password: string)
         throw new AuthError(`Could not reach the server: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (r.status === 200 && isTokenResponse(r.data)) {
-        await saveTokens(toStored(r.data, serverUrl));
+        await saveTokens(toStored(r.data, serverUrl, email.trim()));
         emit(true);
         return;
     }
@@ -125,6 +143,31 @@ export async function signIn(serverUrl: string, email: string, password: string)
     if (r.status === 401) throw new AuthError(message ?? 'Invalid email or password.', 401);
     if (r.status === 404) throw new AuthError('This server does not support app sign-in yet (update the server).', 404);
     throw new AuthError(message ?? `Sign-in failed (HTTP ${r.status}).`, r.status);
+}
+
+/** Email + password sign-up with optional unique @handle. Creates the user account and stores the token pair. */
+export async function signUp(serverUrl: string, email: string, password: string, username?: string): Promise<void> {
+    if (!secureStoreAvailable) throw new AuthError('Sign-up needs secure storage, which is only available in the iOS/Android app.');
+    let r: { status: number; data: unknown };
+    try {
+        r = await postJson(`${base(serverUrl)}/api/mobile/token`, {
+            email: email.trim(),
+            password,
+            username: username ? username.trim().toLowerCase() : undefined,
+            isSignUp: true,
+        });
+    } catch (err) {
+        throw new AuthError(`Could not reach the server: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (r.status === 200 && isTokenResponse(r.data)) {
+        await saveTokens(toStored(r.data, serverUrl, email.trim(), username ? username.trim().toLowerCase() : undefined));
+        emit(true);
+        return;
+    }
+    const message = typeof (r.data as { message?: unknown } | null)?.message === 'string' ? (r.data as { message: string }).message : null;
+    if (r.status === 429) throw new AuthError(message ?? 'Too many attempts. Please try again later.', 429);
+    if (r.status === 401 || r.status === 400) throw new AuthError(message ?? 'Registration failed. Please check your credentials.', r.status);
+    throw new AuthError(message ?? `Sign-up failed (HTTP ${r.status}).`, r.status);
 }
 
 let refreshing: Promise<StoredTokens | null> | null = null;
@@ -138,7 +181,7 @@ async function refresh(tokens: StoredTokens): Promise<StoredTokens | null> {
         return null; // offline: keep the stored tokens, try again later
     }
     if (r.status === 200 && isTokenResponse(r.data)) {
-        const next = toStored(r.data, tokens.serverUrl);
+        const next = toStored(r.data, tokens.serverUrl, tokens.email, tokens.username);
         await saveTokens(next);
         return next;
     }
@@ -148,6 +191,16 @@ async function refresh(tokens: StoredTokens): Promise<StoredTokens | null> {
         emit(false);
     }
     return null;
+}
+
+export async function getUserEmail(): Promise<string | null> {
+    const tokens = await loadTokens();
+    return tokens?.email ?? null;
+}
+
+export async function getUsername(): Promise<string | null> {
+    const tokens = await loadTokens();
+    return tokens?.username ?? null;
 }
 
 /** Current access token (refreshed when about to expire), or null when signed out. */

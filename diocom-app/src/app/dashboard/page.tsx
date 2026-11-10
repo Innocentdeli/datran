@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth/options';
 import { FileRepository } from '@/db/files';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
-import { FileType } from 'lucide-react';
+import { FileType, Inbox, Palette, Key } from 'lucide-react';
 import { formatFileSize, formatTimestamp } from '@/lib/utils';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -12,6 +12,7 @@ import FileTypeIcon from '@/components/ui/FileTypeIcon';
 import { buttonClasses } from '@/components/ui/Button';
 
 import SearchInput from '@/components/features/SearchInput';
+import DashboardFileCard from '@/components/features/DashboardFileCard';
 
 export default async function DashboardPage({
     searchParams,
@@ -37,6 +38,37 @@ export default async function DashboardPage({
             <Header />
 
             <main id="main" className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8">
+                {/* Navigation Tabs */}
+                <div className="flex border-b border-white/10 gap-6 text-sm font-medium">
+                    <Link
+                        href="/dashboard"
+                        className="pb-3 text-primary border-b-2 border-primary flex items-center gap-2 font-semibold"
+                    >
+                        My Transfers (Sent)
+                    </Link>
+                    <Link
+                        href="/dashboard/requests"
+                        className="pb-3 text-gray-400 hover:text-white transition-colors flex items-center gap-2"
+                    >
+                        <Inbox className="w-4 h-4" />
+                        File Requests (Received)
+                    </Link>
+                    <Link
+                        href="/dashboard/branding"
+                        className="pb-3 text-gray-400 hover:text-white transition-colors flex items-center gap-2"
+                    >
+                        <Palette className="w-4 h-4" />
+                        Branding &amp; Domain (Pro)
+                    </Link>
+                    <Link
+                        href="/dashboard/api-keys"
+                        className="pb-3 text-gray-400 hover:text-white transition-colors flex items-center gap-2"
+                    >
+                        <Key className="w-4 h-4" />
+                        Developer API Keys
+                    </Link>
+                </div>
+
                 <div className="flex flex-col sm:flex-row items-baseline justify-between gap-4">
                     <div>
                         <h1 className="text-3xl font-bold tracking-tight text-white">
@@ -100,60 +132,11 @@ export default async function DashboardPage({
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {userFiles.map((file) => (
-                            <Link
+                            <DashboardFileCard
                                 key={file.id}
-                                href={`/v1/${file.share_id}`}
-                                className="group panel relative p-5 flex flex-col gap-4 transition-colors hover:border-primary/40"
-                            >
-                                <div className="flex items-center gap-4">
-                                    <div className="w-14 h-14 rounded-xl bg-black/40 border border-white/10 overflow-hidden flex-shrink-0 relative">
-                                        {file.thumbnail_path ? (
-                                            <Image
-                                                src={`/api/thumbnail/${file.share_id}`}
-                                                alt=""
-                                                fill
-                                                sizes="56px"
-                                                unoptimized
-                                                className="object-cover"
-                                            />
-                                        ) : (
-                                            <FileTypeIcon name={file.original_name} className="h-full w-full rounded-none border-0" />
-                                        )}
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <h2 className="font-semibold text-white group-hover:text-primary transition-colors truncate" title={file.original_name}>
-                                            {file.original_name}
-                                        </h2>
-                                        <div className="flex items-center gap-2 mt-1.5">
-                                            <span className="text-xs text-gray-300">
-                                                {formatFileSize(file.file_size)}
-                                            </span>
-                                            {firstTag(file.tags) && (
-                                                <span className="text-xs text-primary">
-                                                    #{firstTag(file.tags)}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {file.summary && (
-                                    <p className="text-sm text-gray-300 line-clamp-2 leading-relaxed">
-                                        {file.summary}
-                                    </p>
-                                )}
-
-                                <div className="flex items-center justify-between text-xs mt-auto pt-4 border-t border-white/[0.06]">
-                                    <div className="flex flex-col gap-0.5">
-                                        <span className="text-gray-400">Uploaded</span>
-                                        <span className="text-gray-200">{formatTimestamp(new Date(file.created_at))}</span>
-                                    </div>
-                                    <div className="flex flex-col gap-0.5 text-right">
-                                        <span className="text-gray-400">Downloads</span>
-                                        <span className="text-gray-200">{file.downloads}</span>
-                                    </div>
-                                </div>
-                            </Link>
+                                file={file}
+                                tag={firstTag(file.tags)}
+                            />
                         ))}
                     </div>
                 )}

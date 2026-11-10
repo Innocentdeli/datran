@@ -3,9 +3,11 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth/options';
 import { setRequestUser } from '@/lib/observability';
 import { verifyAccessToken } from './mobileTokens';
+import { ApiKeyService } from './apiKeyService';
 
 /**
  * The authenticated user of a request, from EITHER
+ *  - `Authorization: Bearer dtr_live_...` (Developer CLI & CI/CD API key), or
  *  - `Authorization: Bearer <access token>` (mobile app; JWT from POST /api/mobile/token), or
  *  - the NextAuth session cookie (web).
  * A bearer header that is present but invalid/expired is an error (AuthTokenError -> 401), never a silent fallback
@@ -16,6 +18,10 @@ export interface RequestUser {
     id: string;
     role: string;
     via: 'bearer' | 'session';
+}
+
+export function isRequestUser(val: unknown): val is RequestUser {
+    return typeof val === 'object' && val !== null && 'id' in val && 'via' in val;
 }
 
 export class AuthTokenError extends Error {
@@ -35,6 +41,13 @@ export function bearerToken(req: Request): string | null {
 export async function getRequestUser(req: Request): Promise<RequestUser | null> {
     const token = bearerToken(req);
     if (token !== null) {
+        if (token.startsWith('dtr_live_')) {
+            const apiUser = await ApiKeyService.authenticateToken(token);
+            if (!apiUser) throw new AuthTokenError('Invalid or expired Datran API key');
+            setRequestUser(apiUser.id);
+            return { id: apiUser.id, role: 'user', via: 'bearer' };
+        }
+
         const claims = await verifyAccessToken(token);
         if (!claims) throw new AuthTokenError();
         setRequestUser(claims.userId);

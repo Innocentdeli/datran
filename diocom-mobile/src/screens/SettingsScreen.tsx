@@ -1,264 +1,436 @@
-import { useState } from 'react';
-import { ActivityIndicator, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 
-import { checkServer } from '../api/client';
-import { AuthError, secureStoreAvailable, signIn, signOut } from '../auth/session';
+import { checkServer, fetchBillingUsage, type BillingUsageSummary } from '../api/client';
+import { getUserEmail, secureStoreAvailable, signOut } from '../auth/session';
 import { normalizeServerUrl, type Settings } from '../storage/settings';
-import { colors, shared } from '../theme';
+import { colors, formatBytes, radius, space } from '../theme';
+import {
+    Badge,
+    Button,
+    haptic,
+    Icon,
+    Notice,
+    Row,
+    ScreenHeader,
+    Section,
+    SegmentedControl,
+    SwitchRow,
+    TextField,
+    useToast,
+} from '../ui';
 
 interface SettingsScreenProps {
     settings: Settings;
     signedIn: boolean;
     onSave: (settings: Settings) => Promise<void>;
+    onOpenAuth?: () => void;
+    onOpenPair?: () => void;
 }
 
-type Check = { kind: 'idle' } | { kind: 'checking' } | { kind: 'ok'; message: string } | { kind: 'error'; message: string };
+type Check =
+    | { kind: 'idle' }
+    | { kind: 'checking' }
+    | { kind: 'ok'; message: string }
+    | { kind: 'error'; message: string };
 
-export function SettingsScreen({ settings, signedIn, onSave }: SettingsScreenProps) {
+const EXPIRY_OPTIONS = [
+    { key: '24', label: '24 Hours' },
+    { key: '72', label: '3 Days' },
+    { key: '168', label: '7 Days' },
+    { key: '720', label: '30 Days' },
+];
+
+export function SettingsScreen({ settings, signedIn, onSave, onOpenAuth, onOpenPair }: SettingsScreenProps) {
+    const toast = useToast();
     const [serverInput, setServerInput] = useState(settings.serverUrl);
     const [anonymous, setAnonymous] = useState(settings.anonymousUploads);
-    const [saveNote, setSaveNote] = useState<string | null>(null);
+    const [expiry, setExpiry] = useState(String(settings.defaultExpiryHours ?? 72));
+    const [hapticsOn, setHapticsOn] = useState(settings.hapticsEnabled ?? true);
+    const [showAdvanced, setShowAdvanced] = useState(false);
     const [check, setCheck] = useState<Check>({ kind: 'idle' });
+    const [saving, setSaving] = useState(false);
 
     const normalized = normalizeServerUrl(serverInput);
-    const dirty = normalized !== settings.serverUrl || anonymous !== settings.anonymousUploads;
+    const dirty =
+        normalized !== settings.serverUrl ||
+        anonymous !== settings.anonymousUploads ||
+        Number(expiry) !== settings.defaultExpiryHours ||
+        hapticsOn !== settings.hapticsEnabled;
 
-    const save = async () => {
-        if (!normalized) return;
+    const handleSave = async (overrides?: Partial<Settings>) => {
+        const nextUrl = overrides?.serverUrl ?? normalized;
+        if (!nextUrl || saving) return;
+        setSaving(true);
         try {
-            await onSave({ serverUrl: normalized, anonymousUploads: anonymous });
-            setSaveNote('Saved');
+            await onSave({
+                serverUrl: nextUrl,
+                anonymousUploads: overrides?.anonymousUploads ?? anonymous,
+                defaultExpiryHours: overrides?.defaultExpiryHours ?? Number(expiry),
+                hapticsEnabled: overrides?.hapticsEnabled ?? hapticsOn,
+            });
+            haptic.success();
+            toast.show('Settings saved');
         } catch (err) {
-            setSaveNote(`Could not save: ${err instanceof Error ? err.message : String(err)}`);
+            haptic.error();
+            toast.show(`Could not save: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        } finally {
+            setSaving(false);
         }
     };
 
-    const test = async () => {
+    const testConnection = async () => {
         if (!normalized) return;
+        haptic.light();
         setCheck({ kind: 'checking' });
         try {
             const status = await checkServer(normalized);
-            setCheck(
-                status >= 500
-                    ? { kind: 'error', message: `Server answered with HTTP ${status}.` }
-                    : { kind: 'ok', message: `Server reachable (HTTP ${status}).` },
-            );
-        } catch (err) {
-            setCheck({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
+            if (status >= 500) {
+                haptic.warning();
+                setCheck({ kind: 'error', message: `Server error (${status})` });
+            } else {
+                haptic.success();
+                setCheck({ kind: 'ok', message: 'Connected' });
+            }
+        } catch {
+            haptic.error();
+            setCheck({ kind: 'error', message: 'Unable to reach server' });
         }
     };
 
     return (
-        <View>
-            <Text style={shared.screenTitle}>
-                NODE<Text style={{ color: colors.accent }}>{'//'}</Text>SETTINGS
-            </Text>
-            <Text style={shared.screenSubtitle}>Server and account</Text>
+        <View style={styles.container}>
+            <ScreenHeader
+                title="Settings"
+                subtitle="Account, link security, and transfer preferences"
+            />
 
-            <View style={shared.card}>
-                <Text style={shared.cardLabel}>SERVER URL</Text>
-                <TextInput
-                    style={shared.input}
-                    value={serverInput}
-                    onChangeText={(t) => {
-                        setServerInput(t);
-                        setSaveNote(null);
-                        setCheck({ kind: 'idle' });
-                    }}
-                    placeholder="http://192.168.1.20:3001"
-                    placeholderTextColor={colors.textFaint}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    keyboardType="url"
-                    inputMode="url"
-                    accessibilityLabel="Server URL"
+            {/* SECTION 1: ACCOUNT (Clean standard UX: No login/signup forms in settings!) */}
+            <Section title="ACCOUNT">
+                <AccountSection
+                    serverUrl={settings.serverUrl}
+                    signedIn={signedIn}
+                    onOpenAuth={onOpenAuth}
                 />
-                <Text style={styles.hint}>
-                    {normalized
-                        ? `Uploads go to ${normalized}/api/ingest. On a phone, use your computer's LAN address, not localhost.`
-                        : 'Enter an http:// or https:// address.'}
-                </Text>
+            </Section>
 
-                <View style={styles.row}>
-                    <TouchableOpacity
-                        style={[shared.secondaryButton, styles.flex, !normalized && shared.disabled]}
-                        onPress={test}
-                        disabled={!normalized || check.kind === 'checking'}
-                        accessibilityRole="button"
-                    >
-                        {check.kind === 'checking' ? (
-                            <ActivityIndicator color={colors.text} />
-                        ) : (
-                            <Text style={shared.secondaryButtonText}>Test connection</Text>
-                        )}
-                    </TouchableOpacity>
-                </View>
-                {check.kind === 'ok' ? <Text style={[styles.status, { color: colors.success }]}>{check.message}</Text> : null}
-                {check.kind === 'error' ? <Text style={[styles.status, { color: colors.danger }]}>{check.message}</Text> : null}
-            </View>
-
-            <View style={shared.card}>
-                <Text style={shared.cardLabel}>ACCOUNT</Text>
-                <View style={styles.switchRow}>
-                    <View style={styles.flex}>
-                        <Text style={styles.switchLabel}>Anonymous uploads</Text>
-                        <Text style={styles.hint}>
-                            Upload without an account. Works while the server allows it (ALLOW_ANONYMOUS_UPLOADS is not
-                            &quot;false&quot;). Anonymous files are not tied to your web account.
-                        </Text>
-                    </View>
-                    <Switch
-                        value={anonymous}
-                        onValueChange={(v) => {
-                            setAnonymous(v);
-                            setSaveNote(null);
+            {/* SECTION 2: TRANSFER PREFERENCES (Matches Web features) */}
+            <Section title="TRANSFER DEFAULTS" footer="Links automatically expire after the selected duration.">
+                <View style={styles.sectionInner}>
+                    <Text style={styles.settingLabel}>Default Link Expiration</Text>
+                    <SegmentedControl
+                        value={expiry}
+                        onChange={(val) => {
+                            setExpiry(val);
+                            void handleSave({ defaultExpiryHours: Number(val) });
                         }}
-                        trackColor={{ true: colors.accent, false: colors.border }}
-                        accessibilityLabel="Anonymous uploads"
+                        segments={EXPIRY_OPTIONS}
                     />
                 </View>
-                <AccountSection serverUrl={settings.serverUrl} signedIn={signedIn} />
-            </View>
+                <SwitchRow
+                    icon="shield-outline"
+                    title="Allow Anonymous Transfers"
+                    subtitle="Send files without saving them to your account history"
+                    value={anonymous}
+                    onChange={(val) => {
+                        setAnonymous(val);
+                        void handleSave({ anonymousUploads: val });
+                    }}
+                />
+            </Section>
 
-            <TouchableOpacity
-                style={[shared.button, (!dirty || !normalized) && shared.disabled]}
-                onPress={save}
-                disabled={!dirty || !normalized}
-                accessibilityRole="button"
+            {/* SECTION 3: APP PREFERENCES & DESKTOP PAIRING */}
+            <Section title="PREFERENCES">
+                <Row
+                    icon="qr-code-outline"
+                    title="Pair with Desktop"
+                    subtitle="Sync and receive files directly from your computer"
+                    onPress={onOpenPair}
+                    chevron
+                />
+                <SwitchRow
+                    icon="phone-portrait-outline"
+                    title="Haptic Feedback"
+                    subtitle="Vibrate on taps and transfer events"
+                    value={hapticsOn}
+                    onChange={(val) => {
+                        setHapticsOn(val);
+                        void handleSave({ hapticsEnabled: val });
+                    }}
+                />
+                <Row
+                    icon="moon-outline"
+                    title="Appearance"
+                    value="Cyber Dark"
+                />
+            </Section>
+
+            {/* SECTION 4: SERVER CONNECTION (ADVANCED / SELF-HOSTING) */}
+            <Section
+                title="SERVER CONNECTION"
+                right={
+                    <Button
+                        label={showAdvanced ? 'Hide' : 'Configure'}
+                        variant="ghost"
+                        size="sm"
+                        onPress={() => setShowAdvanced((v) => !v)}
+                    />
+                }
             >
-                <Text style={shared.buttonText}>SAVE</Text>
-            </TouchableOpacity>
-            {saveNote ? <Text style={styles.status}>{saveNote}</Text> : null}
+                {showAdvanced ? (
+                    <View style={styles.advancedBox}>
+                        <TextField
+                            label="SERVER ENDPOINT"
+                            value={serverInput}
+                            onChangeText={(t) => {
+                                setServerInput(t);
+                                setCheck({ kind: 'idle' });
+                            }}
+                            placeholder="https://datran.app or http://localhost:3001"
+                            icon="globe-outline"
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            keyboardType="url"
+                            hint="Connects to your custom or self-hosted Datran instance."
+                        />
+
+                        <View style={styles.testRow}>
+                            <Button
+                                label="Test Connection"
+                                icon="pulse-outline"
+                                variant="secondary"
+                                size="sm"
+                                loading={check.kind === 'checking'}
+                                disabled={!normalized || check.kind === 'checking'}
+                                onPress={testConnection}
+                            />
+                            {check.kind === 'ok' ? (
+                                <Badge label={check.message} tone="success" icon="checkmark-circle" />
+                            ) : null}
+                            {check.kind === 'error' ? (
+                                <Badge label={check.message} tone="danger" icon="alert-circle" />
+                            ) : null}
+                        </View>
+
+                        {dirty ? (
+                            <View style={styles.saveAction}>
+                                <Button
+                                    label="Save Endpoint"
+                                    variant="primary"
+                                    size="md"
+                                    loading={saving}
+                                    onPress={() => handleSave()}
+                                />
+                            </View>
+                        ) : null}
+                    </View>
+                ) : (
+                    <Row
+                        icon="server-outline"
+                        title="Instance URL"
+                        value={settings.serverUrl.replace(/^https?:\/\//, '')}
+                        onPress={() => setShowAdvanced(true)}
+                        chevron
+                    />
+                )}
+            </Section>
+
+            {/* SECTION 5: ABOUT & PRIVACY */}
+            <Section title="ABOUT DATRAN">
+                <Row
+                    icon="shield-checkmark-outline"
+                    title="Zero-Knowledge Security"
+                    subtitle="Files are end-to-end encrypted and transferred with private keys"
+                />
+                <Row
+                    icon="information-circle-outline"
+                    title="Datran Mobile"
+                    value="v1.0.0"
+                />
+            </Section>
         </View>
     );
 }
 
-/** Sign-in (POST /api/mobile/token) / sign-out (revokes the refresh token on the server). */
-function AccountSection({ serverUrl, signedIn }: { serverUrl: string; signedIn: boolean }) {
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
+function AccountSection({
+    serverUrl,
+    signedIn,
+    onOpenAuth,
+}: {
+    serverUrl: string;
+    signedIn: boolean;
+    onOpenAuth?: () => void;
+}) {
+    const toast = useToast();
+    const [userEmail, setUserEmail] = useState<string | null>(null);
+    const [billing, setBilling] = useState<BillingUsageSummary | null>(null);
     const [busy, setBusy] = useState(false);
-    const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+    useEffect(() => {
+        if (signedIn) {
+            void getUserEmail().then((em) => setUserEmail(em));
+            void fetchBillingUsage(serverUrl).then((b) => setBilling(b));
+        } else {
+            setUserEmail(null);
+            setBilling(null);
+        }
+    }, [signedIn, serverUrl]);
 
     if (!secureStoreAvailable) {
-        return <Text style={styles.hint}>Sign-in is available in the iOS and Android app (tokens are kept in the device keychain).</Text>;
-    }
-
-    if (signedIn) {
         return (
-            <View style={styles.accountBox}>
-                <Text style={[styles.status, { color: colors.success }]}>Signed in to {serverUrl}. Uploads are saved to your account.</Text>
-                <TouchableOpacity
-                    style={[shared.secondaryButton, styles.signOut, busy && shared.disabled]}
-                    disabled={busy}
-                    onPress={async () => {
-                        setBusy(true);
-                        await signOut();
-                        setBusy(false);
-                        setMessage(null);
-                    }}
-                    accessibilityRole="button"
-                >
-                    {busy ? <ActivityIndicator color={colors.text} /> : <Text style={[shared.secondaryButtonText, { color: colors.danger }]}>Sign out</Text>}
-                </TouchableOpacity>
+            <View style={styles.cardPadding}>
+                <Notice
+                    tone="info"
+                    title="Native Keychain Required"
+                    message="Sign-in credential storage is enabled when running on native iOS or Android."
+                />
             </View>
         );
     }
 
-    const canSubmit = email.trim().length > 3 && password.length > 0 && !busy;
-    const submit = async () => {
-        if (!canSubmit) return;
-        setBusy(true);
-        setMessage(null);
-        try {
-            await signIn(serverUrl, email, password);
-            setPassword('');
-            setMessage({ kind: 'ok', text: 'Signed in.' });
-        } catch (err) {
-            setMessage({ kind: 'error', text: err instanceof AuthError || err instanceof Error ? err.message : String(err) });
-        } finally {
-            setBusy(false);
-        }
-    };
+    if (signedIn) {
+        const planName = billing?.plan.name ?? 'Free Plan';
+        const isPro = billing?.plan.id === 'pro';
+        const maxFileStr = billing?.plan.maxFileBytes ? formatBytes(billing.plan.maxFileBytes) : '2 GB';
+        const maxExpiryHours = billing?.plan.maxExpiryHours ?? 168;
+        const maxDays = Math.round(maxExpiryHours / 24);
 
+        return (
+            <View style={styles.cardPadding}>
+                <View style={styles.profileRow}>
+                    <View style={styles.avatar}>
+                        <Icon name="person" size={22} color={colors.primary} />
+                    </View>
+                    <View style={styles.profileDetails}>
+                        <Text style={styles.profileEmail} numberOfLines={1}>
+                            {userEmail ?? 'Authenticated User'}
+                        </Text>
+                        <Text style={styles.profilePlan}>
+                            {planName} · Up to {maxFileStr} per file
+                        </Text>
+                    </View>
+                    <Badge label={isPro ? 'PRO' : 'FREE'} tone={isPro ? 'primary' : 'neutral'} />
+                </View>
+
+                {billing?.usage?.storageBytes !== undefined ? (
+                    <View style={styles.quotaBox}>
+                        <Text style={styles.quotaText}>
+                            Storage: {formatBytes(billing.usage.storageBytes)} used
+                            {billing.usage.storageQuotaBytes ? ` of ${formatBytes(billing.usage.storageQuotaBytes)}` : ''}
+                        </Text>
+                        <Text style={styles.quotaSub}>
+                            Link lifetime: Up to {maxDays} days
+                        </Text>
+                    </View>
+                ) : null}
+
+                <View style={styles.signOutWrap}>
+                    <Button
+                        label="Sign Out"
+                        icon="log-out-outline"
+                        variant="secondary"
+                        size="sm"
+                        loading={busy}
+                        disabled={busy}
+                        onPress={async () => {
+                            haptic.medium();
+                            setBusy(true);
+                            await signOut();
+                            setBusy(false);
+                            toast.show('Signed out');
+                        }}
+                    />
+                </View>
+            </View>
+        );
+    }
+
+    // When signed out: Standard mobile UX row with chevron leading to AuthModal
     return (
-        <View style={styles.accountBox}>
-            <Text style={styles.switchLabel}>Sign in</Text>
-            <TextInput
-                style={[shared.input, styles.field]}
-                value={email}
-                onChangeText={setEmail}
-                placeholder="you@example.com"
-                placeholderTextColor={colors.textFaint}
-                autoCapitalize="none"
-                autoCorrect={false}
-                autoComplete="email"
-                keyboardType="email-address"
-                inputMode="email"
-                textContentType="username"
-                accessibilityLabel="Email"
-            />
-            <TextInput
-                style={[shared.input, styles.field]}
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Password"
-                placeholderTextColor={colors.textFaint}
-                secureTextEntry
-                autoComplete="password"
-                textContentType="password"
-                onSubmitEditing={submit}
-                accessibilityLabel="Password"
-            />
-            <TouchableOpacity style={[shared.button, styles.field, !canSubmit && shared.disabled]} onPress={submit} disabled={!canSubmit} accessibilityRole="button">
-                {busy ? <ActivityIndicator color="#000" /> : <Text style={shared.buttonText}>SIGN IN</Text>}
-            </TouchableOpacity>
-            <Text style={styles.hint}>Use the email and password of your web account on {serverUrl}. Create accounts on the website.</Text>
-            {message ? <Text style={[styles.status, { color: message.kind === 'ok' ? colors.success : colors.danger }]}>{message.text}</Text> : null}
-        </View>
+        <Row
+            icon="person-circle-outline"
+            title="Sign In or Create Account"
+            subtitle="Access your cloud vault, send up to 50 GB, and sync active links"
+            onPress={onOpenAuth}
+            chevron
+        />
     );
 }
 
 const styles = StyleSheet.create({
-    accountBox: {
-        marginTop: 16,
-        borderTopWidth: 1,
-        borderColor: colors.border,
-        paddingTop: 16,
+    container: {
+        gap: space.md,
     },
-    field: {
-        marginTop: 10,
+    cardPadding: {
+        padding: space.lg,
+        gap: space.md,
     },
-    signOut: {
-        marginTop: 12,
+    sectionInner: {
+        padding: space.lg,
+        gap: space.sm,
     },
-    row: {
-        flexDirection: 'row',
-        gap: 8,
-        marginTop: 12,
-    },
-    flex: {
-        flex: 1,
-    },
-    hint: {
-        color: colors.textMuted,
-        fontSize: 12,
-        lineHeight: 17,
-        marginTop: 8,
-    },
-    status: {
+    settingLabel: {
         color: colors.textMuted,
         fontSize: 13,
-        marginTop: 10,
+        fontWeight: '600',
     },
-    switchRow: {
+    profileRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 12,
+        gap: space.md,
     },
-    switchLabel: {
+    avatar: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        backgroundColor: colors.primarySoft,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    profileDetails: {
+        flex: 1,
+        gap: 2,
+    },
+    profileEmail: {
         color: colors.text,
         fontSize: 15,
         fontWeight: '700',
+    },
+    profilePlan: {
+        color: colors.textMuted,
+        fontSize: 12,
+    },
+    quotaBox: {
+        backgroundColor: colors.backgroundElevated,
+        borderRadius: radius.md,
+        padding: space.md,
+        gap: 4,
+        borderWidth: StyleSheet.hairlineWidth * 2,
+        borderColor: colors.border,
+    },
+    quotaText: {
+        color: colors.text,
+        fontSize: 13,
+        fontWeight: '600',
+    },
+    quotaSub: {
+        color: colors.textFaint,
+        fontSize: 12,
+    },
+    signOutWrap: {
+        alignItems: 'flex-start',
+        marginTop: space.xs,
+    },
+    advancedBox: {
+        padding: space.lg,
+        gap: space.md,
+    },
+    testRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.sm,
+    },
+    saveAction: {
+        marginTop: space.xs,
     },
 });

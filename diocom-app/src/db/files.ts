@@ -33,6 +33,12 @@ export interface FileRecord {
     reactor_class?: string | null;
     /** Compact recipe JSON the reactor used; null for legacy/TS-compressed uploads. */
     reactor_recipe?: string | null;
+    is_disabled?: number | null;
+    disabled_reason?: string | null;
+    malware_status?: string | null;
+    require_email_otp?: number | null;
+    sender_email?: string | null;
+    custom_message?: string | null;
 }
 
 let reactorMetaWarned = false;
@@ -60,6 +66,11 @@ export interface PublicFile {
     encryption_format: 'dce2' | 'v1' | null;
     has_password: boolean;
     has_thumbnail: boolean;
+    is_disabled?: number | null;
+    disabled_reason?: string | null;
+    require_email_otp?: number | null;
+    sender_email?: string | null;
+    custom_message?: string | null;
 }
 
 const toNum = (v: unknown): number => (v === null || v === undefined || v === '' ? 0 : Number(v));
@@ -84,6 +95,11 @@ export function toPublicFile(f: Partial<FileRecord> & { share_id: string }): Pub
         encryption_format: Number(f.is_encrypted) !== 1 ? null : f.encryption_iv === DCE2_DB_MARKER ? 'dce2' : f.encryption_iv ? 'v1' : null,
         has_password: !!f.password_hash,
         has_thumbnail: !!f.thumbnail_path,
+        is_disabled: f.is_disabled ?? 0,
+        disabled_reason: f.disabled_reason ?? null,
+        require_email_otp: f.require_email_otp ?? 0,
+        sender_email: f.sender_email ?? null,
+        custom_message: f.custom_message ?? null,
     };
 }
 

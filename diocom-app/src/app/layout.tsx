@@ -16,6 +16,7 @@ export const viewport: Viewport = {
 };
 
 import { NextAuthProvider } from "@/components/providers/NextAuthProvider";
+import CookieBanner from "@/components/ui/CookieBanner";
 
 export default function RootLayout({
   children,
@@ -24,9 +25,19 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        {process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN && (
+          <script
+            defer
+            data-domain={process.env.NEXT_PUBLIC_PLAUSIBLE_DOMAIN}
+            src="https://plausible.io/js/script.js"
+          />
+        )}
+      </head>
       <body className={`${inter.className} bg-background text-foreground`}>
         <NextAuthProvider>
           {children}
+          <CookieBanner />
         </NextAuthProvider>
       </body>
     </html>

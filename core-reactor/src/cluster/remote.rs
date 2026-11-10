@@ -13,7 +13,7 @@ use axum::{
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Json, Response},
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -138,10 +138,11 @@ pub async fn serve(cluster: Arc<Cluster>, id: Id, method: Method, headers: &Head
         *r.body_mut() = Body::empty();
         return r;
     }
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
-    tokio::spawn(async move {
+    // Pre-determine which unique objects are required for the requested byte range
+    let needed_objects: Vec<Id> = {
+        let mut list = Vec::new();
+        let mut seen = HashSet::new();
         let mut pos = 0u64;
-        let mut sent = 0u64;
         for c in &pm.chunks {
             let (cs, ce) = (pos, pos + c.len as u64);
             pos = ce;
@@ -151,12 +152,97 @@ pub async fn serve(cluster: Arc<Cluster>, id: Id, method: Method, headers: &Head
             if cs >= end {
                 break;
             }
-            let plain = match cluster.object_plain(&c.object_id, &holders).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("remote read of {} failed: {}", id_hex(&id), e);
-                    let _ = tx.send(Err(std::io::Error::other(e))).await;
-                    return;
+            if seen.insert(c.object_id) {
+                list.push(c.object_id);
+            }
+        }
+        list
+    };
+
+    let concurrency = std::env::var("REACTOR_REMOTE_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(4usize)
+        .max(1);
+
+    let (obj_tx, mut obj_rx) =
+        tokio::sync::mpsc::channel::<(Id, Result<Arc<Vec<u8>>, String>)>(concurrency);
+    {
+        let cluster = cluster.clone();
+        let holders = holders.clone();
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut stream = futures_util::stream::iter(needed_objects.into_iter().map(|oid| {
+                let cl = cluster.clone();
+                let h = holders.clone();
+                async move {
+                    let res = cl.object_plain(&oid, &h).await;
+                    (oid, res)
+                }
+            }))
+            .buffered(concurrency);
+
+            while let Some(item) = stream.next().await {
+                let is_err = item.1.is_err();
+                if obj_tx.send(item).await.is_err() || is_err {
+                    break;
+                }
+            }
+        });
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::spawn(async move {
+        let mut pos = 0u64;
+        let mut sent = 0u64;
+        let mut active_objects: HashMap<Id, Arc<Vec<u8>>> = HashMap::new();
+
+        for c in &pm.chunks {
+            let (cs, ce) = (pos, pos + c.len as u64);
+            pos = ce;
+            if ce <= start {
+                continue;
+            }
+            if cs >= end {
+                break;
+            }
+            let plain = if let Some(p) = active_objects.get(&c.object_id) {
+                p.clone()
+            } else if let Some(p) = cluster.cached_object(&c.object_id) {
+                active_objects.insert(c.object_id, p.clone());
+                p
+            } else {
+                let mut found = None;
+                while let Some((oid, res)) = obj_rx.recv().await {
+                    match res {
+                        Ok(p) => {
+                            let is_target = oid == c.object_id;
+                            active_objects.insert(oid, p.clone());
+                            if is_target {
+                                found = Some(p);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("remote read of {} failed: {}", id_hex(&id), e);
+                            let _ = tx.send(Err(std::io::Error::other(e))).await;
+                            return;
+                        }
+                    }
+                }
+                match found {
+                    Some(p) => p,
+                    None => match cluster.object_plain(&c.object_id, &holders).await {
+                        Ok(p) => {
+                            active_objects.insert(c.object_id, p.clone());
+                            p
+                        }
+                        Err(e) => {
+                            tracing::warn!("remote read of {} failed: {}", id_hex(&id), e);
+                            let _ = tx.send(Err(std::io::Error::other(e))).await;
+                            return;
+                        }
+                    },
                 }
             };
             let (os, oe) = (

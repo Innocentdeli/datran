@@ -38,6 +38,7 @@ import {
 import { randomToken } from '@/lib/security';
 import { createProgressReporter, isValidUploadId, type ProgressReporter } from '@/lib/uploadProgress';
 import { withObservability } from '@/lib/observability/withObservability';
+import { scanBuffer } from '@/lib/security/malwareScanner';
 
 /**
  * Single-request multipart upload (web fallback, mobile app, SDK, lobby). Resumable uploads use the tus endpoint
@@ -230,6 +231,20 @@ async function handleIngest(request: Request, progress: ProgressReporter | null)
         }
 
         const meta = await parseUploadFields(parsed.fields);
+
+        // Security / Malware check for unencrypted uploads
+        const sampleBuf = file.buffered ?? file.head;
+        const scan = await scanBuffer(sampleBuf, file.filename, meta.isEncrypted === 1);
+        if (!scan.clean) {
+            await discardContent(content);
+            content = null;
+            return NextResponse.json({
+                success: false,
+                message: `Upload rejected: file was flagged by security scanning (${scan.threatName}).`,
+                code: 'MALWARE_DETECTED',
+            }, { status: 422 });
+        }
+
         const received: ReceivedFile = {
             filename: file.filename,
             mimeType: file.mimeType,
@@ -246,7 +261,7 @@ async function handleIngest(request: Request, progress: ProgressReporter | null)
             clientIp: getClientIdentifier(request),
             shareId: shareID,
         });
-        return NextResponse.json({ success: true, link: result.link, stats: result.stats });
+        return NextResponse.json({ success: true, shareId: result.shareId, link: result.link, stats: result.stats });
     } catch (e: unknown) {
         await discardContent(content);
         return uploadErrorResponse(e);

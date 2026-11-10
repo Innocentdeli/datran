@@ -23,7 +23,18 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # local env files
+.env
 .env*.local
+.env.*
+!.env.example
+
+# IDE & tooling
+.claude/
+
+# Local machine scripts
+core-reactor/.cargo/
+core-reactor/run.bat
+core-reactor/run.ps1
 
 # vercel
 .vercel

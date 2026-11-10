@@ -1145,6 +1145,13 @@ impl Cluster {
         Ok(plain)
     }
 
+    /// Checks if an object plaintext is already cached in memory.
+    pub(crate) fn cached_object(&self, object_id: &Id) -> Option<Arc<Vec<u8>>> {
+        let p = lock(&self.cache).get(object_id)?;
+        self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+        Some(p)
+    }
+
     // ---- pulls -----------------------------------------------------------------------------
 
     /// Starts a pull in the background unless one is running (gravity trigger).

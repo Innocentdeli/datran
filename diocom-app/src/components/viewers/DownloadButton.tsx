@@ -8,7 +8,7 @@ import { buttonClasses } from '@/components/ui/Button';
 import { cn, formatFileSize } from '@/lib/utils';
 
 /** Primary download action. Encrypted files are decrypted locally while they are saved. */
-export default function DownloadButton({ fileId, metadata, className }: { fileId: string; metadata?: PublicFile; className?: string }) {
+export default function DownloadButton({ fileId, metadata, recipientToken, className }: { fileId: string; metadata?: PublicFile; recipientToken?: string | null; className?: string }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const isEncrypted = metadata?.is_encrypted === 1;
@@ -22,6 +22,13 @@ export default function DownloadButton({ fileId, metadata, className }: { fileId
         try {
             // DCE2 streams through the decrypting Service Worker (or File System Access); legacy v1 decrypts in memory.
             await downloadFile(fileId, metadata);
+            if (recipientToken) {
+                fetch('/api/transfers/track', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fileId, token: recipientToken, event: 'download' }),
+                }).catch(() => undefined);
+            }
         } catch (err) {
             if (err instanceof DOMException && err.name === 'AbortError') return; // save dialog cancelled
             console.error('Download failed:', err);

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Lock, Pause, Play, RotateCcw, ShieldCheck, X, Clock } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Lock, Pause, Play, RotateCcw, ShieldCheck, X, Clock, UploadCloud, Radio, QrCode, Users } from 'lucide-react';
 import FileUploadZone from '@/components/features/FileUploadZone';
 import ShareLinkPanel from '@/components/features/ShareLinkPanel';
 import FileTypeIcon from '@/components/ui/FileTypeIcon';
@@ -338,6 +338,40 @@ export default function UploadPanel({ plans }: { plans: Record<UploadPlanLimits[
           <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> End-to-end encrypted
         </span>
       </div>
+
+      {/* Industrial Transfer Mode Switcher */}
+      {phase === 'select' && (
+        <nav aria-label="Transfer Mode" className="mb-4 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+          <div className="flex items-center justify-center gap-1.5 rounded-xl border border-primary/40 bg-primary/10 px-2.5 py-2 text-xs font-semibold text-primary shadow-sm">
+            <UploadCloud className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Cloud Link</span>
+          </div>
+          <Link
+            href="/radar"
+            title="Radar: beam files to nearby devices on Wi-Fi"
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] px-2.5 py-2 text-xs font-medium text-gray-300 transition-colors hover:border-cyan-500/40 hover:bg-cyan-500/10 hover:text-cyan-300"
+          >
+            <Radio className="h-3.5 w-3.5 text-cyan-400" aria-hidden="true" />
+            <span>Radar Beam</span>
+          </Link>
+          <Link
+            href="/pair"
+            title="QR Pair: instant handoff between computer and phone"
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] px-2.5 py-2 text-xs font-medium text-gray-300 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-300"
+          >
+            <QrCode className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span>QR Device Pair</span>
+          </Link>
+          <Link
+            href="/lobby"
+            title="Group Lobby: share with a room code"
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] px-2.5 py-2 text-xs font-medium text-gray-300 transition-colors hover:border-amber-500/40 hover:bg-amber-500/10 hover:text-amber-300"
+          >
+            <Users className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+            <span>Group Lobby</span>
+          </Link>
+        </nav>
+      )}
 
       {/* ---------- Select / options ---------- */}
       {phase === 'select' && (

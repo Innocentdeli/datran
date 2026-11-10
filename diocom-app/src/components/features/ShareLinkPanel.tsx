@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import Image from 'next/image';
 import dynamic from 'next/dynamic';
-import { Copy, Check, ExternalLink, QrCode, AtSign, Smartphone } from 'lucide-react';
+import { Copy, Check, ExternalLink, QrCode, AtSign, Smartphone, Mail } from 'lucide-react';
 import QRCodeLib from 'qrcode';
 import { cn, formatFileSize } from '@/lib/utils';
 import FileTypeIcon from '@/components/ui/FileTypeIcon';
@@ -11,6 +11,7 @@ import { buttonClasses } from '@/components/ui/Button';
 
 const UserPushModal = dynamic(() => import('./UserPushModal'), { ssr: false });
 const QRSharePanel = dynamic(() => import('./QRSharePanel'), { ssr: false });
+const EmailTransferModal = dynamic(() => import('./EmailTransferModal'), { ssr: false });
 
 export interface ShareLinkPanelProps {
   url: string;
@@ -30,11 +31,13 @@ export default function ShareLinkPanel({ url, fileName, fileSize, qrOpen = false
   const [qrData, setQrData] = useState('');
   const [showPushModal, setShowPushModal] = useState(false);
   const [showQRPair, setShowQRPair] = useState(false);
+  const [showEmailModal, setShowEmailModal] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Share id without the #key fragment.
   const shareId = url.split('#')[0].split('/').pop() || '';
+  const keyFragment = url.includes('#') ? url.split('#')[1] : undefined;
 
   useEffect(() => {
     if (!showQR || qrData) return;
@@ -107,16 +110,9 @@ export default function ShareLinkPanel({ url, fileName, fileSize, qrOpen = false
             <QrCode className="h-4 w-4" aria-hidden="true" /> {showQR ? 'Hide QR code' : 'QR code'}
           </button>
         )}
-        {showSendOptions && (
-          <>
-            <button type="button" onClick={() => setShowPushModal(true)} className={buttonClasses('secondary', 'sm')}>
-              <AtSign className="h-4 w-4" aria-hidden="true" /> Send to @user
-            </button>
-            <button type="button" onClick={() => setShowQRPair(true)} className={buttonClasses('secondary', 'sm')}>
-              <Smartphone className="h-4 w-4" aria-hidden="true" /> QR session
-            </button>
-          </>
-        )}
+        <button type="button" onClick={() => setShowEmailModal(true)} className={buttonClasses('secondary', 'sm')}>
+          <Mail className="h-4 w-4" aria-hidden="true" /> Send by email
+        </button>
       </div>
 
       {showQR && (
@@ -137,6 +133,15 @@ export default function ShareLinkPanel({ url, fileName, fileSize, qrOpen = false
         </div>
       )}
 
+      {showEmailModal && (
+        <EmailTransferModal
+          fileId={shareId}
+          fileName={fileName || 'Shared file'}
+          isOpen={showEmailModal}
+          onClose={() => setShowEmailModal(false)}
+          keyFragment={keyFragment}
+        />
+      )}
       {showPushModal && <UserPushModal shareId={shareId} onClose={() => setShowPushModal(false)} />}
       {showQRPair && <QRSharePanel shareId={shareId} onClose={() => setShowQRPair(false)} />}
     </div>

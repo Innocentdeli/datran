@@ -33,7 +33,12 @@ export interface UploadProgress {
 export interface UploadRequest {
     serverUrl: string;
     asset: DocumentPickerAsset;
+    password?: string;
+    expiresInHours?: number;
+    background?: boolean;
+    maxRetries?: number;
     onProgress?: (progress: UploadProgress) => void;
+    onStatusChange?: (status: 'uploading' | 'reconnecting' | 'resuming', attempt?: number) => void;
     signal?: AbortSignal;
 }
 
@@ -65,14 +70,19 @@ export async function authHeaders(): Promise<Record<string, string>> {
 }
 
 /**
- * Metadata fields, sent before the file part: the server streams the file as it arrives and may only let the
- * storage reactor sample content when it already knows the upload is neither client-encrypted nor protected.
- * Keep insertion order; both native multipart builders and FormData preserve it.
+ * Builds metadata fields to send before the file part.
+ * Includes password and link expiration options matching the web client.
  */
-const METADATA_FIELDS: readonly (readonly [string, string])[] = [
-    ['is_encrypted', 'false'],
-    ['password', ''],
-];
+function buildMetadataFields(req: UploadRequest): [string, string][] {
+    const fields: [string, string][] = [
+        ['is_encrypted', 'false'],
+        ['password', req.password ?? ''],
+    ];
+    if (req.expiresInHours && req.expiresInHours > 0) {
+        fields.push(['expires_in_hours', String(req.expiresInHours)]);
+    }
+    return fields;
+}
 
 const STATUS_MESSAGES: Record<number, string> = {
     401: 'This server requires sign-in for uploads. Sign in under Settings (or sign in again if your session expired).',
@@ -138,7 +148,10 @@ function safeFilename(name: string): string {
 }
 
 async function uploadNative(req: UploadRequest, url: string, headers: Record<string, string>): Promise<UploadSuccess> {
-    const { asset, signal, onProgress } = req;
+    const { asset, signal, onProgress, onStatusChange } = req;
+    const maxRetries = req.maxRetries ?? 5;
+    const sessionType = req.background !== false ? 'background' : 'foreground';
+
     // The picker copies into the cache under a random name, and the native multipart builders use the file's own
     // name as the part filename. Move (same volume, a rename) into a private folder under the original name.
     const dir = new Directory(Paths.cache, 'diocom-uploads', `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
@@ -155,24 +168,58 @@ async function uploadNative(req: UploadRequest, url: string, headers: Record<str
         if (signal?.aborted) throw new UploadCancelledError();
 
         const parameters: Record<string, string> = {};
-        for (const [key, value] of METADATA_FIELDS) parameters[key] = value;
+        for (const [key, value] of buildMetadataFields(req)) parameters[key] = value;
 
-        const result = await file.upload(url, {
-            httpMethod: 'POST',
-            uploadType: UploadType.MULTIPART,
-            fieldName: 'file',
-            mimeType: asset.mimeType ?? 'application/octet-stream',
-            parameters,
-            headers: { Accept: 'application/json', ...headers },
-            sessionType: 'foreground',
-            signal,
-            onProgress,
-        });
-        return parseIngestResponse(result.status, result.body);
-    } catch (err) {
-        if (err instanceof ApiError || err instanceof UploadCancelledError) throw err;
-        if (signal?.aborted || isAbortError(err)) throw new UploadCancelledError();
-        throw networkError(err);
+        let attempt = 0;
+        while (true) {
+            try {
+                if (attempt > 0) {
+                    onStatusChange?.('resuming', attempt);
+                } else {
+                    onStatusChange?.('uploading', 0);
+                }
+
+                const result = await file.upload(url, {
+                    httpMethod: 'POST',
+                    uploadType: UploadType.MULTIPART,
+                    fieldName: 'file',
+                    mimeType: asset.mimeType ?? 'application/octet-stream',
+                    parameters,
+                    headers: { Accept: 'application/json', ...headers },
+                    sessionType,
+                    signal,
+                    onProgress,
+                });
+                return parseIngestResponse(result.status, result.body);
+            } catch (err) {
+                if (signal?.aborted || isAbortError(err)) throw new UploadCancelledError();
+                if (err instanceof UploadCancelledError) throw err;
+                if (err instanceof ApiError && err.status && err.status >= 400 && err.status < 500 && err.status !== 408) {
+                    // Non-retryable client error (e.g. 401, 403, 413)
+                    throw err;
+                }
+
+                attempt++;
+                if (attempt > maxRetries) {
+                    if (err instanceof ApiError) throw err;
+                    throw networkError(err);
+                }
+
+                // Transient network disconnect (Wi-Fi <-> 5G switch or momentary signal drop)
+                onStatusChange?.('reconnecting', attempt);
+                const backoffMs = Math.min(1000 * Math.pow(1.6, attempt), 8000);
+                await new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(resolve, backoffMs);
+                    if (signal) {
+                        const onAbort = () => {
+                            clearTimeout(timer);
+                            reject(new UploadCancelledError());
+                        };
+                        signal.addEventListener('abort', onAbort, { once: true });
+                    }
+                });
+            }
+        }
     } finally {
         try {
             dir.delete();
@@ -190,7 +237,7 @@ function uploadWeb(req: UploadRequest, url: string, headers: Record<string, stri
             return;
         }
         const form = new FormData();
-        for (const [key, value] of METADATA_FIELDS) form.append(key, value);
+        for (const [key, value] of buildMetadataFields(req)) form.append(key, value);
         form.append('file', asset.file, asset.name);
 
         const xhr = new XMLHttpRequest();
@@ -288,3 +335,466 @@ export async function checkServer(serverUrl: string, timeoutMs = 5000): Promise<
         clearTimeout(timer);
     }
 }
+
+export interface BillingUsageSummary {
+    plan: {
+        id: 'anonymous' | 'free' | 'pro';
+        name: string;
+        maxFileBytes: number;
+        maxExpiryHours: number;
+        defaultExpiryHours: number;
+        passwordLinks: boolean;
+    };
+    usage?: {
+        storageBytes: number;
+        storageQuotaBytes: number | null;
+        uploadsThisMonth: number;
+        monthlyUploads: number | null;
+    };
+}
+
+/** Fetches current account billing summary and quotas when signed in. */
+export async function fetchBillingUsage(serverUrl: string): Promise<BillingUsageSummary | null> {
+    try {
+        const headers = await authHeaders();
+        if (!headers.Authorization) return null;
+        const res = await fetch(apiUrl(serverUrl, '/api/billing/usage'), {
+            headers: { Accept: 'application/json', ...headers },
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data as BillingUsageSummary;
+    } catch {
+        return null;
+    }
+}
+
+/* ====================================================================
+ * LIVE LOBBY CLIENT API (/lobby)
+ * ==================================================================== */
+
+export interface LobbyFileItem {
+    shareId: string;
+    name: string;
+    size: number;
+    mimeType: string | null;
+    hasPassword?: boolean;
+}
+
+export interface LobbyState {
+    status: 'waiting' | 'active' | 'transferring' | 'complete' | 'expired';
+    code: string;
+    expiresAt: number;
+    role: 'creator' | 'joiner' | null;
+    files: LobbyFileItem[];
+}
+
+export async function createLobby(serverUrl: string): Promise<{ code: string; expiresAt: number; token?: string }> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, '/api/lobby/create'), {
+        method: 'POST',
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.code) throw new ApiError(data?.error ?? 'Could not create lobby', 'LOBBY_CREATE_FAILED', res.status);
+    return data;
+}
+
+export async function joinLobby(serverUrl: string, code: string): Promise<{ status: string; token?: string }> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, `/api/lobby/${code.toUpperCase()}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ action: 'join' }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not join lobby', 'LOBBY_JOIN_FAILED', res.status);
+    return data;
+}
+
+export async function fetchLobbyState(serverUrl: string, code: string, lobbyToken?: string): Promise<LobbyState> {
+    const auth = await authHeaders();
+    const customHeaders: Record<string, string> = { Accept: 'application/json', ...auth };
+    if (lobbyToken) customHeaders['x-lobby-token'] = lobbyToken;
+
+    const res = await fetch(apiUrl(serverUrl, `/api/lobby/${code.toUpperCase()}`), {
+        headers: customHeaders,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new ApiError(data?.error ?? 'Lobby not found', 'LOBBY_GET_FAILED', res.status);
+    return {
+        status: data.status,
+        code: data.code,
+        expiresAt: Number(data.expiresAt) || 0,
+        role: data.role ?? null,
+        files: Array.isArray(data.files) ? data.files : [],
+    };
+}
+
+export async function addFilesToLobby(serverUrl: string, code: string, shareIds: string[], lobbyToken?: string): Promise<LobbyFileItem[]> {
+    const auth = await authHeaders();
+    const customHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json', ...auth };
+    if (lobbyToken) customHeaders['x-lobby-token'] = lobbyToken;
+
+    const res = await fetch(apiUrl(serverUrl, `/api/lobby/${code.toUpperCase()}`), {
+        method: 'PATCH',
+        headers: customHeaders,
+        body: JSON.stringify({ action: 'add_files', shareIds }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not drop files into lobby', 'LOBBY_ADD_FILES_FAILED', res.status);
+    return data.files || [];
+}
+
+export async function completeLobby(serverUrl: string, code: string, lobbyToken?: string): Promise<void> {
+    const auth = await authHeaders();
+    const customHeaders: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json', ...auth };
+    if (lobbyToken) customHeaders['x-lobby-token'] = lobbyToken;
+
+    await fetch(apiUrl(serverUrl, `/api/lobby/${code.toUpperCase()}`), {
+        method: 'PATCH',
+        headers: customHeaders,
+        body: JSON.stringify({ action: 'complete' }),
+    });
+}
+
+/* ====================================================================
+ * DIRECT USER INBOX CLIENT API (/inbox)
+ * ==================================================================== */
+
+export interface InboxItem {
+    id: string;
+    sender_id: string;
+    recipient_id: string;
+    file_id: string;
+    status: 'pending' | 'accepted' | 'declined';
+    message: string | null;
+    created_at: number;
+    sender_name?: string;
+    sender_username?: string;
+    sender_image?: string;
+    original_name?: string;
+    file_size?: number;
+    mime_type?: string;
+    share_id?: string;
+}
+
+export interface UserHandleResult {
+    id: string;
+    name: string;
+    username: string;
+    image?: string;
+}
+
+export async function fetchInboxTransfers(serverUrl: string): Promise<{ items: InboxItem[]; pendingCount: number }> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/inbox'), { headers: { Accept: 'application/json', ...headers } });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new ApiError(data?.error ?? 'Could not load inbox', 'INBOX_GET_FAILED', res.status);
+    return {
+        items: Array.isArray(data?.items) ? data.items : [],
+        pendingCount: Number(data?.pendingCount) || 0,
+    };
+}
+
+export async function searchHandles(serverUrl: string, query: string): Promise<UserHandleResult[]> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) return [];
+    const clean = query.replace(/^@/, '').trim();
+    if (!clean) return [];
+    const res = await fetch(apiUrl(serverUrl, `/api/inbox/send?q=${encodeURIComponent(clean)}`), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return [];
+    return Array.isArray(data?.results) ? data.results : [];
+}
+
+export async function sendFileToHandle(serverUrl: string, handle: string, shareId: string, message?: string): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Sign in to send files to users.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/inbox/send'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ handle: handle.replace(/^@/, '').trim(), shareId, message: message?.trim() || undefined }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not send file', 'INBOX_SEND_FAILED', res.status);
+}
+
+export async function respondToInboxTransfer(serverUrl: string, id: string, action: 'accept' | 'decline'): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, `/api/inbox/${id}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ action }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? `Could not ${action} transfer`, 'INBOX_UPDATE_FAILED', res.status);
+}
+
+/* ====================================================================
+ * SHARED SPACES CLIENT API (/spaces)
+ * ==================================================================== */
+
+export interface SpaceItem {
+    id: string;
+    owner_id: string;
+    name: string;
+    slug: string;
+    description: string | null;
+    is_public: number;
+    created_at: number;
+}
+
+export interface SpaceMember {
+    id: string;
+    name: string;
+    username: string;
+    image: string | null;
+    role: string;
+}
+
+export interface SpaceFile {
+    share_id: string;
+    original_name: string;
+    file_size: number;
+    mime_type: string;
+    uploader_name: string;
+    uploaded_at: number;
+    downloads?: number;
+    link?: string;
+}
+
+export async function fetchSpacesList(serverUrl: string): Promise<{ owned: SpaceItem[]; member: SpaceItem[] }> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/spaces'), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new ApiError(data?.error ?? 'Could not load spaces', 'SPACES_GET_FAILED', res.status);
+    return {
+        owned: Array.isArray(data?.owned) ? data.owned : [],
+        member: Array.isArray(data?.member) ? data.member : [],
+    };
+}
+
+export async function createNewSpace(serverUrl: string, params: { name: string; description?: string; isPublic?: boolean }): Promise<{ id: string; slug: string }> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Sign in to create a space.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/spaces'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify(params),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not create space', 'SPACES_CREATE_FAILED', res.status);
+    return data;
+}
+
+export async function fetchSpaceDetail(serverUrl: string, slug: string): Promise<{ space: SpaceItem; members: SpaceMember[]; files: SpaceFile[] }> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, `/api/spaces/${slug}`), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not load space details', 'SPACES_DETAIL_FAILED', res.status);
+    return {
+        space: data.space,
+        members: Array.isArray(data.members) ? data.members : [],
+        files: Array.isArray(data.files) ? data.files : [],
+    };
+}
+
+export async function addFileToSpace(serverUrl: string, slug: string, shareId: string): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, `/api/spaces/${slug}/files`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ shareId }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not attach file to space', 'SPACE_FILE_ADD_FAILED', res.status);
+}
+
+export async function deleteSpace(serverUrl: string, slug: string): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, `/api/spaces/${slug}`), {
+        method: 'DELETE',
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not delete space', 'SPACE_DELETE_FAILED', res.status);
+}
+
+/* ==========================================================================
+ * EMAIL DELIVERY & TRACKING API (/api/transfers/[id])
+ * ========================================================================== */
+
+export interface RecipientStatus {
+    id: string;
+    recipient_email: string;
+    status: 'sent' | 'delivered' | 'opened' | 'downloaded' | 'failed';
+    sent_at: number;
+    opened_at: number | null;
+    downloaded_at: number | null;
+}
+
+export interface DeliveryTrackingResponse {
+    success: boolean;
+    require_email_otp: boolean;
+    sender_email: string | null;
+    custom_message: string | null;
+    recipients: RecipientStatus[];
+}
+
+export async function sendTransferEmail(
+    serverUrl: string,
+    fileId: string,
+    params: {
+        recipients: string[];
+        message?: string;
+        requireOtp?: boolean;
+        link?: string;
+    }
+): Promise<{ success: boolean; sentCount: number }> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, `/api/transfers/${fileId}/email`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify(params),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not send transfer emails', 'EMAIL_SEND_FAILED', res.status);
+    return data;
+}
+
+export async function fetchDeliveryTracking(serverUrl: string, fileId: string): Promise<DeliveryTrackingResponse> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, `/api/transfers/${fileId}/tracking`), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not fetch tracking data', 'TRACKING_FAILED', res.status);
+    return data;
+}
+
+/* ==========================================================================
+ * FILE REQUESTS API (/api/requests)
+ * ========================================================================== */
+
+export interface FileRequestItem {
+    id: string;
+    title: string;
+    description: string | null;
+    slug: string;
+    destination_folder: string | null;
+    has_password: boolean;
+    is_active: boolean;
+    expires_at: number | null;
+    created_at: number;
+    upload_count: number;
+    total_bytes: number;
+}
+
+export async function fetchFileRequests(serverUrl: string): Promise<FileRequestItem[]> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/requests'), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not load file requests', 'REQUESTS_GET_FAILED', res.status);
+    return data.requests || [];
+}
+
+export async function createFileRequest(
+    serverUrl: string,
+    params: {
+        title: string;
+        description?: string;
+        customSlug?: string;
+        password?: string;
+        expiresInDays?: number;
+    }
+): Promise<FileRequestItem> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/requests'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify(params),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not create file request', 'REQUEST_CREATE_FAILED', res.status);
+    return data.request;
+}
+
+export async function toggleFileRequest(serverUrl: string, requestId: string, isActive: boolean): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/requests'), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ id: requestId, is_active: isActive }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not update file request', 'REQUEST_UPDATE_FAILED', res.status);
+}
+
+export async function deleteFileRequest(serverUrl: string, requestId: string): Promise<void> {
+    const headers = await authHeaders();
+    if (!headers.Authorization) throw new ApiError('Not signed in.', 'UNAUTHORIZED', 401);
+    const res = await fetch(apiUrl(serverUrl, '/api/requests'), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+        body: JSON.stringify({ id: requestId, action: 'delete' }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not delete file request', 'REQUEST_DELETE_FAILED', res.status);
+}
+
+/* ==========================================================================
+ * REVIEWS & COMMENTS API (/api/transfers/[id]/reviews)
+ * ========================================================================== */
+
+export interface ReviewItem {
+    id: string;
+    reviewer_name: string;
+    reviewer_email: string;
+    status: 'approved' | 'changes_requested' | 'pending';
+    decision_note: string | null;
+    updated_at: number;
+}
+
+export interface ReviewCommentItem {
+    id: string;
+    reviewer_name: string;
+    reviewer_email: string;
+    comment: string;
+    timestamp: number | null;
+    resolved: boolean;
+    created_at: number;
+}
+
+export async function fetchFileReviews(
+    serverUrl: string,
+    fileId: string
+): Promise<{ reviews: ReviewItem[]; comments: ReviewCommentItem[] }> {
+    const headers = await authHeaders();
+    const res = await fetch(apiUrl(serverUrl, `/api/transfers/${fileId}/reviews`), {
+        headers: { Accept: 'application/json', ...headers },
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) throw new ApiError(data?.error ?? 'Could not fetch reviews', 'REVIEWS_GET_FAILED', res.status);
+    return {
+        reviews: data.reviews || [],
+        comments: data.comments || [],
+    };
+}
+

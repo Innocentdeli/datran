@@ -3,21 +3,18 @@ import { randomToken } from '@/lib/security';
 import { getKV } from '@/lib/kv';
 import { getLogger, recordKvError } from '@/lib/observability';
 
+import { resolveOrigin } from '@/config';
+
 /**
  * Shared WebAuthn configuration and helpers (not a route).
  */
 
 function defaultOrigin(): string {
-    const base = process.env.NEXTAUTH_URL || 'http://localhost:3000';
-    try {
-        return new URL(base).origin;
-    } catch {
-        return 'http://localhost:3000';
-    }
+    return resolveOrigin();
 }
 
-export function getWebAuthnConfig() {
-    const origin = process.env.WEBAUTHN_ORIGIN || defaultOrigin();
+export function getWebAuthnConfig(originOverride?: string) {
+    const origin = originOverride || process.env.WEBAUTHN_ORIGIN || defaultOrigin();
     let rpID = process.env.WEBAUTHN_RP_ID;
     if (!rpID) {
         try {
@@ -26,7 +23,7 @@ export function getWebAuthnConfig() {
             rpID = 'localhost';
         }
     }
-    return { rpID, origin, rpName: process.env.WEBAUTHN_RP_NAME || 'Datran Secure Transfer' };
+    return { rpID, origin, rpName: process.env.WEBAUTHN_RP_NAME || 'Datran' };
 }
 
 // ---- Challenge storage (shared KV, single-use) ----

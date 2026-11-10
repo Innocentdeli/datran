@@ -1,10 +1,8 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth/options';
 import db from '@/db';
 import { randomUUID, randomInt } from 'crypto';
 import { enforceRateLimit } from '@/lib/rateLimit';
-import { setLobbyRoleCookie } from '../_shared';
+import { lobbyRoleToken, optionalUserId, setLobbyRoleCookie } from '../_shared';
 import { withObservability, getLogger } from '@/lib/observability';
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -22,8 +20,7 @@ async function handlePOST(request: Request) {
   if (limited) return limited;
 
   try {
-    const session = await getServerSession(authOptions);
-    const creatorId = (session?.user as { id?: string } | undefined)?.id || null;
+    const creatorId = await optionalUserId(request);
     const id = randomUUID();
     const now = Date.now();
     const expires = now + 15 * 60 * 1000; // 15 min
@@ -41,8 +38,8 @@ async function handlePOST(request: Request) {
       VALUES ($1, $2, $3, 'waiting', $4, $5)
     `, [id, code, creatorId, now, expires]);
 
-    const res = NextResponse.json({ success: true, code, expiresAt: expires });
-    // Participant secret (httpOnly cookie) — required for privileged PATCH actions
+    // Participant secret: httpOnly cookie for browsers, `token` for native clients (x-lobby-token header).
+    const res = NextResponse.json({ success: true, code, expiresAt: expires, token: lobbyRoleToken(id, 'creator') });
     setLobbyRoleCookie(res, id, 'creator');
     return res;
   } catch (e) {

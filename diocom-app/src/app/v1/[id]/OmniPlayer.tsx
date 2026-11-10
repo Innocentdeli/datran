@@ -1,7 +1,7 @@
 'use client';
 
-import { useSyncExternalStore } from 'react';
-import { Clock, Download as DownloadIcon, Lock, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { useState, useEffect, useSyncExternalStore } from 'react';
+import { Clock, Download as DownloadIcon, Lock, ShieldCheck, ShieldAlert, KeyRound } from 'lucide-react';
 import { detectFileType } from '@/lib/fileUtils';
 import { formatDurationShort, formatFileSize } from '@/lib/utils';
 import VideoPlayer from './VideoPlayer';
@@ -11,6 +11,8 @@ import PDFViewer from '@/components/viewers/PDFViewer';
 import DownloadViewer from '@/components/viewers/DownloadViewer';
 import DownloadButton from '@/components/viewers/DownloadButton';
 import FileTypeIcon, { fileTypeLabel } from '@/components/ui/FileTypeIcon';
+import OtpGate from '@/components/features/OtpGate';
+import ReviewFeedbackPanel from '@/components/features/ReviewFeedbackPanel';
 import type { PublicFile } from '@/db/files';
 
 interface OmniPlayerProps {
@@ -57,6 +59,31 @@ export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
   const fileType = detectFileType(name);
   const isEncrypted = metadata?.is_encrypted === 1;
 
+  const [otpVerified, setOtpVerified] = useState<boolean>(false);
+  const [recipientToken, setRecipientToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedToken = sessionStorage.getItem(`datran_otp_verified_${fileId}`);
+      if (savedToken) {
+        setOtpVerified(true);
+        setRecipientToken(savedToken);
+      }
+      const params = new URLSearchParams(window.location.search);
+      const urlToken = params.get('t');
+      if (urlToken) {
+        setRecipientToken(urlToken);
+        fetch('/api/transfers/track', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileId, token: urlToken, event: 'open' }),
+        }).catch(() => undefined);
+      }
+    }
+  }, [fileId]);
+
+  const isOtpRequired = metadata?.require_email_otp === 1 && !otpVerified;
+
   let preview: React.ReactNode;
   switch (fileType) {
     case 'video':
@@ -87,7 +114,14 @@ export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
             </p>
           </div>
         </div>
-        <DownloadButton fileId={fileId} metadata={metadata} className="w-full sm:w-64 sm:shrink-0" />
+        {!isOtpRequired && (
+          <DownloadButton
+            fileId={fileId}
+            metadata={metadata}
+            recipientToken={recipientToken}
+            className="w-full sm:w-64 sm:shrink-0"
+          />
+        )}
       </div>
 
       <ul className="flex flex-wrap gap-2" aria-label="File details">
@@ -95,6 +129,9 @@ export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
           <Pill tone="success"><ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> End-to-end encrypted</Pill>
         ) : (
           <Pill><ShieldAlert className="h-3.5 w-3.5" aria-hidden="true" /> Encrypted in transit (HTTPS)</Pill>
+        )}
+        {metadata?.require_email_otp === 1 && (
+          <Pill tone="warning"><KeyRound className="h-3.5 w-3.5" aria-hidden="true" /> Recipient OTP Protected</Pill>
         )}
         {metadata?.has_password ? <Pill><Lock className="h-3.5 w-3.5" aria-hidden="true" /> Password protected</Pill> : null}
         {metadata?.expires_at ? (
@@ -107,7 +144,31 @@ export default function OmniPlayer({ fileId, metadata }: OmniPlayerProps) {
         ) : null}
       </ul>
 
-      <section aria-label="Preview">{preview}</section>
+      {isOtpRequired ? (
+        <div className="py-6 border-t border-white/10 mt-2">
+          <OtpGate
+            fileId={fileId}
+            fileName={name}
+            onVerified={(token) => {
+              sessionStorage.setItem(`datran_otp_verified_${fileId}`, token);
+              setRecipientToken(token);
+              setOtpVerified(true);
+              fetch('/api/transfers/track', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fileId, token, event: 'open' }),
+              }).catch(() => undefined);
+            }}
+          />
+        </div>
+      ) : (
+        <>
+          <section aria-label="Preview">{preview}</section>
+          <div className="mt-6 border-t border-white/10 pt-6">
+            <ReviewFeedbackPanel fileId={fileId} fileName={name} fileType={fileType} />
+          </div>
+        </>
+      )}
     </article>
   );
 }

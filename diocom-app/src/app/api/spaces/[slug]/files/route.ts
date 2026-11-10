@@ -1,23 +1,25 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth/options';
+import { getRequestUser, requireRequestUser } from '@/lib/auth/requestUser';
 import db from '@/db';
 import { toPublicFile } from '@/db/files';
 import { withObservability } from '@/lib/observability';
 
 // GET /api/spaces/[slug]/files — list files in a space (private spaces: members only)
-async function handleGET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+async function handleGET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const spaceRes = await db.query('SELECT * FROM spaces WHERE slug = $1', [slug]);
   const space = spaceRes.rows[0];
   if (!space) return NextResponse.json({ error: 'Space not found' }, { status: 404 });
 
   if (!space.is_public) {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.id) return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+    let callerUser = null;
+    try {
+      callerUser = await getRequestUser(req);
+    } catch {}
+    if (!callerUser?.id) return NextResponse.json({ error: 'Access denied' }, { status: 403 });
     const memberRes = await db.query(
       'SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2',
-      [space.id, session.user.id]
+      [space.id, callerUser.id]
     );
     if (!memberRes.rows[0]) return NextResponse.json({ error: 'Access denied' }, { status: 403 });
   }
@@ -44,8 +46,8 @@ async function handleGET(_req: Request, { params }: { params: Promise<{ slug: st
 // POST /api/spaces/[slug]/files — add one of the caller's own files to a space
 async function handlePOST(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
 
   let body: { shareId?: unknown };
   try {
@@ -61,7 +63,7 @@ async function handlePOST(request: Request, { params }: { params: Promise<{ slug
   if (!space) return NextResponse.json({ error: 'Space not found' }, { status: 404 });
 
   // Check membership
-  const memberRes = await db.query('SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2', [space.id, session.user.id]);
+  const memberRes = await db.query('SELECT 1 FROM space_members WHERE space_id = $1 AND user_id = $2', [space.id, user.id]);
   const member = memberRes.rows[0];
   if (!member && !space.is_public) {
     return NextResponse.json({ error: 'Not a member of this space' }, { status: 403 });
@@ -70,7 +72,7 @@ async function handlePOST(request: Request, { params }: { params: Promise<{ slug
   // Only the file's owner may attach it to a space.
   const fileRes = await db.query('SELECT user_id FROM files WHERE share_id = $1', [shareId]);
   const file = fileRes.rows[0];
-  if (!file || file.user_id !== session.user.id) {
+  if (!file || file.user_id !== user.id) {
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
@@ -79,7 +81,7 @@ async function handlePOST(request: Request, { params }: { params: Promise<{ slug
     INSERT INTO space_files (space_id, file_id, uploaded_by, uploaded_at)
     VALUES ($1, $2, $3, $4)
     ON CONFLICT (space_id, file_id) DO UPDATE SET uploaded_at = EXCLUDED.uploaded_at, uploaded_by = EXCLUDED.uploaded_by
-  `, [space.id, shareId, session.user.id, now]);
+  `, [space.id, shareId, user.id, now]);
 
   return NextResponse.json({ success: true });
 }
@@ -87,8 +89,8 @@ async function handlePOST(request: Request, { params }: { params: Promise<{ slug
 // DELETE /api/spaces/[slug]/files — remove a file
 async function handleDELETE(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
 
   let body: { shareId?: unknown };
   try {
@@ -103,7 +105,7 @@ async function handleDELETE(request: Request, { params }: { params: Promise<{ sl
   const space = spaceRes.rows[0];
   if (!space) return NextResponse.json({ error: 'Space not found' }, { status: 404 });
 
-  await db.query('DELETE FROM space_files WHERE space_id = $1 AND file_id = $2 AND uploaded_by = $3', [space.id, shareId, session.user.id]);
+  await db.query('DELETE FROM space_files WHERE space_id = $1 AND file_id = $2 AND uploaded_by = $3', [space.id, shareId, user.id]);
   return NextResponse.json({ success: true });
 }
 

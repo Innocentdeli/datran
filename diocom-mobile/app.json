@@ -1,14 +1,15 @@
 {
   "expo": {
-    "name": "Diocom Mobile",
-    "slug": "diocom-mobile",
+    "name": "Datran",
+    "slug": "datran-mobile",
     "version": "1.0.0",
+    "scheme": "datran",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#050505",
+    "backgroundColor": "#05070A",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.diocom.mobile",
+      "bundleIdentifier": "com.datran.mobile",
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
@@ -16,7 +17,36 @@
       }
     },
     "android": {
-      "package": "com.diocom.mobile"
+      "package": "com.datran.mobile",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "datran"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        },
+        {
+          "action": "SEND",
+          "data": [
+            {
+              "mimeType": "*/*"
+            }
+          ],
+          "category": ["DEFAULT"]
+        },
+        {
+          "action": "SEND_MULTIPLE",
+          "data": [
+            {
+              "mimeType": "*/*"
+            }
+          ],
+          "category": ["DEFAULT"]
+        }
+      ]
     },
     "web": {
       "output": "single",

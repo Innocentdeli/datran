@@ -13,6 +13,10 @@ export interface HistoryItem {
     /** Epoch milliseconds. */
     uploadedAt: number;
     stats?: UploadStats;
+    /** Local on-device URI when automatically saved to document storage. */
+    localUri?: string;
+    /** Whether the file was saved directly to the device's storage. */
+    savedLocally?: boolean;
 }
 
 const STORAGE_KEY = 'diocom.history.v1';

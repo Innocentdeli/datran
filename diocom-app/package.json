@@ -2,6 +2,9 @@
   "name": "diocom-app",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "datran": "./bin/datran.js"
+  },
   "scripts": {
     "dev": "next dev",
     "dev:all": "node ../scripts/start-all.js",

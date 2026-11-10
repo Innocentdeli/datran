@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { motion } from 'framer-motion';
-import { FolderOpen, Upload, Users, Download, Globe, Lock, FileText, Image as ImageIcon, Archive, Loader2, Link, CheckCircle, LogIn } from 'lucide-react';
+import { FolderOpen, Upload, Users, Download, Globe, Lock, FileText, Image as ImageIcon, Archive, Loader2, Link, CheckCircle, LogIn, AlertCircle } from 'lucide-react';
 
 interface SpaceFile {
   share_id: string;
@@ -63,6 +63,24 @@ export default function SpacePage() {
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshSpace = async () => {
+    try {
+      const res = await fetch(`/api/spaces/${slug}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSpace(data.space);
+        setFiles(data.files);
+        setMembers(data.members);
+      }
+    } catch (err) {
+      console.error('Failed to refresh space:', err);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -80,10 +98,81 @@ export default function SpacePage() {
     })();
   }, [slug]);
 
+  const uploadFiles = async (fileList: FileList | File[]) => {
+    if (!isAuthenticated) {
+      router.push('/auth/signin');
+      return;
+    }
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) return;
+
+    setUploading(true);
+    setUploadError(null);
+
+    try {
+      for (let i = 0; i < incoming.length; i++) {
+        const file = incoming[i];
+        setUploadProgress(`Uploading ${file.name} (${i + 1}/${incoming.length})...`);
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('isEncrypted', '0');
+
+        const ingestRes = await fetch('/api/ingest', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!ingestRes.ok) {
+          const errData = await ingestRes.json().catch(() => ({}));
+          throw new Error(errData.message || `Failed to upload ${file.name}`);
+        }
+
+        const ingestData = await ingestRes.json();
+        let shareId = ingestData.shareId;
+        if (!shareId && ingestData.link) {
+          const match = ingestData.link.match(/\/v1\/([^/?#]+)/);
+          if (match) shareId = match[1];
+        }
+
+        if (!shareId) {
+          throw new Error(`Upload succeeded but received invalid share ID for ${file.name}`);
+        }
+
+        const attachRes = await fetch(`/api/spaces/${slug}/files`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shareId }),
+        });
+
+        if (!attachRes.ok) {
+          const attachData = await attachRes.json().catch(() => ({}));
+          throw new Error(attachData.error || `Failed to link ${file.name} to this space`);
+        }
+      }
+
+      setUploadProgress('Files uploaded successfully!');
+      await refreshSpace();
+      setTimeout(() => setUploadProgress(null), 3000);
+    } catch (err) {
+      setUploadError((err as Error)?.message || 'An error occurred during upload.');
+    } finally {
+      setUploading(false);
+      setIsDragging(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const handleDrop = async (e: React.DragEvent) => {
-    if (!isAuthenticated) return;
     e.preventDefault();
-    // Uploading straight into a space is not implemented yet (files are added via POST /api/spaces/[slug]/files).
+    setIsDragging(false);
+    if (!isAuthenticated) {
+      router.push('/auth/signin');
+      return;
+    }
+    if (e.dataTransfer?.files?.length) {
+      await uploadFiles(e.dataTransfer.files);
+    }
   };
 
   const copySpaceLink = () => {
@@ -170,21 +259,57 @@ export default function SpacePage() {
         <div className="grid grid-cols-3 gap-6">
           {/* Main: Drop Zone + Files */}
           <div className="col-span-2 space-y-5">
+            {/* Hidden File Input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) uploadFiles(e.target.files);
+              }}
+            />
+
             {/* Drop Zone */}
             <motion.div
+              onClick={() => !uploading && fileInputRef.current?.click()}
               onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              animate={{ borderColor: isDragging ? 'rgba(139, 92, 246, 0.6)' : 'rgba(255,255,255,0.08)' }}
-              className="relative rounded-2xl border-2 border-dashed bg-white/2 transition-colors"
+              animate={{ borderColor: isDragging ? 'rgba(139, 92, 246, 0.8)' : 'rgba(255,255,255,0.08)' }}
+              className={`relative rounded-2xl border-2 border-dashed bg-white/2 transition-all cursor-pointer group hover:border-violet-500/40 p-8 ${
+                isDragging ? 'bg-violet-500/10' : ''
+              }`}
             >
-              <div className="flex flex-col items-center justify-center py-10 gap-2 pointer-events-none">
-                <Upload size={28} className={isDragging ? 'text-violet-400' : 'text-slate-600'} />
-                <p className="text-sm text-slate-500">
-                  {isDragging ? 'Drop to add to space' : 'Drag & drop files here to share with the space'}
-                </p>
+              <div className="flex flex-col items-center justify-center gap-2 pointer-events-none text-center">
+                {uploading ? (
+                  <>
+                    <Loader2 size={32} className="text-violet-400 animate-spin" />
+                    <p className="text-sm font-medium text-white">{uploadProgress || 'Uploading...'}</p>
+                    <p className="text-xs text-slate-500">Processing bytes through ingest pipeline</p>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-12 h-12 rounded-xl bg-violet-500/10 flex items-center justify-center mb-1 group-hover:scale-105 transition-transform">
+                      <Upload size={24} className={isDragging ? 'text-violet-300' : 'text-violet-400'} />
+                    </div>
+                    <p className="text-sm font-semibold text-white">
+                      {isDragging ? 'Drop files to upload immediately' : 'Drop files here or click to browse'}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Files are shared instantly with members of this Space
+                    </p>
+                  </>
+                )}
               </div>
             </motion.div>
+
+            {uploadError && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-xs text-red-300">
+                <AlertCircle size={16} className="shrink-0 text-red-400" />
+                <span>{uploadError}</span>
+              </div>
+            )}
 
             {/* Files List */}
             <div className="bg-[#0d1424] border border-white/8 rounded-2xl overflow-hidden">

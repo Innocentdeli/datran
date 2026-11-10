@@ -3,7 +3,7 @@
 import { signOut, useSession } from 'next-auth/react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { LogIn, LogOut, User, LayoutGrid, Shield } from 'lucide-react';
+import { LogIn, LogOut, User, LayoutGrid, Shield, Palette, KeyRound } from 'lucide-react';
 import { buttonClasses } from '@/components/ui/Button';
 
 export default function AuthStatus() {
@@ -24,17 +24,37 @@ export default function AuthStatus() {
                     className="flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium text-gray-300 transition-colors hover:bg-white/5 hover:text-white sm:px-3"
                 >
                     <LayoutGrid className="h-4 w-4" aria-hidden="true" />
-                    <span className="hidden lg:inline">My transfers</span>
+                    <span className="hidden lg:inline">Transfers</span>
+                </Link>
+
+                <Link
+                    href="/dashboard/branding"
+                    aria-label="Custom Branding"
+                    title="Custom Branding"
+                    className="flex h-10 items-center gap-1.5 rounded-xl px-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/5 hover:text-white sm:px-2.5"
+                >
+                    <Palette className="h-4 w-4 text-purple-400" aria-hidden="true" />
+                    <span className="hidden xl:inline">Branding</span>
+                </Link>
+
+                <Link
+                    href="/dashboard/api-keys"
+                    aria-label="API Keys"
+                    title="API Keys"
+                    className="flex h-10 items-center gap-1.5 rounded-xl px-2 text-sm font-medium text-gray-300 transition-colors hover:bg-white/5 hover:text-white sm:px-2.5"
+                >
+                    <KeyRound className="h-4 w-4 text-amber-400" aria-hidden="true" />
+                    <span className="hidden xl:inline">API</span>
                 </Link>
 
                 {isAdmin && (
                     <Link
                         href="/admin"
                         aria-label="Admin"
-                        className="flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-sm font-medium text-red-300 transition-colors hover:bg-white/5 sm:px-3"
+                        className="flex h-10 items-center gap-1.5 rounded-xl px-2 text-sm font-medium text-red-300 transition-colors hover:bg-white/5 sm:px-2.5"
                     >
                         <Shield className="h-4 w-4" aria-hidden="true" />
-                        <span className="hidden lg:inline">Admin</span>
+                        <span className="hidden xl:inline">Admin</span>
                     </Link>
                 )}
 

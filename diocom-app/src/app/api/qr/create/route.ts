@@ -6,6 +6,8 @@ import { randomUUID } from 'crypto';
 import { enforceRateLimit } from '@/lib/rateLimit';
 import { withObservability, getLogger } from '@/lib/observability';
 
+import { resolveOrigin } from '@/config';
+
 const SHARE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_FILES = 20;
 
@@ -32,10 +34,12 @@ async function handlePOST(request: Request) {
       VALUES ($1, $2, 'waiting', $3, $4, $5)
     `, [id, (session?.user as { id?: string } | undefined)?.id || null, JSON.stringify(fileIds), now, expires]);
 
+    const origin = resolveOrigin(request);
+
     return NextResponse.json({
       success: true,
       sessionId: id,
-      pairUrl: `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/pair/${id}`,
+      pairUrl: `${origin}/pair/${id}`,
       expiresAt: expires
     });
   } catch (e) {

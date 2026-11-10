@@ -4,8 +4,8 @@
 export const config = {
     // Server Configuration
     server: {
-        url: process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
-        port: process.env.PORT || 3000,
+        url: process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || process.env.NEXTAUTH_URL || `http://localhost:${process.env.PORT || 3001}`,
+        port: parseInt(process.env.PORT || '3001', 10),
     },
 
     // File Storage Configuration
@@ -50,23 +50,80 @@ export const config = {
 } as const;
 
 /**
- * Public origin for absolute links: APP_URL / NEXTAUTH_URL when configured, else `requestOrigin`. Next.js builds
- * `request.url` from its own bind address (http://localhost:<port>), never from the Host header, so the request
- * origin is only right when the browser talks to the server directly.
+ * Resolves the absolute public origin dynamically.
+ * Prioritizes:
+ * 1. Explicitly configured APP_URL / NEXT_PUBLIC_APP_URL / NEXTAUTH_URL.
+ * 2. Incoming request headers (x-forwarded-proto, x-forwarded-host, host) or request.url / nextUrl.
+ * 3. Client-side window.location.origin (in browser).
+ * 4. Fallback http://localhost:${PORT || 3001}.
  */
-export function publicOrigin(requestOrigin?: string): string | undefined {
-    const configured = process.env.APP_URL || process.env.NEXTAUTH_URL;
+export function resolveOrigin(req?: Request | Headers | { headers?: Headers | Record<string, string | string[] | undefined>; url?: string; nextUrl?: { origin?: string } } | string | null): string {
+    const configured = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL;
     if (configured) {
         try {
             return new URL(configured).origin;
         } catch { /* invalid: fall through */ }
     }
-    return requestOrigin;
+
+    if (typeof req === 'string' && req) {
+        try {
+            return new URL(req).origin;
+        } catch { /* ignore */ }
+    }
+
+    if (req && typeof req === 'object') {
+        let headers: Headers | null = null;
+        if ('headers' in req && req.headers) {
+            if (req.headers instanceof Headers) {
+                headers = req.headers;
+            } else if (typeof req.headers === 'object') {
+                headers = new Headers();
+                for (const [k, v] of Object.entries(req.headers)) {
+                    if (typeof v === 'string') headers.set(k, v);
+                    else if (Array.isArray(v) && v.length) headers.set(k, v.join(','));
+                }
+            }
+        } else if (req instanceof Headers) {
+            headers = req;
+        }
+
+        if (headers) {
+            const host = headers.get('x-forwarded-host') || headers.get('host');
+            if (host) {
+                const proto = headers.get('x-forwarded-proto') ||
+                    (headers.get('x-forwarded-ssl') === 'on' ? 'https' : 'http');
+                return `${proto}://${host.split(',')[0].trim()}`;
+            }
+        }
+
+        if ('nextUrl' in req && req.nextUrl?.origin) {
+            return req.nextUrl.origin;
+        }
+
+        if ('url' in req && typeof req.url === 'string') {
+            try {
+                return new URL(req.url).origin;
+            } catch { /* ignore */ }
+        }
+    }
+
+    if (typeof window !== 'undefined' && window.location?.origin) {
+        return window.location.origin;
+    }
+
+    return `http://localhost:${process.env.PORT || 3001}`;
+}
+
+/**
+ * Public origin for absolute links: APP_URL / NEXTAUTH_URL when configured, else `requestOrigin`.
+ */
+export function publicOrigin(requestOrigin?: string): string | undefined {
+    return resolveOrigin(requestOrigin);
 }
 
 // Helper to get base URL for share links
 export function getShareLinkUrl(shareId: string, baseUrl?: string): string {
-    return `${publicOrigin(baseUrl) || config.server.url}/v1/${shareId}`;
+    return `${resolveOrigin(baseUrl)}/v1/${shareId}`;
 }
 
 // Helper to get storage path

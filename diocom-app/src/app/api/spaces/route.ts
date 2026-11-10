@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth';
-import { authOptions } from '@/lib/auth/options';
+import { requireRequestUser } from '@/lib/auth/requestUser';
 import db from '@/db';
 import { randomUUID } from 'crypto';
 import { withObservability } from '@/lib/observability';
@@ -11,25 +10,25 @@ function slugify(name: string) {
 }
 
 // GET /api/spaces — list user spaces
-async function handleGET() {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+async function handleGET(request: Request) {
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
 
-  const ownedRes = await db.query(`SELECT * FROM spaces WHERE owner_id = $1 ORDER BY created_at DESC`, [session.user.id]);
+  const ownedRes = await db.query(`SELECT * FROM spaces WHERE owner_id = $1 ORDER BY created_at DESC`, [user.id]);
   const memberRes = await db.query(`
     SELECT s.* FROM spaces s
     JOIN space_members sm ON sm.space_id = s.id
     WHERE sm.user_id = $1 AND s.owner_id != $2
     ORDER BY s.created_at DESC
-  `, [session.user.id, session.user.id]);
+  `, [user.id, user.id]);
 
   return NextResponse.json({ success: true, owned: ownedRes.rows, member: memberRes.rows });
 }
 
 // POST /api/spaces — create a space
 async function handlePOST(request: Request) {
-  const session = await getServerSession(authOptions);
-  if (!session?.user?.id) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const user = await requireRequestUser(request);
+  if (user instanceof NextResponse) return user;
 
   const { name, description, isPublic } = await request.json();
   if (!name?.trim()) return NextResponse.json({ error: 'Name required' }, { status: 400 });
@@ -41,10 +40,10 @@ async function handlePOST(request: Request) {
   await db.query(`
     INSERT INTO spaces (id, owner_id, name, slug, description, is_public, created_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7)
-  `, [id, session.user.id, name.trim(), slug, description || null, isPublic ? 1 : 0, now]);
+  `, [id, user.id, name.trim(), slug, description || null, isPublic ? 1 : 0, now]);
 
   // Auto-add creator as owner member
-  await db.query(`INSERT INTO space_members (space_id, user_id, role, joined_at) VALUES ($1, $2, 'owner', $3)`, [id, session.user.id, now]);
+  await db.query(`INSERT INTO space_members (space_id, user_id, role, joined_at) VALUES ($1, $2, 'owner', $3)`, [id, user.id, now]);
 
   return NextResponse.json({ success: true, id, slug });
 }
